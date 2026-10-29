@@ -1,0 +1,227 @@
+---
+import '@fontsource/ibm-plex-sans/latin-400.css';
+import '@fontsource/ibm-plex-sans/latin-500.css';
+import '@fontsource/ibm-plex-sans/latin-600.css';
+import Icon from '../components/Icon.astro';
+import '../styles/global.css';
+---
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="L.E.O — LLM Efficiency Orchestrator. A simple space for your next conversation." />
+    <meta name="theme-color" content="#151515" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>L.E.O</title>
+    <script is:inline>
+      try { document.documentElement.dataset.theme = localStorage.getItem('leo-theme') === 'light' ? 'light' : 'dark'; } catch {}
+    </script>
+  </head>
+  <body class="sidebar-collapsed">
+    <div class="ambient-background" aria-hidden="true"></div>
+    <a class="skip-link" href="#prompt">Skip to message</a>
+    <button class="sidebar-scrim" id="sidebar-scrim" aria-label="Close conversations" tabindex="-1"></button>
+    <aside class="sidebar" id="sidebar" aria-label="Conversations" inert>
+      <div class="sidebar-heading">
+        <h2>Conversations</h2>
+        <button class="icon-button" id="collapse-sidebar" title="Close conversations" aria-label="Close conversations"><Icon name="close" size={18} /></button>
+      </div>
+      <nav class="primary-nav" aria-label="Conversation actions">
+        <button class="nav-button" id="new-chat"><Icon name="plus" size={17} /><span>New chat</span></button>
+        <button class="nav-button" id="search-chats"><Icon name="search" size={17} /><span>Search</span></button>
+      </nav>
+      <section class="history-section" aria-label="Recent conversations">
+        <div id="history-list" class="history-list"></div>
+        <p class="history-empty" id="history-empty">No conversations yet.</p>
+      </section>
+    </aside>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="header-left">
+          <button id="open-sidebar" class="icon-button" title="Conversations" aria-label="Open conversations" aria-expanded="false" aria-controls="sidebar"><Icon name="panel" size={18} /></button>
+          <a class="brand" href="/" aria-label="L.E.O home">L.E.O</a>
+          <span id="conversation-title" class="conversation-title"></span>
+        </div>
+        <div class="header-actions">
+          <button class="icon-button" id="header-new-chat" title="New chat" aria-label="New chat"><Icon name="plus" size={19} /></button>
+          <button class="settings-button" id="toggle-usage" title="Token and context usage for this chat" aria-controls="usage-panel" aria-expanded="false"><Icon name="chart" size={17} /><span>Usage</span></button>
+          <button class="settings-button" id="open-settings" aria-haspopup="dialog"><Icon name="settings" size={17} /><span>Settings</span></button>
+        </div>
+      </header>
+      <main id="main">
+        <section class="welcome" id="welcome" aria-labelledby="welcome-heading">
+          <h1 id="welcome-heading">What’s on your mind?</h1>
+          <p class="welcome-caption">Your models. One thoughtful answer.</p>
+          <button class="setup-link" id="connect-models">Connect your first model <span aria-hidden="true">↗</span></button>
+        </section>
+        <section class="messages" id="messages" aria-label="Conversation" aria-live="polite" aria-relevant="additions" hidden></section>
+        <section class="run-panel" id="run-panel" aria-label="Run progress" hidden>
+          <div class="run-heading"><span class="status-dot" id="status-dot"></span><span id="run-status" role="status">Ready</span><button class="secondary-button" id="stop-run" hidden>Stop</button></div>
+          <div class="usage-line" id="run-usage"></div>
+          <details><summary>Run activity</summary><ol id="run-events"></ol></details>
+        </section>
+        <div class="composer-area" id="composer-area">
+          <div class="composer-toolbar">
+            <label for="composer-mode" class="sr-only">Orchestration mode</label>
+            <select id="composer-mode" title="Orchestration mode"><option value="auto">Auto · L.E.O. decides</option><option value="quick">Quick · one answer</option><option value="reviewed">Reviewed · generate + review</option><option value="deep">Deep · plan + review</option></select>
+            <button type="button" id="context-meter" class="context-meter" title="Context used by the latest call in this conversation" aria-controls="usage-panel" hidden><span class="meter"><span></span></span><span id="context-text"></span></button>
+            <span id="connection-status">Connecting…</span>
+          </div>
+          <form class="composer" id="chat-form">
+            <label class="sr-only" for="prompt">Your message to L.E.O</label>
+            <textarea id="prompt" name="prompt" placeholder="Message L.E.O…" rows="1" maxlength="12000"></textarea>
+            <button class="send-button" id="send-button" type="submit" aria-label="Send message" title="Send message" disabled><Icon name="arrow" size={18} /><span class="stop-square" hidden></span></button>
+          </form>
+          <p class="composer-note" id="composer-note">Connect a local model or API in Settings.</p>
+        </div>
+      </main>
+    </div>
+    <aside class="usage-panel" id="usage-panel" aria-labelledby="usage-panel-heading" hidden>
+      <div class="sidebar-heading">
+        <h2 id="usage-panel-heading">This chat</h2>
+        <button class="icon-button" id="close-usage" title="Close usage" aria-label="Close usage"><Icon name="close" size={18} /></button>
+      </div>
+      <p class="field-hint" id="usage-panel-empty">Start or open a conversation to see its token and context usage.</p>
+      <div id="usage-panel-body" class="panel-body" hidden></div>
+      <a class="setup-link panel-link" href="/usage/">Usage across all chats</a>
+    </aside>
+    <aside class="canvas-panel" id="canvas-panel" aria-labelledby="canvas-title" hidden>
+      <div class="canvas-bar">
+        <strong id="canvas-title">Preview</strong>
+        <div class="canvas-tabs" role="tablist" aria-label="Canvas view">
+          <button role="tab" id="canvas-tab-preview" aria-selected="true" aria-controls="canvas-frame">Preview</button>
+          <button role="tab" id="canvas-tab-code" aria-selected="false" aria-controls="canvas-code">Code</button>
+        </div>
+        <div class="canvas-actions">
+          <button class="icon-button" id="canvas-reload" title="Run again" aria-label="Run the page again"><Icon name="refresh" size={16} /></button>
+          <button class="icon-button" id="canvas-open" title="Open in a new tab" aria-label="Open in a new tab"><Icon name="diagonal" size={16} /></button>
+          <button class="icon-button" id="canvas-download" title="Download .html" aria-label="Download HTML file"><Icon name="down" size={16} /></button>
+          <button class="icon-button" id="canvas-close" title="Close preview" aria-label="Close preview"><Icon name="close" size={17} /></button>
+        </div>
+      </div>
+      <p class="canvas-status" id="canvas-status" role="status"></p>
+      <iframe id="canvas-frame" title="Generated page preview" sandbox="allow-scripts allow-forms allow-modals" referrerpolicy="no-referrer"></iframe>
+      <pre id="canvas-code" class="canvas-code" hidden><code></code></pre>
+    </aside>
+    <dialog id="search-dialog" class="dialog search-dialog" aria-labelledby="search-heading">
+      <div class="dialog-heading"><h2 id="search-heading">Search conversations</h2><button class="icon-button" data-close-dialog aria-label="Close search"><Icon name="close" size={18} /></button></div>
+      <label class="search-field"><Icon name="search" size={17} /><input id="search-input" type="search" aria-label="Search conversations" placeholder="Search…" autocomplete="off" /></label>
+      <div id="search-results" class="search-results"></div>
+    </dialog>
+    <dialog id="settings-dialog" class="dialog settings-dialog" aria-labelledby="settings-heading">
+      <div class="dialog-heading"><h2 id="settings-heading">Settings</h2><button class="icon-button" data-close-dialog aria-label="Close settings"><Icon name="close" size={18} /></button></div>
+      <div class="settings-row">
+        <label for="theme-select">Appearance</label>
+        <select id="theme-select"><option value="dark">Dark</option><option value="light">Light</option></select>
+      </div>
+      <section class="settings-section" aria-labelledby="connections-heading">
+        <div class="section-heading"><h3 id="connections-heading">Model connections</h3><button class="secondary-button" id="add-connection">Add model</button></div>
+        <p class="field-hint">Connect local servers or provider APIs. Add each model separately to give it a role.</p>
+        <div id="provider-list" class="provider-list"></div>
+        <form id="provider-form" class="provider-form" hidden>
+          <input id="provider-id" type="hidden" />
+          <div class="field-grid">
+            <label>Provider<select id="provider-preset"></select></label>
+            <label>Connection name<input id="provider-name" maxlength="80" required placeholder="My coding model" /></label>
+          </div>
+          <p class="field-hint" id="provider-hint"></p>
+          <label>API base URL<input id="provider-url" type="url" required placeholder="http://localhost:11434/v1" /></label>
+          <div class="field-grid">
+            <label>Protocol<select id="provider-protocol"><option value="openai">Chat Completions</option><option value="responses">OpenAI Responses</option><option value="anthropic">Anthropic Messages</option></select></label>
+            <label>Model ID<input id="provider-model" list="model-catalog" required placeholder="Exact model name" maxlength="160" /></label>
+          </div>
+          <datalist id="model-catalog"></datalist>
+          <label>API key<input id="provider-key" type="password" autocomplete="new-password" placeholder="Optional for local servers" /></label>
+          <label class="check-label"><input id="provider-clear-key" type="checkbox" /> Remove saved API key</label>
+          <div class="field-grid">
+            <label>Context window<input id="provider-context" type="number" value="32768" min="1024" max="2000000" required /></label>
+            <label>Priority <span class="field-hint">Lower goes first</span><input id="provider-priority" type="number" value="10" min="0" max="100" required /></label>
+          </div>
+          <div class="field-grid">
+            <label>Strength<select id="provider-tier"><option value="light">Light · small or fast model</option><option value="standard">Standard</option><option value="strong">Strong · top model</option></select></label>
+            <label class="check-label inline-check"><input id="provider-reasoning" type="checkbox" /> Reasoning model (spends hidden thinking tokens)</label>
+          </div>
+          <fieldset class="skill-picker"><legend>Skills</legend><p class="field-hint">What this model is good at. The router sends matching tasks here; a model with no skills is a generalist.</p><div id="provider-skills" class="skill-options"></div></fieldset>
+          <div class="check-row">
+            <label class="check-label"><input id="provider-local" type="checkbox" /> Local server</label>
+            <label class="check-label"><input id="provider-free" type="checkbox" /> No API charge</label>
+            <label class="check-label"><input id="provider-enabled" type="checkbox" checked /> Enabled</label>
+          </div>
+          <p class="field-hint">Only mark “No API charge” for local inference or a verified free endpoint. This does not change the provider’s billing.</p>
+          <div class="field-grid">
+            <label>Input price / 1M tokens ($)<input id="provider-input-price" type="number" step="any" min="0" max="10000" placeholder="Required for paid models" /></label>
+            <label>Output price / 1M tokens ($)<input id="provider-output-price" type="number" step="any" min="0" max="10000" placeholder="Required for paid models" /></label>
+          </div>
+          <label>Chat Completions output parameter<select id="provider-token-param"><option value="max_tokens">max_tokens (most servers)</option><option value="max_completion_tokens">max_completion_tokens (newer OpenAI models)</option></select></label>
+          <p class="form-feedback" id="provider-feedback" role="status"></p>
+          <div class="form-actions"><button type="button" class="secondary-button" id="cancel-provider">Cancel</button><button type="submit" class="primary-button">Save connection</button></div>
+        </form>
+      </section>
+      <section class="settings-section" aria-labelledby="skills-heading">
+        <div class="section-heading"><h3 id="skills-heading">Skills</h3><button class="secondary-button" id="add-skill">Add skill</button></div>
+        <p class="field-hint">The router matches each task to a skill by its keywords, sends it to a model with that skill, and adds the skill's instructions to the prompt.</p>
+        <div id="skill-list" class="provider-list"></div>
+        <form id="skill-form" class="provider-form" hidden>
+          <input id="skill-id" type="hidden" />
+          <div class="field-grid">
+            <label>Name<input id="skill-name" maxlength="60" required placeholder="Data analysis" /></label>
+            <label>Description<input id="skill-description" maxlength="300" placeholder="What tasks belong here" /></label>
+          </div>
+          <label>Keywords <span class="field-hint">Comma separated; matched as whole words</span><input id="skill-keywords" placeholder="pandas, dataframe, chart" /></label>
+          <label>Instructions <span class="field-hint">Added to the prompt for tasks with this skill</span><textarea id="skill-instructions" rows="3" maxlength="4000"></textarea></label>
+          <label class="check-label"><input id="skill-enabled" type="checkbox" checked /> Enabled</label>
+          <p class="form-feedback" id="skill-feedback" role="status"></p>
+          <div class="form-actions"><button type="button" class="secondary-button" id="cancel-skill">Cancel</button><button type="submit" class="primary-button">Save skill</button></div>
+        </form>
+      </section>
+      <form id="orchestration-form" class="settings-section">
+        <h3>Orchestration</h3>
+        <div class="field-grid">
+          <label>Generator<select id="generator-id"></select></label>
+          <label>Reviewer<select id="reviewer-id"></select></label>
+          <label>Planner<select id="planner-id"></select></label>
+          <label>Fallback order<select id="routing"><option value="local_first">Local first</option><option value="free_first">Free first</option><option value="priority">Priority order</option></select></label>
+        </div>
+        <label class="check-label"><input id="smart-routing" type="checkbox" /> Smart routing: pick the generator for each task by skill and difficulty</label>
+        <p class="field-hint">With smart routing, the generator assignment is ignored and each task goes to the cheapest model with the right skill and strength. Planner and reviewer assignments still apply. On failure, L.E.O. tries the next eligible connection.</p>
+        <label>Default mode<select id="mode-select"><option value="auto">Auto · L.E.O. decides</option><option value="quick">Quick</option><option value="reviewed">Reviewed</option><option value="deep">Deep</option></select></label>
+        <label class="check-label"><input id="allow-paid" type="checkbox" /> Allow paid API usage within the run limit</label>
+        <div class="field-grid">
+          <label>Max estimated cost / run ($)<input id="max-cost" type="number" min="0.001" max="100" step="any" required /></label>
+          <label>Max model calls / run<input id="max-calls" type="number" min="1" max="20" required /></label>
+          <label>Max repair rounds<input id="max-repairs" type="number" min="0" max="3" required /></label>
+          <label>Max output tokens / call<input id="max-output-tokens" type="number" min="128" max="16384" required /></label>
+          <label>Context tokens / call<input id="context-tokens" type="number" min="1024" max="128000" required /></label>
+          <label>Total token allowance / run<input id="token-budget" type="number" min="2048" max="1000000" required /></label>
+          <label>Provider timeout (seconds)<input id="timeout-seconds" type="number" min="10" max="600" required /></label>
+          <label>Run time limit (seconds)<input id="max-run-seconds" type="number" min="30" max="3600" required /></label>
+        </div>
+        <p class="field-hint">Cost estimates use your configured prices. Failed calls retain their allowance because the provider may have charged for them.</p>
+        <label>Assistant instructions<textarea id="system-prompt" rows="3" maxlength="4000"></textarea></label>
+        <p class="form-feedback" id="settings-feedback" role="status"></p>
+        <div class="form-actions"><button type="submit" class="primary-button">Save orchestration</button></div>
+      </form>
+      <div class="settings-row"><span>Conversation history <small>Saved on your L.E.O. server</small></span><button class="secondary-button" id="clear-history">Clear</button></div>
+      <div id="clear-confirmation" class="clear-confirmation" hidden>
+        <p>Delete all conversations? This cannot be undone.</p>
+        <div><button class="secondary-button" id="cancel-clear">Cancel</button><button class="secondary-button danger" id="confirm-clear">Delete all</button></div>
+      </div>
+      <details class="shortcuts">
+        <summary>Keyboard shortcuts<Icon name="down" size={15} /></summary>
+        <div class="shortcut-row"><span>New chat</span><kbd>⌘ / Ctrl + K</kbd></div>
+        <div class="shortcut-row"><span>Search conversations</span><kbd>⌘ / Ctrl + /</kbd></div>
+        <div class="shortcut-row"><span>Send message</span><kbd>Enter</kbd></div>
+        <div class="shortcut-row"><span>New line</span><kbd>Shift + Enter</kbd></div>
+      </details>
+      <div class="settings-about"><strong>L.E.O</strong><span>LLM Efficiency Orchestrator</span><p>Provider keys are encrypted on your server. Messages are sent to the models you enable. Chat subscriptions and API access are separate.</p></div>
+    </dialog>
+    <dialog id="login-dialog" class="dialog" aria-labelledby="login-heading">
+      <h2 id="login-heading">Connect to your server</h2>
+      <p class="field-hint">This server requires an access token.</p>
+      <form id="login-form"><label>Server access token<input id="access-token" type="password" required autocomplete="current-password" /></label><p id="login-feedback" class="form-feedback" role="status"></p><div class="form-actions"><button type="submit" class="primary-button">Connect</button></div></form>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <script src="../scripts/chat.ts"></script>
+  </body>
+</html>

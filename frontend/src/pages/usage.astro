@@ -1,0 +1,63 @@
+---
+import '@fontsource/ibm-plex-sans/latin-400.css';
+import '@fontsource/ibm-plex-sans/latin-500.css';
+import '@fontsource/ibm-plex-sans/latin-600.css';
+import Icon from '../components/Icon.astro';
+import '../styles/global.css';
+---
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Token, context, and model routing usage for L.E.O." />
+    <meta name="theme-color" content="#151515" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>Usage — L.E.O</title>
+    <script is:inline>
+      try { document.documentElement.dataset.theme = localStorage.getItem('leo-theme') === 'light' ? 'light' : 'dark'; } catch {}
+    </script>
+  </head>
+  <body class="usage-page">
+    <header class="topbar">
+      <div class="header-left">
+        <a class="icon-button" href="/" title="Back to chat" aria-label="Back to chat"><Icon name="back" size={18} /></a>
+        <a class="brand" href="/" aria-label="L.E.O home">L.E.O</a>
+        <span class="conversation-title">Usage</span>
+      </div>
+      <div class="header-actions">
+        <span class="usage-updated" id="usage-updated" role="status"></span>
+        <button class="icon-button" id="usage-refresh" title="Refresh" aria-label="Refresh usage"><Icon name="refresh" size={17} /></button>
+      </div>
+    </header>
+    <main class="usage-main">
+      <section class="usage-tiles" id="usage-tiles" aria-label="Totals"></section>
+      <section class="usage-overview" id="usage-overview" aria-label="Breakdowns"></section>
+      <p class="field-hint">Tokens are provider-reported where available (<span class="estimate-mark">~</span> marks estimates). Failed and interrupted calls are listed as uncertain: their reserved allowance counts because the provider may have billed them. Costs use your configured prices.</p>
+
+      <section class="usage-section" aria-labelledby="models-heading">
+        <h2 id="models-heading">Models</h2>
+        <div class="table-wrap"><table class="usage-table">
+          <thead><tr><th>Model</th><th>Roles</th><th>Share of tokens</th><th class="num">Success</th><th class="num">Input</th><th class="num">Output</th><th class="num">Avg latency</th><th class="num">Cost</th></tr></thead>
+          <tbody id="models-body"></tbody>
+        </table></div>
+      </section>
+
+      <section class="usage-section" aria-labelledby="context-heading">
+        <h2 id="context-heading">Context by conversation</h2>
+        <p class="field-hint">Each chat's level comes from its latest completed call (input + output) against the context allowance: the lower of the model window and Settings → Context tokens. Comfortable is under 50%, Moderate 50–69%, High 70–89%, Near limit 90% and above, where older turns are trimmed.</p>
+        <div id="context-list" class="context-list"></div>
+      </section>
+
+      <section class="usage-section" aria-labelledby="calls-heading">
+        <h2 id="calls-heading">Recent calls <small>routing and fallback, newest first</small></h2>
+        <div class="table-wrap"><table class="usage-table">
+          <thead><tr><th>Time</th><th>Conversation</th><th>Stage</th><th>Model</th><th>Status</th><th class="num">In / Out</th><th class="num">Latency</th></tr></thead>
+          <tbody id="calls-body"></tbody>
+        </table></div>
+      </section>
+    </main>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <script src="../scripts/usage.ts"></script>
+  </body>
+</html>

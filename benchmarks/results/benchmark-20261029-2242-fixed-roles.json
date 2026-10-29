@@ -1,0 +1,255 @@
+{
+  "meta": {
+    "started": "2026-10-29 22:42",
+    "cheap": "nvidia/nemotron-3.5-lightning:free",
+    "strong": "gemini-2.5-flash",
+    "roles": "generator=nvidia/nemotron-3.5-lightning:free, planner=gemini-2.5-flash, reviewer=gemini-2.5-flash",
+    "max_output_tokens": 8192,
+    "max_repairs": 1
+  },
+  "results": [
+    {
+      "task": "roman",
+      "arm": "single-cheap",
+      "passed": true,
+      "tokens": 6139,
+      "calls": 1,
+      "seconds": 74.1,
+      "detail": ""
+    },
+    {
+      "task": "roman",
+      "arm": "single-strong",
+      "passed": true,
+      "tokens": 1609,
+      "calls": 1,
+      "seconds": 33.0,
+      "detail": ""
+    },
+    {
+      "task": "roman",
+      "arm": "leo-quick",
+      "passed": true,
+      "tokens": 5734,
+      "calls": 1,
+      "seconds": 68.3,
+      "detail": ""
+    },
+    {
+      "task": "roman",
+      "arm": "leo-reviewed",
+      "passed": true,
+      "tokens": 2307,
+      "calls": 3,
+      "seconds": 116.5,
+      "detail": ""
+    },
+    {
+      "task": "roman",
+      "arm": "leo-deep",
+      "passed": true,
+      "tokens": 15465,
+      "calls": 6,
+      "seconds": 142.6,
+      "detail": ""
+    },
+    {
+      "task": "intervals",
+      "arm": "single-cheap",
+      "passed": true,
+      "tokens": 2451,
+      "calls": 1,
+      "seconds": 22.6,
+      "detail": ""
+    },
+    {
+      "task": "intervals",
+      "arm": "single-strong",
+      "passed": true,
+      "tokens": 1164,
+      "calls": 1,
+      "seconds": 21.7,
+      "detail": ""
+    },
+    {
+      "task": "intervals",
+      "arm": "leo-quick",
+      "passed": true,
+      "tokens": 2511,
+      "calls": 1,
+      "seconds": 22.1,
+      "detail": ""
+    },
+    {
+      "task": "intervals",
+      "arm": "leo-reviewed",
+      "passed": true,
+      "tokens": 2856,
+      "calls": 2,
+      "seconds": 32.2,
+      "detail": ""
+    },
+    {
+      "task": "duration",
+      "arm": "single-cheap",
+      "passed": false,
+      "tokens": 7726,
+      "calls": 1,
+      "seconds": 100.5,
+      "detail": "TypeError: unsupported operand type(s) for +=: 'int' and 'str'"
+    },
+    {
+      "task": "duration",
+      "arm": "single-strong",
+      "passed": true,
+      "tokens": 1315,
+      "calls": 1,
+      "seconds": 34.3,
+      "detail": ""
+    },
+    {
+      "task": "duration",
+      "arm": "leo-quick",
+      "passed": false,
+      "tokens": 1628,
+      "calls": 2,
+      "seconds": 166.7,
+      "detail": "OpenRouter \u00b7 Nemotron 3.5 Lightning (free): Model used its 8192-token output limit without answer text, possib"
+    },
+    {
+      "task": "duration",
+      "arm": "leo-reviewed",
+      "passed": false,
+      "tokens": 814,
+      "calls": 1,
+      "seconds": 120.5,
+      "detail": "OpenRouter \u00b7 Nemotron 3.5 Lightning (free): Model used its 8192-token output limit without answer text, possib"
+    },
+    {
+      "task": "duration",
+      "arm": "leo-deep",
+      "passed": true,
+      "tokens": 25649,
+      "calls": 7,
+      "seconds": 273.2,
+      "detail": ""
+    },
+    {
+      "task": "topk",
+      "arm": "single-cheap",
+      "passed": true,
+      "tokens": 4401,
+      "calls": 1,
+      "seconds": 50.9,
+      "detail": ""
+    },
+    {
+      "task": "topk",
+      "arm": "single-strong",
+      "passed": true,
+      "tokens": 1013,
+      "calls": 1,
+      "seconds": 19.6,
+      "detail": ""
+    },
+    {
+      "task": "topk",
+      "arm": "leo-quick",
+      "passed": false,
+      "tokens": 4371,
+      "calls": 1,
+      "seconds": 44.3,
+      "detail": "ImportError: cannot import name 'list' from 'typing' (~/…/typing.py)"
+    },
+    {
+      "task": "topk",
+      "arm": "leo-reviewed",
+      "passed": false,
+      "tokens": 7687,
+      "calls": 2,
+      "seconds": 90.4,
+      "detail": "ImportError: cannot import name 'list' from 'typing' (~/…/typing.py)"
+    },
+    {
+      "task": "topk",
+      "arm": "leo-deep",
+      "passed": true,
+      "tokens": 15326,
+      "calls": 6,
+      "seconds": 123.8,
+      "detail": ""
+    },
+    {
+      "task": "lru",
+      "arm": "single-cheap",
+      "passed": true,
+      "tokens": 2858,
+      "calls": 1,
+      "seconds": 28.0,
+      "detail": ""
+    },
+    {
+      "task": "lru",
+      "arm": "single-strong",
+      "passed": true,
+      "tokens": 1931,
+      "calls": 1,
+      "seconds": 24.5,
+      "detail": ""
+    },
+    {
+      "task": "lru",
+      "arm": "leo-quick",
+      "passed": true,
+      "tokens": 2202,
+      "calls": 1,
+      "seconds": 20.1,
+      "detail": ""
+    },
+    {
+      "task": "lru",
+      "arm": "leo-reviewed",
+      "passed": true,
+      "tokens": 13224,
+      "calls": 3,
+      "seconds": 90.5,
+      "detail": ""
+    },
+    {
+      "task": "ipv4",
+      "arm": "single-cheap",
+      "passed": true,
+      "tokens": 3111,
+      "calls": 1,
+      "seconds": 39.3,
+      "detail": ""
+    },
+    {
+      "task": "ipv4",
+      "arm": "single-strong",
+      "passed": false,
+      "tokens": 0,
+      "calls": 3,
+      "seconds": 0.6,
+      "detail": "Provider rate limit reached (HTTP 429)"
+    },
+    {
+      "task": "ipv4",
+      "arm": "leo-quick",
+      "passed": true,
+      "tokens": 2811,
+      "calls": 1,
+      "seconds": 24.2,
+      "detail": ""
+    },
+    {
+      "task": "ipv4",
+      "arm": "leo-reviewed",
+      "passed": true,
+      "tokens": 9641,
+      "calls": 3,
+      "seconds": 132.8,
+      "detail": ""
+    }
+  ]
+}

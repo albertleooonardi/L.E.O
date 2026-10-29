@@ -1,0 +1,17 @@
+.venv/
+.leo/
+.env
+__pycache__/
+.pytest_cache/
+*.pyc
+*.egg-info/
+frontend/node_modules/
+frontend/dist/
+frontend/.astro/
+.DS_Store
+
+# Local tooling and run artifacts
+.claude/
+*.log
+# Stopped Auto-mode run (Gemini quota exhausted); kept locally, not representative
+benchmarks/results/benchmark-20261029-231837.json

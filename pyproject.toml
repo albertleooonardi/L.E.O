@@ -1,0 +1,22 @@
+[project]
+name = "leo-orchestrator"
+version = "0.1.0"
+description = "A local-first, configurable multi-model orchestrator"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "httpx>=0.28,<1",
+  "sqlalchemy>=2.0,<3",
+  "cryptography>=44,<47",
+  "psycopg[binary]>=3.2,<4",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["."]

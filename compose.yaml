@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: leo
+      POSTGRES_PASSWORD: ${LEO_DB_PASSWORD:-leo-local-development}
+      POSTGRES_DB: leo
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leo -d leo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  api:
+    build: .
+    environment: &environment
+      LEO_DATABASE_URL: postgresql+psycopg://leo:${LEO_DB_PASSWORD:-leo-local-development}@postgres:5432/leo
+      LEO_API_TOKEN: ${LEO_API_TOKEN:-}
+      LEO_ALLOWED_HOSTS: ${LEO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      LEO_ALLOWED_ORIGINS: ${LEO_ALLOWED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - leo-data:/app/.leo
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  worker:
+    build: .
+    command: ["python", "-m", "backend.worker"]
+    environment: *environment
+    volumes:
+      - leo-data:/app/.leo
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  postgres-data:
+  leo-data:
