@@ -10,6 +10,9 @@ from .router import EFFORT, SEARCH_CUES, choose_mode, classify, rank, wants_revi
 from .store import LostLease
 
 
+# With "free first" routing, how many free models a step tries before a paid backup.
+FREE_ATTEMPTS = 3
+
 # Consecutive retryable failures per connection (this worker process); each one doubles the cooldown.
 _strikes: dict[str, int] = {}
 
@@ -71,12 +74,20 @@ class Orchestrator:
         choices = [p for p in choices if p["id"] in live and live[p["id"]]["enabled"] and live[p["id"]]["cooldown_until"] <= time.time()]
         if role == "generator" and skill and self.prefs.get("smart_routing", True):
             # The routing head picks the generator for each task; planner/reviewer assignments still apply.
-            return rank(choices, skill, difficulty or "standard", self.prefs)
-        route = self.prefs["routing"]
-        ordered = sorted(choices, key=lambda p: (p["id"] != selected if selected else False,
-                         not p["local"] if route == "local_first" else not p["free"] if route == "free_first" else False,
-                         p["priority"], p["id"]))
-        return ordered, ("assigned in Settings" if selected and ordered and ordered[0]["id"] == selected else "fallback order")
+            ordered, reason = rank(choices, skill, difficulty or "standard", self.prefs)
+        else:
+            route = self.prefs["routing"]
+            ordered = sorted(choices, key=lambda p: (p["id"] != selected if selected else False,
+                             not p["local"] if route == "local_first" else not p["free"] if route == "free_first" else False,
+                             p["priority"], p["id"]))
+            reason = "assigned in Settings" if selected and ordered and ordered[0]["id"] == selected else "fallback order"
+        if self.prefs["routing"] == "free_first" and not (selected and role != "generator"):
+            # Paid models are a backup: after a few free attempts, before the call limit is spent on the rest.
+            free, paid = [p for p in ordered if p["free"]], [p for p in ordered if not p["free"]]
+            ordered = free[:FREE_ATTEMPTS] + paid + free[FREE_ATTEMPTS:]
+            if ordered and not ordered[0]["free"]:
+                reason += "; no free model available, using a paid backup"
+        return ordered, reason
 
     async def research(self, key, queries, urls):
         """Run one search/read step (checkpointed, so recovery never searches twice) and publish its sources."""
@@ -167,13 +178,15 @@ class Orchestrator:
                             input_tokens = chunk.input_tokens
                         if chunk.output_tokens is not None:
                             output_tokens = chunk.output_tokens
-                        if chunk.finish:
-                            finish = chunk.finish
+                        if chunk.finish and not (finish and chunk.finish == "stop"):
+                            finish = chunk.finish  # Keep a specific reason (refusal, length) over a trailing generic stop.
                         if visible and pending and time.monotonic() - last_flush >= 0.12:
                             self.store.event(self.id, "token", {"text": pending})
                             self.save(output=text)
                             pending, last_flush = "", time.monotonic()
                 if not text.strip():
+                    if finish == "refusal":
+                        raise providers.ProviderError("The model declined this request; trying another model")
                     if finish in {"length", "max_tokens"}:
                         # Reasoning models can spend the whole allowance before writing any answer text.
                         raise providers.ProviderError(f"Model used its {output_limit_for_call}-token output limit without answer text, "

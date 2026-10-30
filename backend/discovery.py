@@ -14,6 +14,11 @@ import httpx
 
 from . import providers
 
+# Anthropic list prices (USD per million input/output tokens) as of 2026-10-06. Suggestions only: L.E.O. never
+# reads live billing, and the owner edits prices per connection. Haiku 5.5 doubles above 100K-token prompts.
+CLAUDE_PRICES = {"claude-opus-4-5": (5, 25), "claude-sonnet-4-5": (3, 15), "claude-fable-5-1": (10, 50), "claude-fable-5": (10, 50), "claude-opus-5-5": (4, 20), "claude-opus-5": (5, 25),
+                 "claude-opus-4-8": (5, 25), "claude-opus-4-7": (5, 25), "claude-opus-4-6": (5, 25), "claude-sonnet-5-5": (2, 10),
+                 "claude-sonnet-5": (2, 10), "claude-sonnet-4-6": (3, 15), "claude-haiku-5-5": (0.10, 0.50), "claude-haiku-4-5": (1, 5)}
 NOT_CHAT = re.compile(r"tts|image|banana|lyria|transcribe|embed|aqa|live|native-audio|robotics|computer-use|deep-research|"
                       r"customtools|antigravity|omni|safety|guard|moderation|rerank|whisper|vision-only", re.I)
 CODER_NAME = re.compile(r"cod(e|er|ing|estral)|devstral|laguna|starcoder", re.I)
@@ -59,6 +64,8 @@ def profile(model_id, description="", thinking=False, context=None, free=None, n
 
 def provider_kind(connection):
     host = urlsplit(connection["base_url"]).hostname or ""
+    if connection.get("protocol") == "anthropic" or host == "api.anthropic.com":
+        return "anthropic"
     return "openrouter" if host.endswith("openrouter.ai") else "gemini" if host == "generativelanguage.googleapis.com" else "other"
 
 
@@ -105,6 +112,24 @@ async def discover(connection, key, transport=None):
             else:
                 models.append(profile(model_id, item.get("description") or "", item.get("thinking"), item.get("inputTokenLimit"),
                                       connection.get("free"), item.get("displayName")))
+    elif kind == "anthropic":
+        data = await _get(connection["base_url"] + "/models", providers.headers(connection, key), transport, {"limit": 1000})
+        for item in data.get("data", []):
+            model_id = item.get("id", "")
+            family = re.search(r"(opus|sonnet|haiku|fable|mythos)", model_id)
+            version = re.search(r"-(\d+)(?:-(\d))?(?:-|$)", model_id)
+            number = float(f"{version.group(1)}.{version.group(2) or 0}") if version else 0
+            if not family or number < 4.5:
+                skipped.append({"model": model_id, "reason": "older model"})
+                continue
+            tier = {"opus": "strong", "fable": "strong", "mythos": "strong", "sonnet": "standard", "haiku": "light"}[family.group(1)]
+            skills = {"strong": ["coding", "backend", "frontend", "design", "reasoning"], "standard": ["coding", "backend", "frontend"], "light": []}[tier]
+            price = CLAUDE_PRICES.get(re.sub(r"-\d{8}$", "", model_id))  # Dated snapshots share their family's price.
+            models.append({"model": model_id, "name": item.get("display_name") or model_id, "tier": tier, "skills": skills,
+                           # Effort control exists from 4.6 on; earlier models reject it.
+                           "reasoning": number >= 4.6, "context_window": max(1024, min(int(item.get("max_input_tokens") or 200000), 2000000)),
+                           "free": False, "input_price": price[0] if price else None, "output_price": price[1] if price else None,
+                           "description": "Suggested price from Anthropic's list; edit it if it changes." if price else "Set prices before paid use."})
     else:
         data = await _get(connection["base_url"] + "/models", providers.headers(connection, key), transport)
         for item in data.get("data", data.get("models", [])):

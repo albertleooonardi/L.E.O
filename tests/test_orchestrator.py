@@ -419,3 +419,41 @@ async def test_usage_separates_actual_and_reserved_tokens(store):
     usage = result['usage']
     assert usage['input_tokens'] == 25 and usage['output_tokens'] == 12, 'only the completed call counts as actual usage'
     assert usage['reserved_tokens'] > 0 and usage['uncertain_calls'] == 1
+
+
+
+async def test_refusal_falls_back_to_the_next_model(store):
+    store.save_connection(Connection(name='Claude', protocol='anthropic', base_url='https://claude.test/v1', model='claude', free=True, local=True, priority=1).model_dump())
+    add_provider(store, priority=50)
+    def handler(request):
+        if request.url.host == 'claude.test':
+            events = [{'type': 'message_start', 'message': {'usage': {'input_tokens': 9, 'output_tokens': 0}}},
+                      {'type': 'message_delta', 'delta': {'stop_reason': 'refusal'}, 'usage': {'output_tokens': 1}}, {'type': 'message_stop'}]
+            return httpx.Response(200, text=''.join('data: ' + json.dumps(e) + '\n\n' for e in events))
+        return sse_response('Answered by the next model')
+    run = make_run(store, mode='quick')
+    result = await execute(store, run, handler)
+    assert result['output'] == 'Answered by the next model'
+    warnings = [e['data'].get('message', '') for e in store.get_events(run['id']) if e['kind'] == 'warning']
+    assert any('declined this request' in w for w in warnings), warnings
+
+
+async def test_free_first_uses_paid_only_as_a_backup_after_three_free_attempts(store):
+    for i in range(5):
+        store.save_connection(Connection(name=f'Free {i}', base_url=f'http://free{i}.test/v1', model=f'free{i}', free=True, skills=['coding'], priority=i).model_dump())
+    store.save_connection(Connection(name='Claude', protocol='anthropic', base_url='https://claude.test/v1', model='claude-opus', skills=['coding'],
+                                     tier='strong', input_price=4, output_price=20).model_dump())
+    store.set_preferences({**store.preferences(), 'routing': 'free_first', 'allow_paid': True, 'max_cost': 0.5})
+    hosts = []
+    def handler(request):
+        hosts.append(request.url.host)
+        if request.url.host.startswith('free'):
+            return httpx.Response(429)
+        events = [{'type': 'message_start', 'message': {'usage': {'input_tokens': 10, 'output_tokens': 0}}},
+                  {'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': 'Claude backup answer'}},
+                  {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}, 'usage': {'output_tokens': 5}}, {'type': 'message_stop'}]
+        return httpx.Response(200, text=''.join('data: ' + json.dumps(e) + '\n\n' for e in events))
+    result = await execute(store, make_run(store, mode='quick', prompt='Write a Python function that sorts a list'), handler)
+    assert result['output'] == 'Claude backup answer'
+    assert hosts == ['free0.test', 'free1.test', 'free2.test', 'claude.test'], 'three free attempts, then the paid backup'
+    assert result['usage']['estimated_cost'] > 0

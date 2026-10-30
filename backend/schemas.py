@@ -124,6 +124,8 @@ class DiscoveredModel(BaseModel):
     reasoning: bool = False
     context_window: int = Field(default=32768, ge=1024, le=2000000)
     free: bool | None = None
+    input_price: float | None = Field(default=None, ge=0, le=10000, allow_inf_nan=False)
+    output_price: float | None = Field(default=None, ge=0, le=10000, allow_inf_nan=False)
 
 
 class AdoptModels(StrictModel):

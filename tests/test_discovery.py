@@ -101,3 +101,24 @@ def test_discover_and_adopt_api_reuses_key(client, store, monkeypatch):
     added = store.get_connection(body['created'][0]['id'], True)
     assert store.decrypt(added) == 'or-key' and added['skills'][0] == 'coding' and added['free'] is True
     assert 'or-key' not in response.text
+
+
+async def test_anthropic_discovery_profiles_claude_with_suggested_prices():
+    listing = {'data': [
+        {'id': 'claude-opus-5-5', 'display_name': 'Claude Opus 5.5', 'max_input_tokens': 1000000},
+        {'id': 'claude-sonnet-5-5', 'display_name': 'Claude Sonnet 5.5', 'max_input_tokens': 1000000},
+        {'id': 'claude-haiku-5-5', 'display_name': 'Claude Haiku 5.5', 'max_input_tokens': 1000000},
+        {'id': 'claude-haiku-4-5', 'display_name': 'Claude Haiku 4.5', 'max_input_tokens': 200000},
+        {'id': 'claude-3-haiku', 'display_name': 'Old'},
+    ], 'has_more': False}
+    seen = []
+    def handler(request):
+        seen.append((request.url.path, request.url.params.get('limit'), request.headers.get('x-api-key'), request.headers.get('authorization')))
+        return httpx.Response(200, json=listing)
+    found = await discover({**conn('https://api.anthropic.com/v1', free=False), 'protocol': 'anthropic'}, 'ak', httpx.MockTransport(handler))
+    assert seen == [('/v1/models', '1000', 'ak', None)]
+    by_id = {m['model']: m for m in found['models']}
+    assert by_id['claude-opus-5-5']['tier'] == 'strong' and by_id['claude-opus-5-5']['input_price'] == 4 and by_id['claude-opus-5-5']['output_price'] == 20
+    assert by_id['claude-sonnet-5-5']['tier'] == 'standard' and by_id['claude-haiku-5-5']['tier'] == 'light' and by_id['claude-haiku-5-5']['input_price'] == 0.10
+    assert by_id['claude-haiku-5-5']['reasoning'] is True and by_id['claude-haiku-4-5']['reasoning'] is False, 'effort only from 4.6 on'
+    assert all(m['free'] is False for m in found['models']) and [s['model'] for s in found['skipped']] == ['claude-3-haiku']

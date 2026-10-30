@@ -1,5 +1,6 @@
 """Small protocol adapters; all routing and retry policy lives in the orchestrator."""
 import json
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -22,12 +23,13 @@ class Chunk:
 
 def headers(provider, key):
     result = {"Content-Type": "application/json"}
-    if key:
-        result["Authorization"] = f"Bearer {key}"
     if provider["protocol"] == "anthropic":
+        # Anthropic reads API keys from x-api-key; a Bearer header is treated as an OAuth token.
         result["anthropic-version"] = "2023-06-01"
         if key:
             result["x-api-key"] = key
+    elif key:
+        result["Authorization"] = f"Bearer {key}"
     return result
 
 
@@ -39,6 +41,8 @@ def make_request(provider, messages, max_tokens, effort=None):
     if protocol == "anthropic":
         payload.update(system="\n\n".join(m["content"] for m in messages if m["role"] == "system"),
                        messages=[m for m in messages if m["role"] != "system"], max_tokens=max_tokens)
+        if effort:
+            payload["output_config"] = {"effort": effort}  # Thinking depth on current Claude models.
         return "/messages", payload
     if protocol == "responses":
         payload.update(input=messages, max_output_tokens=max_tokens, store=False)
@@ -80,7 +84,10 @@ def check_status(response):
     except ValueError:
         retry_after = 30
     detail = provider_detail(response)
-    raise ProviderError(f"{hints.get(code, 'Provider request failed')} (HTTP {code}){': ' + detail if detail else ''}",
+    hint = hints.get(code, "Provider request failed")
+    if re.search(r"credit balance|insufficient (credits|funds|quota)|billing", detail, re.I):
+        hint = "Provider credits or billing are exhausted; add credits in the provider's console"
+    raise ProviderError(f"{hint} (HTTP {code}){': ' + detail if detail else ''}",
                         code in {408, 429} or code >= 500, retry_after)
 
 

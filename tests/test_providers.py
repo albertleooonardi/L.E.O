@@ -19,7 +19,10 @@ async def test_protocol_streaming_and_usage(protocol, path):
     assert ''.join(c.text for c in chunks) == 'Hello'
     assert max(c.output_tokens or 0 for c in chunks) == 12
     assert captured[0].url.path == '/v1' + path
-    assert captured[0].headers['authorization'] == 'Bearer private-key'
+    if protocol == 'anthropic':
+        assert captured[0].headers['x-api-key'] == 'private-key' and 'authorization' not in captured[0].headers
+    else:
+        assert captured[0].headers['authorization'] == 'Bearer private-key'
     payload = json.loads(captured[0].content)
     if protocol == 'anthropic':
         assert payload['system'] == 'Be useful'
@@ -91,3 +94,19 @@ def test_effort_is_sent_only_to_reasoning_models_in_each_api_form():
     assert make_request(responses, messages, 100, 'low')[1]['reasoning'] == {'effort': 'low'}
     plain = {**gemini, 'reasoning': False}
     assert 'reasoning_effort' not in make_request(plain, messages, 100, 'low')[1]
+
+
+
+def test_claude_effort_goes_in_output_config():
+    claude = {'protocol': 'anthropic', 'base_url': 'https://api.anthropic.com/v1', 'model': 'claude-haiku-5-5', 'reasoning': True}
+    payload = make_request(claude, [{'role': 'system', 'content': 'S'}, {'role': 'user', 'content': 'Hi'}], 100, 'low')[1]
+    assert payload['output_config'] == {'effort': 'low'} and payload['system'] == 'S' and 'temperature' not in payload
+
+
+async def test_exhausted_credits_are_named_plainly():
+    from backend.providers import ProviderError
+    body = {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'Your credit balance is too low to access the Anthropic API.'}}
+    provider = {'protocol': 'anthropic', 'base_url': 'https://api.anthropic.com/v1', 'model': 'claude-haiku-5-5'}
+    with pytest.raises(ProviderError, match='credits or billing are exhausted') as caught:
+        [c async for c in stream(provider, 'k', [{'role': 'user', 'content': 'Hi'}], 64, 10, httpx.MockTransport(lambda r: httpx.Response(400, json=body)))]
+    assert not caught.value.retryable

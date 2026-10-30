@@ -224,6 +224,8 @@ def create_app(config=None, store=None):
                 name=f"{source['name'].split(' · ')[0]} · {label}"[:80], protocol=source["protocol"], base_url=source["base_url"], model=m.model,
                 key_from=connection_id if source.get("secret") else None, free=source["free"] if m.free is None else m.free,
                 local=source["local"], priority=source["priority"], context_window=m.context_window, token_parameter=source["token_parameter"],
+                input_price=m.input_price if m.input_price is not None else source.get("input_price"),
+                output_price=m.output_price if m.output_price is not None else source.get("output_price"),
                 skills=[s for s in m.skills if s in known_skills], tier=m.tier, reasoning=m.reasoning).model_dump()))
         return {"created": created, "skipped": skipped}
 
