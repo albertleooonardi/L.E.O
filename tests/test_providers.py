@@ -70,3 +70,24 @@ async def test_catalog_normalizes_gemini_model_names():
     handler = lambda r: httpx.Response(200, json={'object': 'list', 'data': [{'id': 'models/gemini-2.5-flash'}, {'id': 'plain-model'}]})
     provider = {'protocol': 'openai', 'base_url': 'https://gemini.test/v1beta/openai', 'model': 'gemini-2.5-flash'}
     assert await list_models(provider, 'key', httpx.MockTransport(handler)) == ['gemini-2.5-flash', 'plain-model']
+
+
+def test_hidden_thinking_tokens_are_counted_from_total():
+    from backend.providers import usage_chunk
+    chunk = usage_chunk({'prompt_tokens': 16, 'completion_tokens': 239, 'total_tokens': 1432})
+    assert chunk.input_tokens == 16 and chunk.output_tokens == 1416
+    assert usage_chunk({'prompt_tokens': 10, 'completion_tokens': 50, 'total_tokens': 60}).output_tokens == 50
+    assert usage_chunk({'input_tokens': 5, 'output_tokens': 7}).output_tokens == 7
+
+
+def test_effort_is_sent_only_to_reasoning_models_in_each_api_form():
+    messages = [{'role': 'user', 'content': 'Hi'}]
+    gemini = {'protocol': 'openai', 'base_url': 'https://generativelanguage.googleapis.com/v1beta/openai', 'model': 'g', 'reasoning': True}
+    assert make_request(gemini, messages, 100, 'low')[1]['reasoning_effort'] == 'low'
+    router = {**gemini, 'base_url': 'https://openrouter.ai/api/v1'}
+    payload = make_request(router, messages, 100, 'medium')[1]
+    assert payload['reasoning'] == {'effort': 'medium'} and 'reasoning_effort' not in payload
+    responses = {**gemini, 'protocol': 'responses'}
+    assert make_request(responses, messages, 100, 'low')[1]['reasoning'] == {'effort': 'low'}
+    plain = {**gemini, 'reasoning': False}
+    assert 'reasoning_effort' not in make_request(plain, messages, 100, 'low')[1]

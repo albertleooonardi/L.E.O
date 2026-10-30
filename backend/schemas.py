@@ -14,6 +14,8 @@ class Connection(StrictModel):
     base_url: str = Field(max_length=500)
     model: str = Field(min_length=1, max_length=160)
     api_key: str | None = Field(default=None, max_length=4096, repr=False)
+    # Reuse the saved key of another connection to the same host, so one credential serves many models.
+    key_from: str | None = Field(default=None, max_length=36)
     enabled: bool = True
     local: bool = False
     free: bool = False
@@ -51,9 +53,9 @@ class Preferences(StrictModel):
     max_cost: float = Field(default=0.10, gt=0, le=100, allow_inf_nan=False)
     max_calls: int = Field(default=8, ge=1, le=20)
     max_repairs: int = Field(default=1, ge=0, le=3)
-    max_output_tokens: int = Field(default=2048, ge=128, le=16384)
-    context_tokens: int = Field(default=16000, ge=1024, le=128000)
-    token_budget: int = Field(default=64000, ge=2048, le=1000000)
+    max_output_tokens: int = Field(default=8192, ge=128, le=65536)
+    context_tokens: int = Field(default=64000, ge=1024, le=1000000)
+    token_budget: int = Field(default=200000, ge=2048, le=2000000)
     timeout_seconds: int = Field(default=120, ge=10, le=600)
     max_run_seconds: int = Field(default=600, ge=30, le=3600)
     system_prompt: str = Field(default="You are L.E.O., a helpful assistant. Answer accurately and concisely. State uncertainty. For code, provide complete usable examples and explain assumptions.", max_length=4000)

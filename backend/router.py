@@ -6,6 +6,8 @@ with a skill and difficulty instead; those labels are validated against the same
 import re
 
 TIERS = {"light": 0, "standard": 1, "strong": 2}
+# Thinking effort sent to reasoning models by task difficulty; planning and review count as light.
+EFFORT = {"light": "low", "standard": "low", "strong": "medium"}
 
 # Starter skills seeded on first start; owners can edit, disable, delete, or add their own.
 STARTER_SKILLS = [
@@ -85,8 +87,9 @@ def choose_mode(route):
 def rank(connections, skill, difficulty, prefs, pinned=None):
     """Order eligible connections for a task, with a reason for the first choice.
 
-    Prefer a model strong enough for the task, then one that has the skill, then the lightest such tier (cheaper), then avoid
-    reasoning models on simple work because they spend hidden tokens. Ties follow the fallback order setting.
+    Prefer a model strong enough for the task, then one that has the skill, then (for light work) one without hidden
+    reasoning, then the lightest sufficient tier (cheaper). Reasoning models also get a low effort setting on simple work
+    (see EFFORT). Ties follow the fallback order setting.
     """
     need = TIERS.get(difficulty, 1)
     route = prefs.get("routing", "local_first")
@@ -99,8 +102,8 @@ def rank(connections, skill, difficulty, prefs, pinned=None):
         return (
             c["id"] != pinned if pinned else False,
             not enough,  # Never hand a task to a model too light for it while a capable one is available.
-            bool(c.get("reasoning")) and need == 0,  # Hidden reasoning tokens are wasted on light work.
             not has, not generalist and not has,
+            bool(c.get("reasoning")) and need == 0,  # Among fitting models, avoid hidden reasoning tokens on light work.
             tier - need if enough else need - tier,
             bool(c.get("reasoning")) and need < 2,
             not c["local"] if route == "local_first" else not c["free"] if route == "free_first" else False,
@@ -114,7 +117,12 @@ def rank(connections, skill, difficulty, prefs, pinned=None):
     reasons = []
     if pinned and first["id"] == pinned:
         reasons.append("assigned in Settings")
-    reasons.append(f"has the {skill} skill" if skill in first.get("skills", []) else "no model lists this skill; best general fit")
+    if skill in first.get("skills", []):
+        reasons.append(f"has the {skill} skill")
+    elif any(skill in c.get("skills", []) for c in ordered):
+        reasons.append(f"models with the {skill} skill are too light for {difficulty} work")
+    else:
+        reasons.append("no model lists this skill; best general fit")
     tier = first.get("tier", "standard")
     reasons.append(f"{tier} tier fits {difficulty} work" if TIERS.get(tier, 1) >= need else f"strongest available ({tier}) for {difficulty} work")
     if first.get("reasoning"):

@@ -4,8 +4,11 @@ import re
 
 
 def token_bound(messages):
-    """Conservative byte-based reservation, not a provider-specific token count."""
-    return sum(len(m["content"].encode("utf-8")) + 32 for m in messages) + 128
+    """Conservative estimate from UTF-8 bytes, not a provider-specific count.
+
+    About 3 bytes per token stays above real counts for English and code (~4 bytes per token) and for
+    multi-byte scripts (~3 bytes per character), without refusing requests that would fit."""
+    return sum(-(-len(m["content"].encode("utf-8")) // 3) + 8 for m in messages) + 32
 
 
 def prepare_context(history, system, prompt, limit):

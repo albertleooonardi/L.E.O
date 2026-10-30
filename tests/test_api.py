@@ -104,3 +104,13 @@ def test_remote_hostname_requires_access_token(store):
     store.config.api_token = 'owner-token'
     with TestClient(create_app(store.config, store)) as client:
         assert client.get('/api/settings', headers={'Host': 'leo.example.com'}).status_code == 401
+
+
+def test_one_key_serves_many_models_on_the_same_host_only(client, store):
+    first = client.post('/api/connections', json=Connection(name='OR A', base_url='https://openrouter.ai/api/v1', model='a', api_key='shared-secret-value').model_dump()).json()
+    second = client.post('/api/connections', json=Connection(name='OR B', base_url='https://openrouter.ai/api/v1', model='b', key_from=first['id']).model_dump())
+    assert second.status_code == 201 and second.json()['has_key'] and 'shared-secret' not in second.text
+    assert store.decrypt(store.get_connection(second.json()['id'], True)) == 'shared-secret-value'
+    stolen = client.post('/api/connections', json=Connection(name='Elsewhere', base_url='https://evil.test/v1', model='x', key_from=first['id']).model_dump())
+    assert stolen.status_code == 400 and 'same provider host' in stolen.json()['detail']
+    assert 'key_from' not in store.get_connection(second.json()['id'])

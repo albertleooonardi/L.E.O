@@ -188,16 +188,17 @@ async def test_task_dependencies_and_synthesis(store):
         if 'YOUR SUBTASK:\nDefine interface' in prompt:
             return sse_response('INTERFACE_RESULT')
         if 'YOUR SUBTASK:\nImplement interface' in prompt:
-            assert 'Task 1:\nINTERFACE_RESULT' in prompt
+            assert 'Task 1:\nINTERFACE_RESULT' in prompt and 'final answer the user sees' in prompt
             return sse_response('IMPLEMENTATION_RESULT')
-        assert 'Synthesize these subtask results' in prompt
-        assert 'IMPLEMENTATION_RESULT' in prompt
-        return sse_response('Final combined answer')
+        raise AssertionError('A chain of subtasks needs no synthesis call')
     result = await execute(store, make_run(store, mode='deep'), handler)
     assert result['status'] == 'completed'
-    assert result['usage']['calls'] == 5
-    assert result['output'] == 'Final combined answer'
-    assert len([e for e in store.get_events(result['id']) if e['kind'] == 'task']) == 2
+    assert result['usage']['calls'] == 4, 'plan + 2 tasks + review; the last task is the answer'
+    assert result['output'] == 'IMPLEMENTATION_RESULT'
+    assert any('intermediate step' in p for p in seen), 'earlier tasks are asked to stay brief'
+    events = store.get_events(result['id'])
+    assert len([e for e in events if e['kind'] == 'task']) == 2
+    assert any(e['kind'] == 'token' and 'IMPLEMENTATION_RESULT' in e['data']['text'] for e in events), 'the final task streams as the answer'
 
 
 async def test_total_token_budget_blocks_excess_calls(store):
@@ -244,11 +245,11 @@ async def test_deep_recovery_resumes_remaining_tasks_only(store):
         return sse_response('Final combined answer')
     result = await execute(store, run, handler)
     assert result['status'] == 'completed'
-    assert seen == ['task_2', 'synthesis', 'review']
-    assert result['output'] == 'Final combined answer'
+    assert seen == ['task_2', 'review']
+    assert result['output'] == 'IMPLEMENTATION_RESULT'
     ledger = store.call_rows(run['id'])
     assert [c['status'] for c in ledger].count('interrupted') == 1
-    assert result['usage']['calls'] == 4 and result['usage']['uncertain_calls'] == 1
+    assert result['usage']['calls'] == 3 and result['usage']['uncertain_calls'] == 1
     kinds = [e['kind'] for e in store.get_events(run['id'])]
     assert 'plan' not in kinds, 'Replayed plan must not be republished'
     assert [e['data']['id'] for e in store.get_events(run['id']) if e['kind'] == 'task'] == [2]
@@ -305,7 +306,7 @@ async def test_reasoning_only_output_reports_exhausted_limit(store):
 
 
 async def test_usage_report_shows_routing_per_model_and_context(client, store):
-    generator = add_provider(store, context_window=8192)
+    generator = add_provider(store, context_window=32768)
     reviewer = store.save_connection(Connection(name='Reviewer', base_url='http://review.test/v1', model='review', free=True, priority=50).model_dump())
     store.set_preferences({**store.preferences(), 'reviewer_id': reviewer['id'], 'context_tokens': 16000})
     def handler(request):
@@ -333,7 +334,7 @@ async def test_usage_report_shows_routing_per_model_and_context(client, store):
 
 
 async def test_usage_report_counts_failed_calls_as_uncertain(client, store):
-    add_provider(store, context_window=8192)
+    add_provider(store, context_window=32768)
     store.save_connection(Connection(name='Backup', base_url='http://backup.test/v1', model='backup', free=True, priority=20).model_dump())
     handler = lambda r: httpx.Response(429) if r.url.host == 'local.test' else sse_response('Recovered')
     await execute(store, make_run(store), handler)
@@ -381,3 +382,31 @@ async def test_usage_report_treats_started_calls_of_finished_runs_as_interrupted
     report = client.get('/api/usage').json()
     assert report['totals']['in_progress'] == 0 and report['totals']['uncertain'] == 1
     assert report['recent_calls'][0]['status'] == 'interrupted'
+
+
+async def test_repeated_rate_limits_back_off_exponentially(store):
+    from backend import orchestrator
+    orchestrator._strikes.clear()
+    limited = add_provider(store)
+    store.save_connection(Connection(name='Backup', base_url='http://backup.test/v1', model='backup', free=True, priority=50).model_dump())
+    handler = lambda r: httpx.Response(429, headers={'retry-after': '1'}) if r.url.host == 'local.test' else sse_response('ok')
+    cooldowns = []
+    for _ in range(3):
+        start = time.time()
+        await execute(store, make_run(store), handler)
+        cooldowns.append(round(store.get_connection(limited['id'])['cooldown_until'] - start))
+        store.cooldown(limited['id'], -1)  # Let the next run try it again.
+    assert [c // 10 for c in cooldowns] == [3, 6, 12], cooldowns
+    await execute(store, make_run(store), lambda r: sse_response('recovered'))
+    assert limited['id'] not in orchestrator._strikes, 'a success clears the strikes'
+
+
+async def test_reasoning_models_get_low_effort_on_simple_work(store):
+    store.save_connection(Connection(name='Thinker', base_url='http://think.test/v1', model='thinker', free=True, reasoning=True,
+                                     skills=['general']).model_dump())
+    bodies = []
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return sse_response('Paris')
+    await execute(store, make_run(store, mode='auto', prompt='What is the capital of France?'), handler)
+    assert bodies[0]['reasoning_effort'] == 'low'

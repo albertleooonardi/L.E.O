@@ -5,10 +5,11 @@ no review. L.E.O. arms submit the same prompt to a running L.E.O. server in a fr
 its current Settings (roles, limits, routing). Keys are decrypted inside this process from the server's
 own store and never printed.
 
-Generated code is executed only here, for acceptance testing, inside a macOS sandbox that blocks network
-access and writes outside a throwaway directory, with a timeout.
+Coding tasks are checked by hidden acceptance tests. Generated code is executed only here, inside a macOS
+sandbox that blocks network access and writes outside a throwaway directory, with a timeout. Website tasks
+are scored with a static quality rubric (structure, content, responsiveness, interactivity, accessibility).
 
-    LEO_DATA_DIR=... uv run --frozen python -m benchmarks.run --cheap nemotron --strong gemini
+    LEO_DATA_DIR=.leo-bench uv run --frozen python -m benchmarks.run --single gemini-2.5-flash --single nemotron --leo auto
 """
 import argparse
 import asyncio
@@ -31,7 +32,44 @@ from backend.store import Store
 from .tasks import TASKS
 
 RESULTS = Path(__file__).parent / "results"
-ARMS = ["single-cheap", "single-strong", "leo-auto", "leo-quick", "leo-reviewed", "leo-deep"]
+LEO_MODES = ["auto", "quick", "reviewed", "deep"]
+PAGE_PASS = 0.75
+PRICE = re.compile(r"(\$|€|£|Rp\.?|IDR|USD)\s?\d|\d+[.,]\d{2}\s?(\$|€|USD|IDR)|\d+(\.\d+)?k\b", re.I)
+
+
+def extract_page(text):
+    """The first HTML block with separate CSS/JS blocks merged, as the L.E.O. canvas does."""
+    blocks = re.findall(r"```(html|css|js|javascript)[^\n]*\n(.*?)```", text, re.S | re.I)
+    html = next((code for kind, code in blocks if kind.lower() == "html"), None)
+    if html is None:
+        return text if re.search(r"<html|<!doctype", text, re.I) else None
+    css = "".join(code for kind, code in blocks if kind.lower() == "css")
+    js = "".join(code for kind, code in blocks if kind.lower() in {"js", "javascript"})
+    return html + (f"<style>{css}</style>" if css else "") + (f"<script>{js}</script>" if js else "")
+
+
+def page_rubric(html):
+    """Static checks a person would expect from a small business website; each is worth one point."""
+    low = html.lower()
+    visible = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", low, flags=re.S)
+    imgs = re.findall(r"<img\b[^>]*>", low)
+    checks = {
+        "complete document": "<!doctype html" in low and "</html>" in low,
+        "mobile viewport": 'name="viewport"' in low,
+        "page title": bool(re.search(r"<title>\s*\S", low)),
+        "main heading": "<h1" in low,
+        "menu with 3+ prices": len(PRICE.findall(visible)) >= 3,
+        "call to action": bool(re.search(r"<(button|a)\b[^>]*>[^<]*(order|reserve|book|visit|menu|contact|buy|shop|explore|view)", low)),
+        "hours/location/contact": bool(re.search(r"\b(hours|opening|open daily|address|location|visit us|contact|phone|email)\b", visible)),
+        "responsive layout": bool(re.search(r"@media|minmax\(|flex-wrap|clamp\(", low)),
+        "interactivity": bool(re.search(r"addeventlistener|onclick=|<form\b", low)),
+        "semantic structure": sum(tag in low for tag in ("<header", "<nav", "<main", "<section", "<footer")) >= 3,
+        "footer": "<footer" in low,
+        "language set": bool(re.search(r"<html[^>]*\blang=", low)),
+        "images have alt text": all("alt=" in img for img in imgs),
+        "no placeholder text": "lorem ipsum" not in low,
+    }
+    return sum(checks.values()) / len(checks), [name for name, ok in checks.items() if not ok]
 
 
 def extract_code(text, symbol):
@@ -43,7 +81,33 @@ def extract_code(text, symbol):
     return text if re.search(rf"^\s*(def|class)\s+{re.escape(symbol)}\b", text, re.M) else None
 
 
+def app_features(html, features):
+    """Static feature checks for a generated app; the interactive check is done by hand in the report."""
+    low = html.lower()
+    missing = []
+    for name, pattern in features.items():
+        if pattern is None:  # No external scripts: everything must be in the file, as requested.
+            ok = not re.search(r"<script[^>]+src=[\"']https?:", low)
+        else:
+            ok = bool(re.search(pattern, low, re.I))
+        if not ok:
+            missing.append(name)
+    return 1 - len(missing) / len(features), missing
+
+
 def acceptance(text, task, timeout=10):
+    if task.get("kind") == "app":
+        page = extract_page(text)
+        if page is None:
+            return False, "no HTML file"
+        score, missing = app_features(page, task["features"])
+        return score >= PAGE_PASS, f"features {round(100 * score)}%" + (f"; missing: {', '.join(missing)}" if missing else "")
+    if task.get("kind") == "page":
+        page = extract_page(text)
+        if page is None:
+            return False, "no HTML page"
+        score, missing = page_rubric(page)
+        return score >= PAGE_PASS, f"rubric {round(100 * score)}%" + (f"; missing: {', '.join(missing)}" if missing else "")
     symbol = re.search(r"from solution import (\w+)", task["tests"]).group(1)
     code = extract_code(text, symbol)
     if code is None:
@@ -114,8 +178,11 @@ async def leo(client, prompt, mode):
 
 def find_connection(store, fragment):
     matches = [c for c in store.list_connections(True) if fragment.lower() in (c["name"] + " " + c["model"]).lower()]
+    exact = [c for c in matches if c["model"].lower() == fragment.lower()]
+    if len(exact) == 1:
+        return exact[0]
     if len(matches) != 1:
-        raise SystemExit(f"--cheap/--strong '{fragment}' must match exactly one saved connection; found {len(matches)}")
+        raise SystemExit(f"--single '{fragment}' must match exactly one saved connection; found {len(matches)}")
     return matches[0]
 
 
@@ -140,7 +207,7 @@ def summarize(results, arms):
 
 def markdown(rows, results, meta):
     lines = [f"# L.E.O. benchmark · {meta['started']}", "",
-             f"Cheap baseline: `{meta['cheap']}` · Strong baseline: `{meta['strong']}` · L.E.O. roles: {meta['roles']}", "",
+             f"Single-model baselines: {', '.join(f'`{m}`' for m in meta['singles'])} · L.E.O. roles: {meta['roles']}", "",
              "| Approach | Passed | Errors | Mean tokens | Tokens per passed task | Mean calls | Mean seconds |",
              "| --- | --- | --- | --- | --- | --- | --- |"]
     for r in rows:
@@ -151,7 +218,12 @@ def markdown(rows, results, meta):
         cells = []
         for row in rows:
             item = next((r for r in results if r["task"] == task and r["arm"] == row["arm"]), None)
-            cells.append("—" if not item else ("pass" if item["passed"] else f"fail: {item['detail']}").replace("|", "/"))
+            if not item:
+                cells.append("—")
+                continue
+            tokens = (item.get("input_tokens") or 0) + (item.get("output_tokens") or 0)
+            verdict = "pass" if item["passed"] else "fail"
+            cells.append(f"{verdict}, {tokens:,} tok" + (f" ({item['detail']})" if item["detail"] != "passed" else "").replace("|", "/"))
         lines.append(f"| {task} | " + " | ".join(cells) + " |")
     lines += ["", "Tokens are provider-reported totals across every call in the approach (failed calls count their "
                   "reservation in L.E.O.). Reasoning tokens are included in output. Small samples: treat differences as "
@@ -162,25 +234,25 @@ def markdown(rows, results, meta):
 async def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--api", default="http://127.0.0.1:8000")
-    parser.add_argument("--cheap", required=True, help="Text matching the inexpensive baseline connection")
-    parser.add_argument("--strong", required=True, help="Text matching the stronger baseline connection")
-    parser.add_argument("--arms", default=",".join(ARMS))
+    parser.add_argument("--single", action="append", default=[], help="Model ID or name of a saved connection to call directly (repeatable)")
+    parser.add_argument("--leo", default="auto", help=f"Comma-separated L.E.O. modes to run: {', '.join(LEO_MODES)}")
     parser.add_argument("--tasks", default=",".join(t["id"] for t in TASKS))
     parser.add_argument("--deep-tasks", default=None, help="Subset of tasks for leo-deep (it makes the most calls)")
     parser.add_argument("--pause", type=float, default=3, help="Seconds between requests, for free-tier rate limits")
     args = parser.parse_args()
-    arms = [a for a in args.arms.split(",") if a]
-    unknown = set(arms) - set(ARMS)
+    modes = [m for m in args.leo.split(",") if m]
+    unknown = set(modes) - set(LEO_MODES)
     if unknown:
-        raise SystemExit(f"Unknown arms: {', '.join(sorted(unknown))}")
+        raise SystemExit(f"Unknown L.E.O. modes: {', '.join(sorted(unknown))}")
     tasks = [t for t in TASKS if t["id"] in args.tasks.split(",")]
     deep_tasks = set(args.deep_tasks.split(",")) if args.deep_tasks else {t["id"] for t in tasks}
 
     store = Store(Config())
     prefs = store.preferences()
-    cheap, strong = find_connection(store, args.cheap), find_connection(store, args.strong)
+    singles = {f"single:{c['model']}": c for c in (find_connection(store, f) for f in args.single)}
+    arms = [*singles, *(f"leo-{m}" for m in modes)]
     names = {c["id"]: c["model"] for c in store.list_connections()}
-    meta = {"started": time.strftime("%Y-%m-%d %H:%M"), "cheap": cheap["model"], "strong": strong["model"],
+    meta = {"started": time.strftime("%Y-%m-%d %H:%M"), "singles": [c["model"] for c in singles.values()],
             "roles": ", ".join(f"{r}={names.get(prefs.get(f'{r}_id'), 'auto')}" for r in ("generator", "planner", "reviewer")),
             "max_output_tokens": prefs["max_output_tokens"], "max_repairs": prefs["max_repairs"]}
     print(json.dumps(meta), flush=True)
@@ -192,8 +264,8 @@ async def main():
             for arm in arms:
                 if arm == "leo-deep" and task["id"] not in deep_tasks:
                     continue
-                if arm.startswith("single"):
-                    result = await single(store, cheap if arm == "single-cheap" else strong, task["prompt"], prefs)
+                if arm in singles:
+                    result = await single(store, singles[arm], task["prompt"], prefs)
                 else:
                     result = await leo(client, task["prompt"], arm.removeprefix("leo-"))
                 passed, detail = acceptance(result["output"], task) if result["output"] else (False, result.get("error") or "no output")
@@ -201,7 +273,7 @@ async def main():
                 results.append(result)
                 # Save after every run so a late failure never loses completed (and paid-for) work.
                 stem.with_suffix(".json").write_text(json.dumps({"meta": meta, "results": results}, indent=2))
-                print(f"{task['id']:<10} {arm:<14} {'PASS' if passed else 'FAIL'}  tokens={(result.get('input_tokens') or 0) + (result.get('output_tokens') or 0):>6}  "
+                print(f"{task['id']:<10} {arm:<34} {'PASS' if passed else 'FAIL'}  tokens={(result.get('input_tokens') or 0) + (result.get('output_tokens') or 0):>6}  "
                       f"calls={result['calls']}  {result['seconds']:>5}s  {'' if passed else detail}", flush=True)
                 await asyncio.sleep(args.pause)
     store.engine.dispose()

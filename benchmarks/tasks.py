@@ -1,4 +1,4 @@
-"""Representative coding tasks with hidden acceptance tests (spec §9).
+"""Representative tasks: coding tasks with hidden acceptance tests, and a website task scored by rubric (spec §9).
 
 Prompts state the full contract; tests are never shown to any model. Each test file imports the
 candidate solution from ``solution.py`` and exits non-zero on the first failed assertion.
@@ -126,5 +126,41 @@ for good in ["0.0.0.0", "255.255.255.255", "192.168.1.1", "10.0.0.10"]:
 for bad in ["", "1.1.1", "1.1.1.1.1", "256.1.1.1", "01.1.1.1", "1.1.1.+1", " 1.1.1.1", "1..1.1", "a.b.c.d", "1.1.1.1 ", "١.1.1.1", "1.1.1.-0"]:
     assert not is_valid_ipv4(bad), bad
 """,
+    },
+    {
+        "id": "website",
+        "kind": "page",
+        # The user's own example, sent exactly as typed; nothing about the rubric is revealed.
+        "prompt": "Create me a coffee shop website",
+    },
+    {
+        "id": "landing",
+        "kind": "page",
+        "prompt": "Create a landing page with a clean, minimalist design for a note-taking app.",
+    },
+    {
+        "id": "longapp",
+        "kind": "app",
+        # A long, multi-feature build: tests long generation, Deep-mode orchestration, and timeouts.
+        "prompt": "Build a complete personal finance tracker as a single HTML file with embedded CSS and JavaScript. "
+                  "Requirements: add, edit, and delete transactions (date, description, amount, income or expense, category); "
+                  "validate the form; show current balance, total income, and total expenses; filter the list by month and category; "
+                  "draw a chart of spending by category for the selected month without external libraries; persist everything in "
+                  "localStorage so it survives a reload; export the visible transactions as a CSV file; and make the layout work on "
+                  "phones and desktops.",
+        "features": {
+            "add form": r"<form\b|addEventListener\(\s*['\"]submit",
+            "edit": r"\bedit",
+            "delete": r"\bdelete|\bremove|splice\(|filter\(",
+            "categories": r"categor",
+            "validation": r"\brequired\b|isNaN|checkValidity|Number\.isFinite|parseFloat",
+            "totals": r"(balance|income|expense)",
+            "month filter": r"type=[\"']month|getMonth\(|slice\(0,\s*7\)|month",
+            "chart without libraries": r"<canvas|getContext\(|<svg",
+            "localStorage": r"localStorage\.(setItem|getItem)",
+            "CSV export": r"text/csv|\.csv|Blob\(",
+            "responsive": r"@media|minmax\(|flex-wrap",
+            "no external libraries": None,
+        },
     },
 ]

@@ -62,18 +62,17 @@ import '../styles/global.css';
           <details><summary>Run activity</summary><ol id="run-events"></ol></details>
         </section>
         <div class="composer-area" id="composer-area">
-          <div class="composer-toolbar">
-            <label for="composer-mode" class="sr-only">Orchestration mode</label>
-            <select id="composer-mode" title="Orchestration mode"><option value="auto">Auto · L.E.O. decides</option><option value="quick">Quick · one answer</option><option value="reviewed">Reviewed · generate + review</option><option value="deep">Deep · plan + review</option></select>
-            <button type="button" id="context-meter" class="context-meter" title="Context used by the latest call in this conversation" aria-controls="usage-panel" hidden><span class="meter"><span></span></span><span id="context-text"></span></button>
-            <span id="connection-status">Connecting…</span>
-          </div>
           <form class="composer" id="chat-form">
             <label class="sr-only" for="prompt">Your message to L.E.O</label>
             <textarea id="prompt" name="prompt" placeholder="Message L.E.O…" rows="1" maxlength="12000"></textarea>
-            <button class="send-button" id="send-button" type="submit" aria-label="Send message" title="Send message" disabled><Icon name="arrow" size={18} /><span class="stop-square" hidden></span></button>
+            <div class="composer-row">
+              <label for="composer-mode" class="sr-only">Orchestration mode</label>
+              <select id="composer-mode" title="Orchestration mode"><option value="auto">Auto · L.E.O. decides</option><option value="quick">Quick · one answer</option><option value="reviewed">Reviewed · generate + review</option><option value="deep">Deep · plan + review</option></select>
+              <button type="button" id="context-meter" class="context-meter" title="Context used by the latest call in this conversation" aria-controls="usage-panel" hidden><span class="meter"><span></span></span><span id="context-text"></span></button>
+              <button class="send-button" id="send-button" type="submit" aria-label="Send message" title="Send message" disabled><Icon name="arrow" size={18} /><span class="stop-square" hidden></span></button>
+            </div>
           </form>
-          <p class="composer-note" id="composer-note">Connect a local model or API in Settings.</p>
+          <p class="composer-foot"><span id="connection-status">Connecting…</span><span id="composer-note">Connect a local model or API in Settings.</span></p>
         </div>
       </main>
     </div>
@@ -133,6 +132,7 @@ import '../styles/global.css';
           </div>
           <datalist id="model-catalog"></datalist>
           <label>API key<input id="provider-key" type="password" autocomplete="new-password" placeholder="Optional for local servers" /></label>
+          <label id="provider-key-from-row" hidden>Or reuse a saved key <span class="field-hint">Only connections to the same host are listed</span><select id="provider-key-from"><option value="">No, use the key above</option></select></label>
           <label class="check-label"><input id="provider-clear-key" type="checkbox" /> Remove saved API key</label>
           <div class="field-grid">
             <label>Context window<input id="provider-context" type="number" value="32768" min="1024" max="2000000" required /></label>
@@ -191,9 +191,9 @@ import '../styles/global.css';
           <label>Max estimated cost / run ($)<input id="max-cost" type="number" min="0.001" max="100" step="any" required /></label>
           <label>Max model calls / run<input id="max-calls" type="number" min="1" max="20" required /></label>
           <label>Max repair rounds<input id="max-repairs" type="number" min="0" max="3" required /></label>
-          <label>Max output tokens / call<input id="max-output-tokens" type="number" min="128" max="16384" required /></label>
-          <label>Context tokens / call<input id="context-tokens" type="number" min="1024" max="128000" required /></label>
-          <label>Total token allowance / run<input id="token-budget" type="number" min="2048" max="1000000" required /></label>
+          <label>Max output tokens / call<input id="max-output-tokens" type="number" min="128" max="65536" required /></label>
+          <label>Context tokens / call<input id="context-tokens" type="number" min="1024" max="1000000" required /></label>
+          <label>Total token allowance / run<input id="token-budget" type="number" min="2048" max="2000000" required /></label>
           <label>Provider timeout (seconds)<input id="timeout-seconds" type="number" min="10" max="600" required /></label>
           <label>Run time limit (seconds)<input id="max-run-seconds" type="number" min="30" max="3600" required /></label>
         </div>

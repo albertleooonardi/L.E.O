@@ -38,6 +38,7 @@ def test_rank_prefers_capable_specialist_then_cheapest_tier():
     assert ordered[0]['id'] == 's' and 'light tier fits light work' in reason
     assert rank(models, 'coding', 'light', PREFS)[0][0]['id'] != 'n', 'reasoning models are avoided for light work'
     assert rank([SMALL], 'frontend', 'strong', PREFS)[1].startswith('no model lists this skill')
+    assert 'models with the frontend skill are too light for strong work' in rank([GEMINI, BIG], 'frontend', 'strong', PREFS)[1]
 
 
 async def test_deep_routes_each_subtask_to_its_specialist(store):

@@ -6,8 +6,12 @@ import uuid
 
 from . import providers
 from .context import parse_plan, parse_review, prepare_context, static_review, token_bound
-from .router import choose_mode, classify, rank
+from .router import EFFORT, choose_mode, classify, rank
 from .store import LostLease
+
+
+# Consecutive retryable failures per connection (this worker process); each one doubles the cooldown.
+_strikes: dict[str, int] = {}
 
 
 class Cancelled(Exception):
@@ -100,6 +104,8 @@ class Orchestrator:
         if stage in self.state["completed"]:
             return self.state["completed"][stage]
         choices, reason = self.candidates(role, skill, difficulty)
+        # Match thinking effort to the task: simple work should not run at full effort.
+        effort = EFFORT.get(difficulty or "light") if self.prefs.get("smart_routing", True) else None
         system = system or self.system_for(skill)
         errors = []
         for provider in choices:
@@ -125,7 +131,8 @@ class Orchestrator:
             finish = None
             try:
                 async with asyncio.timeout(self.prefs["timeout_seconds"]):
-                    async for chunk in providers.stream(provider, self.store.decrypt(provider), context, output_limit_for_call, self.prefs["timeout_seconds"], self.transport):
+                    async for chunk in providers.stream(provider, self.store.decrypt(provider), context, output_limit_for_call,
+                                                          self.prefs["timeout_seconds"], self.transport, effort):
                         self.check()
                         text += chunk.text
                         pending += chunk.text
@@ -155,6 +162,7 @@ class Orchestrator:
                                        estimated=estimated, cost=cost, elapsed_ms=int((time.monotonic() - started) * 1000))
                 if finish in {"length", "max_tokens"}:
                     self.store.event(self.id, "warning", {"message": "Output limit reached; response may be incomplete."})
+                _strikes.pop(provider["id"], None)
                 self.state["completed"][stage] = text
                 self.save(usage=self.usage(), **({"output": text} if visible else {}))
                 return text
@@ -163,7 +171,8 @@ class Orchestrator:
                 error = str(exc) or "Provider timed out"
                 errors.append(f"{provider['name']}: {error}")
                 if isinstance(exc, providers.ProviderError) and exc.retryable:
-                    self.store.cooldown(provider["id"], exc.retry_after or 30)
+                    strikes = _strikes[provider["id"]] = _strikes.get(provider["id"], 0) + 1
+                    self.store.cooldown(provider["id"], min(3600, max(exc.retry_after or 30, 30 * 2 ** (strikes - 1))))
                 more = provider is not choices[-1]
                 self.store.event(self.id, "warning", {"message": f"{provider['name']}: {error.rstrip('.')}." + (" Trying the next eligible connection." if more else "")})
                 # Retain full reservations for failed/ambiguous requests: they may have been billed.
@@ -191,6 +200,7 @@ class Orchestrator:
                 plan = await self.call("planning", "planner", prompt, history=self.state["history"],
                     system='Create a concise execution plan for the user request. Return only JSON: {"tasks": [{"instruction": "Specific task and acceptance criteria", '
                            '"depends_on": [], "skill": "skill id", "difficulty": "light|standard|strong"}]}. Use 1 to 3 tasks, split by specialty when the request spans several. '
+                           'Earlier tasks should produce brief inputs (decisions, specs, data); make the last task depend on them and produce the complete final deliverable. '
                            f'Skills: {catalog}. Difficulty is how capable a model the task needs. Dependencies are 1-based indices of earlier tasks only. Do not answer the task yet.')
                 tasks = parse_plan(plan, {s["id"] for s in skills})
                 for task in tasks:
@@ -202,24 +212,41 @@ class Orchestrator:
                                                        "tasks": tasks})
                 if tasks:
                     outputs = {}
+                    final = tasks[-1]
+                    # When the last task builds on every earlier one, its result is the deliverable: skip the synthesis rewrite.
+                    ancestors, pending = set(), list(final["depends_on"])
+                    while pending:
+                        index = pending.pop()
+                        if index not in ancestors:
+                            ancestors.add(index)
+                            pending += tasks[index - 1]["depends_on"]
+                    chained = ancestors == {t["id"] for t in tasks[:-1]}
                     for task in tasks:
+                        last = chained and task is final
                         dependencies = "\n\n".join(f"Task {d}:\n{outputs[d]}" for d in task["depends_on"])
                         outputs[task["id"]] = await self.call(f"task_{task['id']}", "generator",
                             "ORIGINAL REQUEST:\n" + self.run["prompt"] + "\n\nYOUR SUBTASK:\n" + task["instruction"] +
-                            "\n\nDEPENDENCY RESULTS:\n" + (dependencies or "None"), history=self.state["history"],
-                            skill=task["skill"], difficulty=task["difficulty"])
+                            "\n\nDEPENDENCY RESULTS:\n" + (dependencies or "None") +
+                            ("\n\nYour result is the final answer the user sees: make it complete and self-contained." if last else
+                             "\n\nThis is an intermediate step: return only what later steps need, concisely, not the final answer."),
+                            history=self.state["history"], skill=task["skill"], difficulty=task["difficulty"], visible=last)
                         if f"task_{task['id']}" not in replayed:
                             self.store.event(self.id, "task", {"id": task["id"], "status": "completed", "instruction": task["instruction"], "skill": task["skill"]})
-                    prompt += "\n\nSynthesize these subtask results into one complete answer. Resolve inconsistencies and avoid repetition:\n" + json.dumps(outputs)
+                    if chained:
+                        answer, final_stage = outputs[final["id"]], f"task_{final['id']}"
+                    else:
+                        prompt += "\n\nSynthesize these subtask results into one complete answer. Resolve inconsistencies and avoid repetition:\n" + json.dumps(outputs)
                 elif "planning" not in replayed:
                     self.store.event(self.id, "warning", {"message": "Planner returned an invalid task graph; continuing with direct generation."})
             # Synthesis combines subtask results; it needs the request's main skill but rarely the strongest model.
             difficulty = "standard" if mode == "deep" else route["difficulty"]
-            answer = await self.call("generating", "generator", prompt, history=self.state["history"], visible=True,
-                                     skill=route["skill"], difficulty=difficulty)
+            if not answer:
+                final_stage = "generating"
+                answer = await self.call("generating", "generator", prompt, history=self.state["history"], visible=True,
+                                         skill=route["skill"], difficulty=difficulty)
             checks = static_review(answer)
             self.state["checks"] = checks
-            if "generating" not in replayed:
+            if final_stage not in replayed:
                 self.store.event(self.id, "validation", {"checks": checks})
             if mode != "quick":
                 for attempt in range(self.prefs["max_repairs"] + 1):

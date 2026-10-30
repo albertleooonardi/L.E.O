@@ -1,4 +1,5 @@
 import { canvas, extractPage, streamingHtml } from './canvas';
+import { renderMarkdown } from './markdown';
 import { breakdowns, compact, levelMeter, levelOf, money, node, percent, seconds, successRate, tokens, type Report } from './usage-ui';
 
 type Mode = 'auto' | 'quick' | 'reviewed' | 'deep';
@@ -61,28 +62,24 @@ function resizePrompt() { prompt.style.height = 'auto'; prompt.style.height = `$
 function scrollToLatest() { if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 350) requestAnimationFrame(() => window.scrollTo({ top: document.body.scrollHeight })); }
 
 // Render generated text as DOM nodes only. Model output never becomes HTML.
-function renderContent(target: HTMLElement, text: string) {
-  target.replaceChildren();
-  const parts = text.split(/```([^\n]*)\n([\s\S]*?)(?:```|$)/g);
-  for (let i = 0; i < parts.length; i += 3) {
-    if (parts[i]) { const p = document.createElement('div'); p.className = 'prose-text'; p.textContent = parts[i]; target.append(p); }
-    if (parts[i + 2] !== undefined) {
-      const wrapper = document.createElement('div'); wrapper.className = 'code-block';
-      const heading = document.createElement('div'); heading.className = 'code-heading';
-      const language = document.createElement('span'); language.textContent = parts[i + 1] || 'code';
-      const button = document.createElement('button'); button.textContent = 'Copy'; const codeText = parts[i + 2];
-      button.addEventListener('click', () => copy(codeText)); heading.append(language, button);
-      const pre = document.createElement('pre'); const code = document.createElement('code'); code.textContent = codeText; pre.append(code); wrapper.append(heading, pre); target.append(wrapper);
-    }
-  }
+function codeBlock(language: string, codeText: string) {
+  const wrapper = node('div', '', 'code-block');
+  const heading = node('div', '', 'code-heading');
+  const button = node('button', 'Copy', 'code-copy'); button.setAttribute('aria-label', `Copy ${language} code`);
+  button.addEventListener('click', async () => { await copy(codeText); button.textContent = 'Copied'; setTimeout(() => button.textContent = 'Copy', 1500); });
+  heading.append(node('span', language), button);
+  const pre = document.createElement('pre'); pre.tabIndex = 0; const code = document.createElement('code'); code.textContent = codeText; pre.append(code);
+  wrapper.append(heading, pre); return wrapper;
 }
+// Render generated text as DOM nodes only (see markdown.ts). Model output never becomes HTML.
+function renderContent(target: HTMLElement, text: string) { renderMarkdown(target, text, codeBlock); }
 async function copy(text: string) { try { await navigator.clipboard.writeText(text); toast('Copied'); } catch { toast('Select the text to copy it'); } }
 function messageNode(message: Message, pending = false) {
   const article = document.createElement('article'); article.className = `message ${message.role}`;
   const content = document.createElement('div'); content.className = 'message-content';
   if (pending) { article.id = 'pending-response'; content.id = 'pending-content'; }
   if (message.role === 'assistant') {
-    const name = document.createElement('div'); name.className = 'message-name'; name.textContent = 'L.E.O'; if (pending) name.append(node('span', '', 'working-dot')); article.append(name);
+    const name = document.createElement('div'); name.className = 'message-name'; if (pending) { name.textContent = 'L.E.O'; name.append(node('span', '', 'working-dot')); article.append(name); }
   }
   renderContent(content, message.content); article.append(content);
   if (message.role === 'assistant' && !pending) {
@@ -250,12 +247,14 @@ function renderDraft() {
   renderContent(target, draft);
   if (!draft) { target.append(...[78, 92, 54].map(width => { const line = node('span', '', 'skeleton-line'); line.style.width = `${width}%`; return line; })); return; }
   const caret = node('span', '', 'stream-caret'); caret.setAttribute('aria-hidden', 'true');
-  const last = target.lastElementChild;
-  (last?.classList.contains('prose-text') ? last : last?.querySelector('code') ?? target).append(caret);
+  // Put the caret where the text is growing: the last paragraph, list item, or code line.
+  let last = target.lastElementChild as HTMLElement | null;
+  while (last && (last.tagName === 'UL' || last.tagName === 'OL' || last.tagName === 'BLOCKQUOTE') && last.lastElementChild) last = last.lastElementChild as HTMLElement;
+  (last?.classList.contains('code-block') ? last.querySelector('code') : last ?? target)!.append(caret);
 }
 function watchRun(id: string) {
   closeStream(); activeRun = id; draft = ''; updateSend(); canvas.reset();
-  el('run-panel').hidden = false; el('run-status').textContent = 'Queued'; el('run-usage').textContent = ''; el('status-dot').dataset.status = 'running'; el('run-events').replaceChildren();
+  el('run-panel').hidden = true; el('run-status').textContent = 'Queued';  // The live view shows progress; the summary returns when the run ends. el('run-usage').textContent = ''; el('status-dot').dataset.status = 'running'; el('run-events').replaceChildren();
   el('messages').append(messageNode({ role: 'assistant', content: '' }, true));
   const run = current?.runs.find(r => r.id === id);
   const mode = (run?.mode || select('composer-mode').value) as Mode;
@@ -301,6 +300,9 @@ function watchRun(id: string) {
     const checks: { language: string; passed: boolean; message: string }[] = data.checks || [];
     for (const check of checks) logActivity(`${check.language}: ${check.message}`);
     const failed = checks.filter(c => !c.passed).length;
+    // In a chained Deep run the last subtask writes the answer, so there is no separate generate step.
+    const generate = document.querySelector<HTMLElement>('#run-live .stage-track li[data-stage="generate"]');
+    if (generate?.dataset.state === 'pending') setStage('generate', 'done', 'The last subtask wrote the answer');
     setStage('check', failed ? 'issues' : 'done', checks.length ? `${checks.length - failed} of ${checks.length} code blocks parse` : 'No Python or JSON code to check');
     if (mode === 'quick') setActivity('Finishing up');
   });
@@ -353,7 +355,7 @@ function refreshConnectionStatus() {
   const enabled = connections.filter(p => p.enabled);
   el('connection-status').textContent = ready ? `${enabled.length} model${enabled.length === 1 ? '' : 's'} connected` : 'Server offline';
   el('connect-models').hidden = enabled.length > 0;
-  el('composer-note').textContent = enabled.length ? 'Quick saves calls. Reviewed adds a second opinion. Deep adds a plan.' : 'Connect a local model or API in Settings.';
+  el('composer-note').textContent = enabled.length ? 'Auto picks the right model for each task. Answers can be wrong; check what matters.' : 'Connect a local model or API in Settings.';
 }
 function roleOptions(value: string | null) {
   return [new Option('Auto · follow fallback order', ''), ...connections.map(p => new Option(`${p.name} · ${p.model}${p.enabled ? '' : ' (disabled)'}`, p.id, false, p.id === value))];
@@ -367,6 +369,11 @@ function renderProviders() {
     const subtitle = document.createElement('small'); subtitle.textContent = `${p.model} · ${p.local ? 'local' : 'cloud'} · ${p.free ? 'no API charge' : 'paid'}${p.enabled ? '' : ' · disabled'}${p.has_key ? ' · key saved' : ''}`;
     const profile = document.createElement('small'); profile.textContent = `${p.tier} tier${p.reasoning ? ' · reasoning' : ''} · ${p.skills.length ? p.skills.map(id => skills.find(s => s.id === id)?.name || id).join(', ') : 'generalist'}`;
     detail.append(name, subtitle, profile);
+    if (!p.has_key && !p.local) {
+      // Cloud models almost always need a key; make a missing one impossible to miss.
+      card.classList.add('needs-key');
+      detail.append(Object.assign(document.createElement('small'), { className: 'key-warning', textContent: 'No API key saved. Click Edit, paste the key, then Save connection.' }));
+    }
     const actions = document.createElement('div'); actions.className = 'provider-actions';
     for (const [label, handler] of [
       ['Edit', () => editProvider(p)],
@@ -402,7 +409,17 @@ function applyPreset() {
   field('provider-name').value = preset.name; field('provider-url').value = preset.base_url; select('provider-protocol').value = preset.protocol;
   field('provider-local').checked = Boolean(preset.local); field('provider-free').checked = Boolean(preset.free); el('provider-hint').textContent = preset.hint;
   select('provider-tier').value = preset.tier || 'standard'; field('provider-reasoning').checked = Boolean(preset.reasoning); renderSkillPicker(preset.skills || []);
+  renderKeySources();
 }
+// One credential can serve several models from the same provider host.
+function renderKeySources() {
+  let host = ''; try { host = new URL(field('provider-url').value).hostname; } catch {}
+  const own = field('provider-id').value;
+  const sources = connections.filter(c => c.has_key && c.id !== own && (() => { try { return new URL(c.base_url).hostname === host; } catch { return false; } })());
+  select('provider-key-from').replaceChildren(new Option('No, use the key above', ''), ...sources.map(c => new Option(`${c.name} · ${c.model}`, c.id)));
+  el('provider-key-from-row').hidden = !sources.length;
+}
+field('provider-url').addEventListener('input', renderKeySources);
 function renderSkillPicker(selected: string[]) {
   el('provider-skills').replaceChildren(...skills.map(skill => {
     const label = document.createElement('label'); label.className = 'skill-option'; label.title = skill.description;
@@ -450,7 +467,7 @@ function editProvider(provider?: Provider) {
     for (const [id, value] of Object.entries({ name: provider.name, url: provider.base_url, model: provider.model, context: provider.context_window, priority: provider.priority, 'input-price': provider.input_price ?? '', 'output-price': provider.output_price ?? '' })) field(`provider-${id}`).value = String(value);
     select('provider-protocol').value = provider.protocol; select('provider-token-param').value = provider.token_parameter;
     for (const key of ['local', 'free', 'enabled', 'reasoning'] as const) field(`provider-${key}`).checked = Boolean(provider[key]);
-    select('provider-tier').value = provider.tier || 'standard'; renderSkillPicker(provider.skills || []);
+    select('provider-tier').value = provider.tier || 'standard'; renderSkillPicker(provider.skills || []); renderKeySources();
     el('provider-hint').textContent = presets.find(p => p.id === select('provider-preset').value)?.hint || '';
   }
   field('provider-name').focus();
@@ -465,6 +482,7 @@ el('provider-form').addEventListener('submit', async event => {
   const body = {
     name: field('provider-name').value.trim(), protocol: select('provider-protocol').value, base_url: field('provider-url').value.trim(), model: field('provider-model').value.trim(),
     api_key: field('provider-clear-key').checked ? '' : field('provider-key').value.trim() || null,
+    key_from: select('provider-key-from').value || null,
     local: field('provider-local').checked, free: field('provider-free').checked, enabled: field('provider-enabled').checked,
     priority: Number(field('provider-priority').value), context_window: Number(field('provider-context').value), input_price: price('provider-input-price'), output_price: price('provider-output-price'), token_parameter: select('provider-token-param').value,
     tier: select('provider-tier').value, reasoning: field('provider-reasoning').checked,

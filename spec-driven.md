@@ -24,7 +24,7 @@ Local inference and cloud APIs are both first-class. Free-first is an optional r
 8. When the answer is a web page, watch its code stream into the canvas, then use the live preview.
 9. Stop explicitly, or close/reopen the browser while the durable run continues.
 
-A connection represents one provider endpoint/model pair. Multiple models can use the same provider and credential. Keys are encrypted at rest and never returned to the UI.
+A connection represents one provider endpoint/model pair. Multiple models can use the same provider and credential: a new connection can reuse another connection's saved key, only for the same host. Keys are encrypted at rest and never returned to the UI.
 
 ## 3. Supported inference connections
 
@@ -49,7 +49,7 @@ Skills are owner-editable records (name, description, keywords, prompt instructi
 
 Classification is rule-based and costs no tokens: keyword matches choose the skill (a build request's object, such as "website", decides the main deliverable; specific skills win ties over General), and signals (build request, scope words, several skills, several parts, length) set difficulty. Auto mode uses Quick for light/standard work, Reviewed for strong single-skill work, and Deep for strong multi-skill work or build requests.
 
-For each generator call the head ranks eligible connections: strong enough for the difficulty first; then, for light work, non-reasoning models; then models with the skill, then generalists (no skills listed); then the lightest sufficient tier; then the configured fallback order. Each `model` event carries the skill, difficulty, and the reason for the choice. Planner and reviewer role assignments still apply; with smart routing off, the v0.1 role/fallback behavior is used. The skill's instructions are appended to the generator's system prompt. The route is persisted with the run so recovery replays the same decisions.
+For each generator call the head ranks eligible connections: strong enough for the difficulty first; then, for light work, non-reasoning models; then models with the skill, then generalists (no skills listed); then the lightest sufficient tier; then the configured fallback order. Each `model` event carries the skill, difficulty, and the reason for the choice. Planner and reviewer role assignments still apply; with smart routing off, the v0.1 role/fallback behavior is used. The skill's instructions are appended to the generator's system prompt. Reasoning models receive a thinking-effort setting by difficulty (light/standard → low, strong → medium), in each API's own form. The route is persisted with the run so recovery replays the same decisions.
 
 ### Quick
 
@@ -64,26 +64,26 @@ Generate → static checks → semantic reviewer → if needed, repair → re-re
 1. Planner returns a validated graph of 1–3 tasks, each labeled with a skill from the owner's list and a difficulty; invalid or missing labels are filled by the rule classifier.
 2. Each task can depend only on earlier task indices, preventing cycles.
 3. Tasks run in dependency order with the original request and required dependency outputs; each task is routed to a model by its own skill and difficulty.
-4. A generator chosen for the request's main skill (standard difficulty) synthesizes task results into one final answer.
+4. When the last task depends (directly or transitively) on every earlier task, its streamed result is the final answer and no synthesis call is made; earlier tasks are told to return only brief inputs. Otherwise a generator chosen for the request's main skill (standard difficulty) synthesizes task results into one final answer.
 5. Reviewer/repair loop applies as in Reviewed mode.
 
 Completed stages are checkpointed. Invalid task plans generate a warning and fall back to direct generation. Deep mode intentionally uses more calls and is user-selected.
 
 ### Routing and failures
 
-For generator calls under smart routing, the routing head orders candidates (above). Otherwise an explicitly assigned role connection is preferred. Remaining candidates are ordered by local-first, free-first, or numeric priority. Disabled/deleted connections, disallowed paid models, and endpoints in cooldown are excluded. Each eligible endpoint is attempted at most once per stage. Retryable failures cause a cooldown; the next eligible connection is tried. No eligible provider produces an actionable failed run rather than unbounded retries.
+For generator calls under smart routing, the routing head orders candidates (above). Otherwise an explicitly assigned role connection is preferred. Remaining candidates are ordered by local-first, free-first, or numeric priority. Disabled/deleted connections, disallowed paid models, and endpoints in cooldown are excluded. Each eligible endpoint is attempted at most once per stage. Retryable failures cause a cooldown that doubles with each consecutive failure (from 30 seconds up to one hour, never shorter than the provider's retry hint) and resets on success; the next eligible connection is tried. No eligible provider produces an actionable failed run rather than unbounded retries.
 
 ### Usage limits
 
 Before every provider request, reserve an input estimate plus the maximum output allowance. Enforce per-run limits for calls, tokens, time, and estimated dollars. All planner, task, synthesis, review, repair, and failed calls count. Paid endpoints require explicit opt-in and configured input/output prices.
 
-Provider-reported usage replaces estimates when available. Failed and ambiguous calls retain their reservations. Dollar estimates depend on user-maintained rates and do not replace provider billing controls. There is no automatic transition from free usage to paid usage without prior opt-in.
+Provider-reported usage replaces estimates when available; when an API leaves billed thinking tokens out of its output count but reports a total, output is taken as total minus input. Failed and ambiguous calls retain their reservations. Dollar estimates depend on user-maintained rates and do not replace provider billing controls. There is no automatic transition from free usage to paid usage without prior opt-in.
 
 ## 5. Context management
 
 Preserve the current request and system instructions exactly. Select the most recent complete conversation turns that fit the context allowance. Report how many older messages were omitted. If required context cannot fit, fail with an actionable error.
 
-The implementation uses conservative UTF-8 byte-based reservations across model families. It does not claim exact tokenizer counts before a call or a fixed compaction percentage. Learned summarization, retrieval, and GraphRAG are deferred until their quality/cost benefit is measured.
+The implementation uses conservative UTF-8 byte-based reservations across model families (about 3 bytes per token, above real counts for English, code, and multi-byte scripts). It does not claim exact tokenizer counts before a call or a fixed compaction percentage. Learned summarization, retrieval, and GraphRAG are deferred until their quality/cost benefit is measured.
 
 ## 6. Architecture
 

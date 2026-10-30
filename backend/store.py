@@ -4,6 +4,7 @@ import re
 import time
 import tempfile
 import uuid
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
 from sqlalchemy import (JSON, Boolean, Column, Float, Integer, MetaData, String, Table, Text,
@@ -157,6 +158,7 @@ class Store:
     def save_connection(self, value, connection_id=None):
         data = dict(value)
         key = data.pop("api_key", None)
+        key_from = data.pop("key_from", None)
         known = {s["id"] for s in self.list_skills()}
         unknown = [s for s in data.get("skills", []) if s not in known]
         if unknown:
@@ -167,6 +169,14 @@ class Store:
         secret = existing.get("secret") if existing else None
         if key is not None:
             secret = self.cipher.encrypt(key.encode()).decode() if key else None
+        elif key_from:
+            source = self.get_connection(key_from, True)
+            if not source or not source.get("secret"):
+                raise ValueError("The connection to copy a key from has no saved key")
+            # A key is only reused for the host it was saved for, so it can never be sent somewhere new.
+            if urlsplit(source["base_url"]).hostname != urlsplit(data["base_url"]).hostname:
+                raise ValueError("A saved key can only be reused for the same provider host")
+            secret = source["secret"]
         connection_id = connection_id or str(uuid.uuid4())
         with self.engine.begin() as db:
             if existing:

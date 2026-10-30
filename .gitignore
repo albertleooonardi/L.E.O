@@ -15,3 +15,4 @@ frontend/.astro/
 *.log
 # Stopped Auto-mode run (Gemini quota exhausted); kept locally, not representative
 benchmarks/results/benchmark-20261029-231837.json
+.leo-bench/

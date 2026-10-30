@@ -31,18 +31,28 @@ def headers(provider, key):
     return result
 
 
-def make_request(provider, messages, max_tokens):
+def make_request(provider, messages, max_tokens, effort=None):
+    """Build the request. `effort` (low/medium/high) is sent only to reasoning models, in each API's own form."""
     protocol = provider["protocol"]
     payload = {"model": provider["model"], "stream": True}
+    effort = effort if provider.get("reasoning") else None
     if protocol == "anthropic":
         payload.update(system="\n\n".join(m["content"] for m in messages if m["role"] == "system"),
                        messages=[m for m in messages if m["role"] != "system"], max_tokens=max_tokens)
         return "/messages", payload
     if protocol == "responses":
         payload.update(input=messages, max_output_tokens=max_tokens, store=False)
+        if effort:
+            payload["reasoning"] = {"effort": effort}
         return "/responses", payload
     payload.update(messages=messages, stream_options={"include_usage": True})
     payload[provider.get("token_parameter", "max_tokens")] = max_tokens
+    if effort:
+        # OpenRouter takes a reasoning object; OpenAI-compatible APIs (OpenAI, Gemini, vLLM) take reasoning_effort.
+        if "openrouter.ai" in provider["base_url"]:
+            payload["reasoning"] = {"effort": effort}
+        else:
+            payload["reasoning_effort"] = effort
     return "/chat/completions", payload
 
 
@@ -77,8 +87,13 @@ def check_status(response):
 def usage_chunk(usage):
     def count(value):
         return value if type(value) is int and value >= 0 else None
-    return Chunk(input_tokens=count(usage.get("input_tokens", usage.get("prompt_tokens"))),
-                 output_tokens=count(usage.get("output_tokens", usage.get("completion_tokens"))))
+    input_tokens = count(usage.get("input_tokens", usage.get("prompt_tokens")))
+    output_tokens = count(usage.get("output_tokens", usage.get("completion_tokens")))
+    total = count(usage.get("total_tokens"))
+    # Some APIs (Gemini) leave billed thinking tokens out of the output count but include them in the total.
+    if total is not None and input_tokens is not None and output_tokens is not None:
+        output_tokens = max(output_tokens, total - input_tokens)
+    return Chunk(input_tokens=input_tokens, output_tokens=output_tokens)
 
 
 def decode_chunk(protocol, data):
@@ -115,8 +130,8 @@ def decode_chunk(protocol, data):
     return Chunk()
 
 
-async def stream(provider, key, messages, max_tokens, timeout, transport=None):
-    path, payload = make_request(provider, messages, max_tokens)
+async def stream(provider, key, messages, max_tokens, timeout, transport=None, effort=None):
+    path, payload = make_request(provider, messages, max_tokens, effort)
     finished = False
     output_bytes = 0
     try:
