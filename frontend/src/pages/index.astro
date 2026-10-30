@@ -68,6 +68,7 @@ import '../styles/global.css';
             <div class="composer-row">
               <label for="composer-mode" class="sr-only">Orchestration mode</label>
               <select id="composer-mode" title="Orchestration mode"><option value="auto">Auto · L.E.O. decides</option><option value="quick">Quick · one answer</option><option value="reviewed">Reviewed · generate + review</option><option value="deep">Deep · plan + review</option></select>
+              <button type="button" id="search-toggle" class="search-toggle" aria-pressed="false" title="Search the web for this message (otherwise L.E.O. decides)"><Icon name="globe" size={15} /><span>Search</span></button>
               <button type="button" id="context-meter" class="context-meter" title="Context used by the latest call in this conversation" aria-controls="usage-panel" hidden><span class="meter"><span></span></span><span id="context-text"></span></button>
               <button class="send-button" id="send-button" type="submit" aria-label="Send message" title="Send message" disabled><Icon name="arrow" size={18} /><span class="stop-square" hidden></span></button>
             </div>
@@ -118,6 +119,14 @@ import '../styles/global.css';
         <div class="section-heading"><h3 id="connections-heading">Model connections</h3><button class="secondary-button" id="add-connection">Add model</button></div>
         <p class="field-hint">Connect local servers or provider APIs. Add each model separately to give it a role.</p>
         <div id="provider-list" class="provider-list"></div>
+        <section id="discover-panel" class="discover-panel" aria-labelledby="discover-title" hidden>
+          <div class="section-heading"><h3 id="discover-title">Models this key can use</h3><button type="button" class="secondary-button" id="discover-close">Close</button></div>
+          <p class="field-hint" id="discover-hint"></p>
+          <div id="discover-list" class="discover-list"></div>
+          <label class="check-label"><input id="discover-check" type="checkbox" checked /> Check access first (one tiny request per model; skips models your key cannot use)</label>
+          <p class="form-feedback" id="discover-feedback" role="status"></p>
+          <div class="form-actions"><button type="button" class="secondary-button" id="discover-none">Select none</button><button type="button" class="primary-button" id="discover-add">Add selected</button></div>
+        </section>
         <form id="provider-form" class="provider-form" hidden>
           <input id="provider-id" type="hidden" />
           <div class="field-grid">
@@ -185,6 +194,15 @@ import '../styles/global.css';
         </div>
         <label class="check-label"><input id="smart-routing" type="checkbox" /> Smart routing: pick the generator for each task by skill and difficulty</label>
         <p class="field-hint">With smart routing, the generator assignment is ignored and each task goes to the cheapest model with the right skill and strength. Planner and reviewer assignments still apply. On failure, L.E.O. tries the next eligible connection.</p>
+        <fieldset class="search-settings"><legend>Web search</legend>
+          <p class="field-hint">For requests that need current or outside information (sources, latest, news, prices, a link), L.E.O. searches your SearXNG instance, reads the top pages, and cites them. Reading pages costs tokens, so plain questions are answered from model knowledge.</p>
+          <div class="field-grid">
+            <label>When to search<select id="web-search"><option value="auto">Auto: when the request needs it</option><option value="off">Off</option></select></label>
+            <label>Pages per search<input id="search-pages" type="number" min="1" max="5" required /></label>
+          </div>
+          <label>SearXNG address <span class="field-hint">e.g. http://localhost:8888, with JSON output enabled</span><input id="search-url" type="url" placeholder="http://localhost:8888" /></label>
+          <div class="form-actions"><button type="button" class="secondary-button" id="test-search">Test search</button></div>
+        </fieldset>
         <label>Default mode<select id="mode-select"><option value="auto">Auto · L.E.O. decides</option><option value="quick">Quick</option><option value="reviewed">Reviewed</option><option value="deep">Deep</option></select></label>
         <label class="check-label"><input id="allow-paid" type="checkbox" /> Allow paid API usage within the run limit</label>
         <div class="field-grid">

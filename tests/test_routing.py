@@ -107,3 +107,21 @@ def test_skills_api_and_route_preview(client, store):
     assert preview['skill'] == 'data-science' and preview['candidates'][0]['id'] == analyst['id'] and preview['mode'] == 'quick'
     assert client.delete('/api/skills/data-science').status_code == 200
     assert store.get_connection(analyst['id'])['skills'] == []
+
+
+def test_auto_reviews_only_checkable_work():
+    from backend.router import wants_review
+    assert not wants_review({'auto': True, 'skill': 'frontend'}, 'deep'), 'design reviews are cosmetic: skip in Auto'
+    assert wants_review({'auto': True, 'skill': 'backend'}, 'deep')
+    assert wants_review({'auto': False, 'skill': 'frontend'}, 'deep'), 'a mode you pick yourself always reviews'
+    assert wants_review({'auto': True, 'skill': 'design'}, 'reviewed')
+    assert not wants_review({'auto': True, 'skill': 'coding'}, 'quick')
+
+
+def test_simple_questions_are_light_and_general_work_goes_to_the_lightest_capable_model():
+    assert classify('What is an API?', SKILLS)['difficulty'] == 'light' and classify('What is an API?', SKILLS)['skill'] == 'general'
+    assert classify('Translate good morning to Indonesian', SKILLS)['difficulty'] == 'light'
+    lite = {'id': 'l', 'name': 'Lite', 'model': 'flash-lite', 'skills': [], 'tier': 'light', 'reasoning': False, 'local': False, 'free': True, 'priority': 10}
+    flash = {**GEMINI, 'skills': ['general', 'frontend']}
+    ordered, reason = rank([flash, lite], 'general', 'light', PREFS)
+    assert ordered[0]['id'] == 'l' and 'lightest capable' in reason

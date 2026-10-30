@@ -250,7 +250,8 @@ class Store:
             row = dict(id=run_id, request_id=request.request_id, conversation_id=conversation_id,
                        status="queued", phase="queued", mode=mode, prompt=request.prompt, created_at=now,
                        updated_at=now, lease_until=0, cancel_requested=False,
-                       state={"preferences": prefs, "providers": providers, "skills": self.list_skills(), "history": history, "completed": {}, "repair": 0},
+                       state={"preferences": prefs, "providers": providers, "skills": self.list_skills(), "history": history, "completed": {}, "repair": 0,
+                              "search": request.search},
                        output="", error=None, usage={})
             db.execute(insert(runs).values(**row))
             db.execute(insert(events).values(run_id=run_id, kind="status", data={"phase": "queued", "message": "Waiting for worker"}, created_at=now))

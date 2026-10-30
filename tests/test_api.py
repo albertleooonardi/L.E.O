@@ -114,3 +114,12 @@ def test_one_key_serves_many_models_on_the_same_host_only(client, store):
     stolen = client.post('/api/connections', json=Connection(name='Elsewhere', base_url='https://evil.test/v1', model='x', key_from=first['id']).model_dump())
     assert stolen.status_code == 400 and 'same provider host' in stolen.json()['detail']
     assert 'key_from' not in store.get_connection(second.json()['id'])
+
+
+def test_search_test_explains_missing_setup_and_settings_validate_url(client):
+    response = client.post('/api/search/test')
+    assert response.status_code == 400 and 'not set up' in response.json()['detail']
+    bad = client.put('/api/settings', json={**client.get('/api/settings').json(), 'search_url': 'ftp://x'})
+    assert bad.status_code == 422
+    good = client.put('/api/settings', json={**client.get('/api/settings').json(), 'search_url': 'http://localhost:8888/'})
+    assert good.status_code == 200 and good.json()['search_url'] == 'http://localhost:8888'

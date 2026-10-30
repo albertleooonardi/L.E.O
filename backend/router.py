@@ -26,6 +26,9 @@ STARTER_SKILLS = [
     {"id": "design", "name": "Design", "description": "Visual design, UX, branding, color, typography, and layout.",
      "keywords": ["design", "ux", "user experience", "color", "colour", "palette", "typography", "font", "branding", "brand", "logo", "layout", "wireframe", "style guide", "mockup", "aesthetic", "theme"],
      "instructions": "Make specific, justified design choices: name colors as hex values, typefaces, spacing, and hierarchy. Prefer a distinctive direction that fits the subject over generic defaults."},
+    {"id": "research", "name": "Research", "description": "Finding current information on the web and summarizing it with sources.",
+     "keywords": ["search", "research", "sources", "references", "cite", "citations", "latest", "news", "look up", "find out", "reviews", "prices", "compare prices"],
+     "instructions": "Use the provided sources for facts that may have changed and cite them as [n]. Say when sources disagree or do not cover something. End with a short Sources list of the URLs you used."},
     {"id": "reasoning", "name": "Reasoning", "description": "Math, logic, proofs, planning under constraints, and analysis.",
      "keywords": ["prove", "proof", "calculate", "math", "equation", "probability", "logic", "puzzle", "optimize", "optimise", "derive", "statistics", "estimate", "analyze", "analyse", "trade-off", "tradeoff"],
      "instructions": "Reason step by step, check the result, and state the final answer clearly."},
@@ -33,6 +36,14 @@ STARTER_SKILLS = [
 
 BUILD_NOUNS = r"app|application|website|web page|webpage|landing page|site|page|api|server|backend|system|platform|project|game|dashboard|store|shop|bot|cli|script"
 BUILD_WORDS = re.compile(rf"\b(build|create|make|develop|design|generate)\b.*?\b({BUILD_NOUNS})\b", re.I | re.S)
+# Requests that need fresh or external information; HEAD plans a web search for these (when search is set up).
+SEARCH_CUES = re.compile(r"\b(search (for|the web|online|the internet)|web search|look ?up|google it|browse the web|on the (web|internet)|"
+                         r"latest|newest|most recent|breaking|news|right now|as of (today|now)|today's|this (week|month)'s|"
+                         r"current (prices?|version|events?|weather|rates?|status)|prices? of|how much (is|are|does|do)|"
+                         r"sources|with references|cite|citations?|according to|reviews of|weather)\b", re.I)
+URLS = re.compile(r"https?://[^\s<>()\"']+[^\s<>().,;:!?\"']")
+# Short questions asking for an explanation or a quick transformation are light work, whatever their topic.
+SIMPLE_QUESTION = re.compile(r"^\s*(what|who|when|where|why|how (do|does|is|are|can)|explain|define|what's|is|are|can|translate|summari[sz]e)\b", re.I)
 HARD_WORDS = re.compile(r"\b(complete|full|production|entire|end-to-end|architecture|scalable|multi-page|multiple pages|with (a )?backend|secure|optimi[sz]e|prove)\b", re.I)
 
 
@@ -68,13 +79,30 @@ def classify(text, skills):
         signals.append("multiple parts")
     if len(text) > 1200:
         signals.append("long request")
-    if "build request" in signals or len(signals) >= 2 or (signals and len(matched) >= 2):
+    simple = bool(SIMPLE_QUESTION.match(text)) and len(text) <= 160 and not signals and "```" not in text
+    if simple:
+        difficulty = "light"
+        skill = skill if skill in {"reasoning", "research"} else ("general" if any(s["id"] == "general" for s in enabled) else skill)
+    elif "build request" in signals or len(signals) >= 2 or (signals and len(matched) >= 2):
         difficulty = "strong"
     elif signals or len(text) > 280 or matched and matched[-1] in {"coding", "backend", "reasoning", "frontend"}:
         difficulty = "standard"
     else:
         difficulty = "light"
-    return {"skill": skill, "difficulty": difficulty, "skills": matched[::-1], "signals": signals}
+    urls = list(dict.fromkeys(URLS.findall(text)))[:3]
+    search = bool(urls or SEARCH_CUES.search(text))
+    if search:
+        signals.append("needs web" if not urls else "reads given URL")
+    return {"skill": skill, "difficulty": difficulty, "skills": matched[::-1], "signals": signals, "search": search, "urls": urls}
+
+
+# Skills whose results a reviewer can check for correctness. Design, frontend, and writing reviews mostly
+# produce cosmetic nitpicks and a full rewrite, so Auto mode skips review for them.
+REVIEWABLE = {"coding", "backend", "reasoning"}
+
+
+def wants_review(route, mode):
+    return mode == "reviewed" or (mode == "deep" and (not route.get("auto") or route["skill"] in REVIEWABLE))
 
 
 def choose_mode(route):
@@ -96,8 +124,9 @@ def rank(connections, skill, difficulty, prefs, pinned=None):
 
     def key(c):
         tier = TIERS.get(c.get("tier", "standard"), 1)
-        has = skill in c.get("skills", [])
-        generalist = not c.get("skills")
+        # "General" is not a specialty: models listing it compete with generalists on tier and cost.
+        has = skill != "general" and skill in c.get("skills", [])
+        generalist = not c.get("skills") or "general" in c.get("skills", [])
         enough = tier >= need
         return (
             c["id"] != pinned if pinned else False,
@@ -117,7 +146,9 @@ def rank(connections, skill, difficulty, prefs, pinned=None):
     reasons = []
     if pinned and first["id"] == pinned:
         reasons.append("assigned in Settings")
-    if skill in first.get("skills", []):
+    if skill == "general":
+        reasons.append("general work: lightest capable model")
+    elif skill in first.get("skills", []):
         reasons.append(f"has the {skill} skill")
     elif any(skill in c.get("skills", []) for c in ordered):
         reasons.append(f"models with the {skill} skill are too light for {difficulty} work")

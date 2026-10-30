@@ -47,6 +47,18 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+  # Private web search for HEAD's research tasks. In Settings → Web search use http://searxng:8080 from
+  # the containers, or http://localhost:8888 when L.E.O. runs on the host (`docker compose up searxng`).
+  searxng:
+    image: searxng/searxng:latest
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8888/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-local-only}
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    ports:
+      - "127.0.0.1:8888:8080"
+    restart: unless-stopped
 volumes:
   postgres-data:
   leo-data:

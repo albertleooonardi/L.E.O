@@ -410,3 +410,12 @@ async def test_reasoning_models_get_low_effort_on_simple_work(store):
         return sse_response('Paris')
     await execute(store, make_run(store, mode='auto', prompt='What is the capital of France?'), handler)
     assert bodies[0]['reasoning_effort'] == 'low'
+
+
+async def test_usage_separates_actual_and_reserved_tokens(store):
+    add_provider(store)
+    store.save_connection(Connection(name='Backup', base_url='http://backup.test/v1', model='backup', free=True, priority=50).model_dump())
+    result = await execute(store, make_run(store), lambda r: httpx.Response(503) if r.url.host == 'local.test' else sse_response('ok'))
+    usage = result['usage']
+    assert usage['input_tokens'] == 25 and usage['output_tokens'] == 12, 'only the completed call counts as actual usage'
+    assert usage['reserved_tokens'] > 0 and usage['uncertain_calls'] == 1

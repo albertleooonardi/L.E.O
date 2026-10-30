@@ -16,7 +16,9 @@ from .catalog import PRESETS
 from .config import Config
 from .providers import ProviderError, list_models
 from .router import choose_mode, classify, rank
-from .schemas import Connection, Preferences, RouteInput, RunInput, Skill
+from .tools import ToolError, web_search
+from .discovery import check_access, discover
+from .schemas import AdoptModels, Connection, Preferences, RouteInput, RunInput, Skill
 from .store import Conflict, Store, TERMINAL
 
 
@@ -159,6 +161,16 @@ def create_app(config=None, store=None):
         store.delete_skill(skill_id)
         return {"ok": True}
 
+    @app.post("/api/search/test")
+    async def test_search():
+        """Check the configured SearXNG instance with one query; no model is called."""
+        url = store.preferences().get("search_url", "")
+        try:
+            found = await web_search("open source language models", url)
+        except ToolError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "results": len(found), "titles": [r["title"] for r in found[:3]]}
+
     @app.post("/api/route")
     def preview_route(body: RouteInput):
         """What the routing head would decide for this prompt, without calling a model."""
@@ -173,6 +185,47 @@ def create_app(config=None, store=None):
                 "note": "Deep mode asks the planner to label each subtask; those subtasks are routed the same way." if mode == "deep" else "",
                 "candidates": [{"id": c["id"], "name": c["name"], "model": c["model"], "tier": c["tier"], "skills": c["skills"],
                                 "reasoning": c["reasoning"]} for c in ordered]}
+
+    @app.post("/api/connections/{connection_id}/discover")
+    async def discover_models(connection_id: str):
+        """Every model this connection's key can use (OpenRouter: free only), with suggested routing profiles."""
+        source = store.get_connection(connection_id, True)
+        if not source:
+            raise HTTPException(404, "Connection not found")
+        try:
+            found = await discover(source, store.decrypt(source))
+        except ProviderError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        added = {c["model"] for c in store.list_connections() if c["base_url"] == source["base_url"]}
+        for model in found["models"]:
+            model["added"] = model["model"] in added
+        return found
+
+    @app.post("/api/connections/{connection_id}/adopt", status_code=201)
+    async def adopt_models(connection_id: str, body: AdoptModels):
+        """Add discovered models as connections that reuse this connection's key; optionally check access first."""
+        source = store.get_connection(connection_id, True)
+        if not source:
+            raise HTTPException(404, "Connection not found")
+        existing = {c["model"] for c in store.list_connections() if c["base_url"] == source["base_url"]}
+        wanted = [m for m in body.models if m.model not in existing]
+        problems = await check_access(source, store.decrypt(source), [m.model_dump() for m in wanted]) if body.check else {}
+        known_skills = {s["id"] for s in store.list_skills()}
+        created, skipped = [], [{"model": m.model, "reason": "already added"} for m in body.models if m.model in existing]
+        for m in wanted:
+            checked = problems.get(m.model) or {}
+            if checked.get("reason"):
+                skipped.append({"model": m.model, "reason": checked["reason"]})
+                continue
+            if "reasoning" in checked:
+                m.reasoning = checked["reasoning"]  # The check may have found the API rejects an effort setting.
+            label = (m.name or m.model).removesuffix(" (free)")
+            created.append(store.save_connection(Connection(
+                name=f"{source['name'].split(' · ')[0]} · {label}"[:80], protocol=source["protocol"], base_url=source["base_url"], model=m.model,
+                key_from=connection_id if source.get("secret") else None, free=source["free"] if m.free is None else m.free,
+                local=source["local"], priority=source["priority"], context_window=m.context_window, token_parameter=source["token_parameter"],
+                skills=[s for s in m.skills if s in known_skills], tier=m.tier, reasoning=m.reasoning).model_dump()))
+        return {"created": created, "skipped": skipped}
 
     @app.get("/api/conversations")
     def read_conversations():

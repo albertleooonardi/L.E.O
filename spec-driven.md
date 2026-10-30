@@ -51,6 +51,17 @@ Classification is rule-based and costs no tokens: keyword matches choose the ski
 
 For each generator call the head ranks eligible connections: strong enough for the difficulty first; then, for light work, non-reasoning models; then models with the skill, then generalists (no skills listed); then the lightest sufficient tier; then the configured fallback order. Each `model` event carries the skill, difficulty, and the reason for the choice. Planner and reviewer role assignments still apply; with smart routing off, the v0.1 role/fallback behavior is used. The skill's instructions are appended to the generator's system prompt. Reasoning models receive a thinking-effort setting by difficulty (light/standard → low, strong → medium), in each API's own form. The route is persisted with the run so recovery replays the same decisions.
 
+### Research (web search and page reading)
+
+HEAD plans research only when a request needs fresh or outside information: explicit intent such as "search for", "latest", "news", "price of", "how much does", "sources", "cite", "according to", "weather", or a URL in the request. Plain questions are answered from model knowledge because reading pages is the most expensive part of a run. A per-message Search switch forces or skips research; Settings can turn automatic research off.
+
+Search uses an owner-configured SearXNG instance (JSON API). L.E.O. runs the tools itself, so any model can use the results without tool-calling support:
+
+- **Simple research:** search with the request text, read the top pages (default 3, 1–5), and pass them to one generator call that cites them as [n]. The search step costs no model tokens.
+- **Deep runs:** the planner may mark a task `"tool": "web_search"` with up to three queries, or `"read_urls"`. Only that task receives the page text and is asked to extract facts with citations; later tasks get its short result. If search was needed but not planned, the sources go to the final step only.
+
+Page reading fetches only public http(s) addresses (every resolved address must be global; private, loopback, link-local, and metadata addresses are refused, including after redirects, at most three), caps a page at 2 MB, reads HTML or plain text only, removes scripts, navigation, headers, footers, and forms, and keeps about 8,000 characters per page. Page text is marked as untrusted information, never instructions. Research results are checkpointed, and `tool` events list the queries and sources.
+
 ### Quick
 
 Select an eligible generator → stream answer → parse supported code blocks → finish.
@@ -136,6 +147,7 @@ Workers recover expired leases. Replayed completed stages do not make new calls.
 | `POST /api/connections/{id}/test` | Fetch model catalog without generation |
 | `GET/POST /api/skills`, `PUT/DELETE /api/skills/{id}` | Manage skills; deleting one removes it from connection profiles |
 | `POST /api/route` | Preview the routing decision for a prompt without calling a model |
+| `POST /api/search/test` | Check the configured SearXNG instance with one query |
 | `GET /api/usage` | Per-model, per-role, per-conversation usage and context level; `?conversation_id=` for one chat |
 | `GET /api/conversations` | Conversation list |
 | `GET/DELETE /api/conversations/{id}` | History and runs / delete inactive conversation |
@@ -144,7 +156,7 @@ Workers recover expired leases. Replayed completed stages do not make new calls.
 | `POST /api/runs/{id}/cancel` | Explicit cancellation |
 | `GET /api/runs/{id}/events` | SSE replay with event IDs / Last-Event-ID |
 
-SSE types include `status`, `route`, `model`, `plan`, `task`, `draft_reset`, `token`, `validation`, `review`, `warning`, and `done`.
+SSE types include `status`, `route`, `tool`, `model`, `plan`, `task`, `draft_reset`, `token`, `validation`, `review`, `warning`, and `done`.
 
 **MCP server.** `python -m backend.mcp_server` speaks MCP over stdio and calls the running API (`LEO_API_URL`, `LEO_API_TOKEN`). Tools: `leo_ask` (submit and wait; returns answer, route, models, usage, conversation ID), `leo_route` (zero-token preview), `leo_usage`, and `leo_models`. It adds no capability beyond the API and is subject to the same auth.
 
@@ -169,7 +181,7 @@ Browser verification must exercise adding a connection, checking its catalog, ge
 ## 10. Follow-on work
 
 - Isolated execution service for functional tests, with resource limits, filesystem/network policy, and explicit tool permissions.
-- MCP client support (models calling tools from MCP servers) with explicit per-tool permissions; repository workspaces and patch application.
+- More tools for HEAD to plan (code execution in an isolated service, file reading), and MCP client support (models calling tools from MCP servers) with explicit per-tool permissions; repository workspaces and patch application.
 - Learned routing: tune skills, tiers, and Auto thresholds from benchmark outcomes instead of hand-set rules.
 - Provider-specific tokenizers, live price catalogs, and richer quota scheduling.
 - Retrieval/summarization evaluated against deterministic context selection.

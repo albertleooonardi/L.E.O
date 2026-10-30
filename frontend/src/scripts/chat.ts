@@ -6,7 +6,7 @@ type Mode = 'auto' | 'quick' | 'reviewed' | 'deep';
 type Provider = { id: string; name: string; protocol: string; base_url: string; model: string; local: boolean; free: boolean; enabled: boolean; has_key: boolean; priority: number; context_window: number; input_price: number | null; output_price: number | null; token_parameter: string; skills: string[]; tier: string; reasoning: boolean };
 type Skill = { id: string; name: string; description: string; keywords: string[]; instructions: string; enabled: boolean };
 type Preset = { id: string; name: string; protocol: string; base_url: string; local?: boolean; free?: boolean; hint: string; skills?: string[]; tier?: string; reasoning?: boolean };
-type Preferences = { generator_id: string | null; planner_id: string | null; reviewer_id: string | null; mode: Mode; routing: string; allow_paid: boolean; max_cost: number; max_calls: number; max_repairs: number; max_output_tokens: number; context_tokens: number; token_budget: number; timeout_seconds: number; max_run_seconds: number; system_prompt: string; smart_routing?: boolean };
+type Preferences = { generator_id: string | null; planner_id: string | null; reviewer_id: string | null; mode: Mode; routing: string; allow_paid: boolean; max_cost: number; max_calls: number; max_repairs: number; max_output_tokens: number; context_tokens: number; token_budget: number; timeout_seconds: number; max_run_seconds: number; system_prompt: string; smart_routing?: boolean; web_search?: string; search_url?: string; search_pages?: number };
 type Usage = { route?: RouteInfo; calls?: number; input_tokens?: number; output_tokens?: number; estimated_cost?: number; estimated?: boolean; uncertain_calls?: number; context_messages_omitted?: number; review_passed?: boolean | null };
 type Run = { id: string; conversation_id: string; status: string; phase: string; output: string; error?: string; usage: Usage; mode: Mode; created_at?: number };
 type Conversation = { id: string; title: string; updated_at: number; active_run: string | null };
@@ -203,10 +203,10 @@ const STAGES: Record<Mode, [string, string][]> = {
   reviewed: [['generate', 'Generate'], ['check', 'Check'], ['review', 'Review'], ['repair', 'Repair']],
   deep: [['plan', 'Plan'], ['tasks', 'Tasks'], ['generate', 'Generate'], ['check', 'Check'], ['review', 'Review'], ['repair', 'Repair']],
 };
-const ACTIVITY: Record<string, string> = { plan: 'Planning the steps', tasks: 'Working on the subtasks', generate: 'Writing the answer', review: 'Reviewing the answer', repair: 'Fixing review findings' };
+const ACTIVITY: Record<string, string> = { research: 'Searching the web', plan: 'Planning the steps', tasks: 'Working on the subtasks', generate: 'Writing the answer', review: 'Reviewing the answer', repair: 'Fixing review findings' };
 let liveClock: ReturnType<typeof setInterval> | undefined;
 function stageOf(phase: string) {
-  return phase === 'planning' ? 'plan' : phase.startsWith('task_') ? 'tasks' : phase === 'generating' ? 'generate'
+  return phase.startsWith('research_') ? 'research' : phase === 'planning' ? 'plan' : phase.startsWith('task_') ? 'tasks' : phase === 'generating' ? 'generate'
     : phase.startsWith('reviewing') ? 'review' : phase.startsWith('repairing') ? 'repair' : null;
 }
 function stageTrack(stages: [string, string][]) {
@@ -214,7 +214,7 @@ function stageTrack(stages: [string, string][]) {
   for (const [key, label] of stages) { const step = node('li', label); step.dataset.stage = key; step.dataset.state = 'pending'; track.append(step); }
   return track;
 }
-type RouteInfo = { skill: string; difficulty: string; mode: Mode; auto: boolean; signals: string[] };
+type RouteInfo = { skill: string; difficulty: string; mode: Mode; auto: boolean; signals: string[]; search?: boolean };
 function routeLabel(route: RouteInfo) { return `${route.auto ? 'Auto → ' : ''}${route.mode} · ${route.skill} · ${route.difficulty}`; }
 function liveNode(mode: Mode, startedAt: number) {
   const live = node('div', '', 'run-live'); live.id = 'run-live';
@@ -270,7 +270,9 @@ function watchRun(id: string) {
   let planned = 0, finished = 0;
   listen('route', (data: RouteInfo) => {
     // The head decided: rebuild the track for the chosen mode, keeping the decision visible.
-    const track = stageTrack([['route', routeLabel(data)], ...STAGES[data.mode]]);
+    const stages = [...STAGES[data.mode]];
+    if (data.search) stages.splice(data.mode === 'deep' ? 1 : 0, 0, ['research', 'Research']);
+    const track = stageTrack([['route', routeLabel(data)], ...stages]);
     const first = track.querySelector<HTMLElement>('li')!; first.dataset.state = 'done';
     first.title = `Matched ${data.skill} at ${data.difficulty} difficulty${data.signals.length ? ` (${data.signals.join(', ')})` : ''}`;
     document.querySelector('#run-live .stage-track')?.replaceWith(track);
@@ -296,6 +298,13 @@ function watchRun(id: string) {
   listen('plan', data => { logActivity(`Plan: ${data.text}`); planned = String(data.text || '').split('\n').filter(Boolean).length; setStage('plan', 'done', `${planned} task${planned === 1 ? '' : 's'}`); });
   listen('task', data => { finished += 1; logActivity(`Task ${data.id}${data.skill ? ` (${data.skill})` : ''} completed: ${data.instruction}`); });
   listen('warning', data => logActivity(data.message));
+  listen('tool', (data: { stage: string; queries: string[]; sources: { n: number; title: string; url: string }[] }) => {
+    const hosts = data.sources.map(s => { try { return new URL(s.url).hostname.replace(/^www\./, ''); } catch { return s.url; } });
+    setStage('research', data.sources.length ? 'done' : 'issues', data.sources.map(s => `[${s.n}] ${s.title}`).join('\n') || 'No usable pages');
+    setActivity(data.sources.length ? `Read ${data.sources.length} page${data.sources.length === 1 ? '' : 's'}: ${hosts.join(', ')}` : 'No usable pages found');
+    if (data.queries.length) logActivity(`Searched: ${data.queries.join(' · ')}`);
+    for (const source of data.sources) logActivity(`[${source.n}] ${source.title} — ${source.url}`);
+  });
   listen('validation', data => {
     const checks: { language: string; passed: boolean; message: string }[] = data.checks || [];
     for (const check of checks) logActivity(`${check.language}: ${check.message}`);
@@ -343,7 +352,9 @@ el('chat-form').addEventListener('submit', async event => {
   const text = prompt.value.trim(); if (!text || submitting || !ready) return;
   submitting = true; updateSend();
   try {
-    const run = await send<Run>('/runs', 'POST', { prompt: text, conversation_id: activeId, mode: select('composer-mode').value, request_id: crypto.randomUUID() });
+    const search = el('search-toggle').getAttribute('aria-pressed') === 'true' ? true : null;
+    const run = await send<Run>('/runs', 'POST', { prompt: text, conversation_id: activeId, mode: select('composer-mode').value, search, request_id: crypto.randomUUID() });
+    el('search-toggle').setAttribute('aria-pressed', 'false');
     prompt.value = ''; resizePrompt(); await refreshHistory(); await openChat(run.conversation_id);
   } catch (e) { toast(errorText(e)); }
   finally { submitting = false; updateSend(); }
@@ -377,6 +388,7 @@ function renderProviders() {
     const actions = document.createElement('div'); actions.className = 'provider-actions';
     for (const [label, handler] of [
       ['Edit', () => editProvider(p)],
+      ...(p.has_key || p.local ? [['Models', () => void discoverModels(p)]] : []),
       ['Check', async () => {
         try {
           toast('Checking model catalog…');
@@ -401,6 +413,7 @@ async function loadSettings() {
   renderProviders(); renderSkills();
   select('routing').value = preferences.routing; select('mode-select').value = preferences.mode; select('composer-mode').value = preferences.mode;
   field('smart-routing').checked = preferences.smart_routing ?? true;
+  select('web-search').value = preferences.web_search || 'auto'; field('search-url').value = preferences.search_url || ''; field('search-pages').value = String(preferences.search_pages ?? 3);
   field('allow-paid').checked = preferences.allow_paid; el<HTMLTextAreaElement>('system-prompt').value = preferences.system_prompt;
   for (const key of numericFields) field(key.replaceAll('_', '-')).value = String(preferences[key]);
 }
@@ -420,6 +433,45 @@ function renderKeySources() {
   el('provider-key-from-row').hidden = !sources.length;
 }
 field('provider-url').addEventListener('input', renderKeySources);
+// Discover every model a saved key can use (OpenRouter: free only), with suggested profiles, and add them in one go.
+type Discovered = { model: string; name: string; tier: string; skills: string[]; reasoning: boolean; context_window: number; free: boolean | null; description: string; added?: boolean };
+let discoverSource: Provider | null = null;
+let discovered: Discovered[] = [];
+async function discoverModels(source: Provider, message = '') {
+  discoverSource = source; discovered = [];
+  el('discover-panel').hidden = false; el('discover-list').replaceChildren(); el('discover-feedback').textContent = message;
+  el('discover-title').textContent = `Models available with ${source.name.split(' · ')[0]}`;
+  el('discover-hint').textContent = 'Reading the provider catalog…'; el('discover-panel').scrollIntoView({ block: 'start', behavior: 'smooth' });
+  try {
+    const result = await send<{ provider: string; models: Discovered[]; skipped: { model: string; reason: string }[] }>(`/connections/${source.id}/discover`, 'POST');
+    discovered = result.models;
+    el('discover-hint').textContent = `${result.provider === 'openrouter' ? 'Free models only. ' : ''}${result.models.length} chat models found, ${result.skipped.length} left out (image, audio, speech, embeddings, aliases). Profiles are suggestions from the catalog: strength from size and family, thinking from the provider, coding skills for coding models. HEAD routes among every model you add.`;
+    el('discover-list').replaceChildren(...discovered.map((m, index) => {
+      const row = document.createElement('label'); row.className = `discover-row${m.added ? ' added' : ''}`; row.title = m.description;
+      const box = document.createElement('input'); box.type = 'checkbox'; box.checked = !m.added; box.disabled = Boolean(m.added); box.dataset.index = String(index);
+      const info = node('span', '', 'discover-info');
+      info.append(node('strong', m.name.replace(/ \(free\)$/, '')), node('small', `${m.model} · ${Math.round(m.context_window / 1000)}K context${m.reasoning ? ' · thinks' : ''} · ${m.skills.length ? m.skills.join(', ') : 'generalist'}${m.added ? ' · already added' : ''}`));
+      const tier = document.createElement('select'); tier.setAttribute('aria-label', `Strength of ${m.name}`);
+      for (const value of ['light', 'standard', 'strong']) tier.append(new Option(value[0].toUpperCase() + value.slice(1), value, false, value === m.tier));
+      tier.addEventListener('change', () => { discovered[index].tier = tier.value; });
+      row.append(box, info, tier); return row;
+    }));
+  } catch (e) { el('discover-hint').textContent = errorText(e); }
+}
+el('discover-close').addEventListener('click', () => { el('discover-panel').hidden = true; });
+el('discover-none').addEventListener('click', () => el('discover-list').querySelectorAll<HTMLInputElement>('input[type=checkbox]:not(:disabled)').forEach(box => { box.checked = false; }));
+el('discover-add').addEventListener('click', async () => {
+  if (!discoverSource) return;
+  const models = [...el('discover-list').querySelectorAll<HTMLInputElement>('input[type=checkbox]:checked:not(:disabled)')].map(box => discovered[Number(box.dataset.index)]);
+  if (!models.length) { el('discover-feedback').textContent = 'Select at least one model.'; return; }
+  const check = field('discover-check').checked;
+  el('discover-feedback').textContent = check ? `Checking access to ${models.length} model${models.length === 1 ? '' : 's'}…` : 'Adding…';
+  try {
+    const result = await send<{ created: Provider[]; skipped: { model: string; reason: string }[] }>(`/connections/${discoverSource.id}/adopt`, 'POST', { models, check });
+    const message = `Added ${result.created.length}.` + (result.skipped.length ? ` Skipped: ${result.skipped.map(s => `${s.model} (${s.reason})`).join('; ')}` : '');
+    await loadSettings(); void discoverModels(discoverSource, message);
+  } catch (e) { el('discover-feedback').textContent = errorText(e); }
+});
 function renderSkillPicker(selected: string[]) {
   el('provider-skills').replaceChildren(...skills.map(skill => {
     const label = document.createElement('label'); label.className = 'skill-option'; label.title = skill.description;
@@ -495,11 +547,24 @@ el('provider-form').addEventListener('submit', async event => {
 });
 el('orchestration-form').addEventListener('submit', async event => {
   event.preventDefault();
-  const body: Preferences = { ...preferences, mode: select('mode-select').value as Mode, routing: select('routing').value, allow_paid: field('allow-paid').checked, smart_routing: field('smart-routing').checked, system_prompt: el<HTMLTextAreaElement>('system-prompt').value };
+  const body: Preferences = { ...preferences, mode: select('mode-select').value as Mode, routing: select('routing').value, allow_paid: field('allow-paid').checked, smart_routing: field('smart-routing').checked,
+    web_search: select('web-search').value, search_url: field('search-url').value.trim(), search_pages: Number(field('search-pages').value), system_prompt: el<HTMLTextAreaElement>('system-prompt').value };
   for (const key of numericFields) body[key] = Number(field(key.replaceAll('_', '-')).value);
   for (const role of ['generator', 'planner', 'reviewer'] as const) body[`${role}_id`] = select(`${role}-id`).value || null;
   try { preferences = await send<Preferences>('/settings', 'PUT', body); select('composer-mode').value = preferences.mode; el('settings-feedback').textContent = 'Saved. These settings apply to new runs.'; }
   catch (e) { el('settings-feedback').textContent = errorText(e); }
+});
+el('test-search').addEventListener('click', async () => {
+  el('settings-feedback').textContent = 'Testing search… (save first if you changed the address)';
+  try {
+    const result = await send<{ results: number; titles: string[] }>('/search/test', 'POST');
+    el('settings-feedback').textContent = `Search works: ${result.results} results, e.g. “${result.titles[0] ?? ''}”.`;
+  } catch (e) { el('settings-feedback').textContent = errorText(e); }
+});
+// The globe forces a web search for the next message; otherwise HEAD decides from the request.
+el('search-toggle').addEventListener('click', () => {
+  const on = el('search-toggle').getAttribute('aria-pressed') !== 'true';
+  el('search-toggle').setAttribute('aria-pressed', String(on));
 });
 function openSettings() { dialog('settings-dialog').showModal(); void loadSettings().catch(e => toast(errorText(e))); }
 el('open-settings').addEventListener('click', openSettings);

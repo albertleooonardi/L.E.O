@@ -86,9 +86,14 @@ def parse_plan(text, skill_ids=()):
             if not isinstance(dependencies, list) or any(type(d) is not int or not 1 <= d <= index for d in dependencies):
                 raise ValueError()
             skill, difficulty = task.get("skill"), task.get("difficulty")
+            tool = task.get("tool") if task.get("tool") in {"web_search", "read_urls"} else None
+            queries = [q.strip()[:200] for q in task.get("queries") or [] if isinstance(q, str) and q.strip()][:3]
+            urls = [u for u in task.get("urls") or [] if isinstance(u, str) and u.startswith(("http://", "https://"))][:3]
             result.append({"id": index + 1, "instruction": instruction, "depends_on": list(dict.fromkeys(dependencies)),
                            "skill": skill if skill in skill_ids else None,
-                           "difficulty": difficulty if difficulty in {"light", "standard", "strong"} else None})
+                           "difficulty": difficulty if difficulty in {"light", "standard", "strong"} else None,
+                           "tool": tool if (tool and (queries or urls or tool == "web_search")) else None,
+                           "queries": queries, "urls": urls})
         return result
     except (ValueError, TypeError, KeyError):
         return []

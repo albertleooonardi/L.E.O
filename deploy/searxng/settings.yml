@@ -1,0 +1,12 @@
+# Minimal SearXNG settings for L.E.O.: defaults plus JSON output, which L.E.O. reads.
+use_default_settings: true
+server:
+  # Overridden by the SEARXNG_SECRET environment variable in compose.yaml.
+  secret_key: "replace-with-SEARXNG_SECRET"
+  limiter: false
+  image_proxy: false
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json

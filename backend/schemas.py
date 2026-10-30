@@ -49,6 +49,10 @@ class Preferences(StrictModel):
     mode: Literal["auto", "quick", "reviewed", "deep"] = "auto"
     routing: Literal["priority", "local_first", "free_first"] = "local_first"
     smart_routing: bool = True
+    # Web research: HEAD searches when a request needs fresh or external information (auto) or never (off).
+    web_search: Literal["auto", "off"] = "auto"
+    search_url: str = Field(default="", max_length=300)
+    search_pages: int = Field(default=3, ge=1, le=5)
     allow_paid: bool = False
     max_cost: float = Field(default=0.10, gt=0, le=100, allow_inf_nan=False)
     max_calls: int = Field(default=8, ge=1, le=20)
@@ -59,6 +63,14 @@ class Preferences(StrictModel):
     timeout_seconds: int = Field(default=120, ge=10, le=600)
     max_run_seconds: int = Field(default=600, ge=30, le=3600)
     system_prompt: str = Field(default="You are L.E.O., a helpful assistant. Answer accurately and concisely. State uncertainty. For code, provide complete usable examples and explain assumptions.", max_length=4000)
+
+    @field_validator("search_url")
+    @classmethod
+    def valid_search_url(cls, value):
+        value = value.strip().rstrip("/")
+        if value and (urlsplit(value).scheme not in ("http", "https") or not urlsplit(value).hostname):
+            raise ValueError("Use an http:// or https:// address for the search service")
+        return value
 
     @model_validator(mode="after")
     def enough_context(self):
@@ -71,6 +83,8 @@ class RunInput(StrictModel):
     prompt: str = Field(min_length=1, max_length=30000)
     conversation_id: str | None = None
     mode: Literal["auto", "quick", "reviewed", "deep"] | None = None
+    # Per-message override of web search: True forces it, False skips it, None lets HEAD decide.
+    search: bool | None = None
     request_id: str = Field(min_length=8, max_length=100)
 
     @field_validator("prompt")
@@ -98,3 +112,20 @@ class Skill(StrictModel):
 class RouteInput(StrictModel):
     prompt: str = Field(min_length=1, max_length=30000)
     mode: Literal["auto", "quick", "reviewed", "deep"] | None = None
+
+
+class DiscoveredModel(BaseModel):
+    # Accepts entries as returned by discovery; display-only fields (description, added) are ignored.
+    model_config = ConfigDict(extra="ignore")
+    model: str = Field(min_length=1, max_length=160)
+    name: str = Field(default="", max_length=120)
+    tier: Literal["light", "standard", "strong"] = "standard"
+    skills: list[str] = Field(default_factory=list, max_length=20)
+    reasoning: bool = False
+    context_window: int = Field(default=32768, ge=1024, le=2000000)
+    free: bool | None = None
+
+
+class AdoptModels(StrictModel):
+    models: list[DiscoveredModel] = Field(min_length=1, max_length=60)
+    check: bool = True
