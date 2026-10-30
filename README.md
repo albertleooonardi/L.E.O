@@ -1,8 +1,8 @@
 # L.E.O. — Language Model Efficiency Orchestrator
 
-> **🚧 Work in progress (v0.2).** L.E.O. runs end to end and has an automated test suite, but it is still under active development. Routing rules, defaults, and the database schema may change without migrations, and the token-saving benefit of smart routing has not been confirmed by benchmark yet (see [Status](#status)). Use it with your own models and keys; do not expose it to the internet without the access settings described below.
+> **🚧 Work in progress (v0.2).** L.E.O. runs end to end and has an automated test suite, but it is still under active development. Routing rules, defaults, and the database schema may change without migrations. Benchmarks so far show token savings and resilience on everyday coding tasks, while multi-step builds still cost more tokens than one strong model (see [Benchmarks](#benchmarks)). Use it with your own models and keys; do not expose it to the internet without the access settings described below.
 
-**Use your free and local models like a pro subscription.** L.E.O. connects the models you already have (Ollama, LM Studio, vLLM, OpenRouter free models, Gemini AI Studio, and paid APIs if you choose) and puts a **routing head** in front of them. The head reads each task, decides what skill it needs and how hard it is, and sends it to the cheapest model that can do it well. A website's design goes to your design model, its API to your backend model, and a quick question to a small local model, instead of everything going to one large model at maximum effort.
+**Use your free and local models like a pro subscription.** L.E.O. connects the models you already have (Ollama, LM Studio, vLLM, every free model on OpenRouter, Gemini AI Studio, and paid APIs such as Claude if you choose) and puts a **routing head (HEAD)** in front of them. HEAD reads each task, decides what skill it needs and how hard it is, searches the web when the task needs current information, and sends each step to the cheapest model that can do it well, at a matching thinking effort. A quick question goes to a small model at low effort, code to a coding model, a website's design to your design model, and paid models only step in when free ones cannot.
 
 ![A generated coffee shop website running in L.E.O.'s canvas](docs/screenshots/canvas-preview.jpg)
 
@@ -16,7 +16,10 @@
 - [Status](#status)
 - [Quick start](#quick-start)
 - [Connect models](#connect-models)
+- [Discover models](#discover-models)
 - [Skills and routing profiles](#skills-and-routing-profiles)
+- [Web research](#web-research)
+- [Paid models as a backup (Claude)](#paid-models-as-a-backup-claude)
 - [Modes, limits, and context](#modes-limits-and-context)
 - [Canvas](#canvas)
 - [Usage and context tracking](#usage-and-context-tracking)
@@ -54,9 +57,10 @@ flowchart LR
     Q & V & S --> K[Syntax checks · review · canvas]
 ```
 
+0. **Research when needed.** If the request needs fresh or outside information ("cite sources", "latest", "price of", a link…), L.E.O. searches your SearXNG and reads the top pages first; see [Web research](#web-research).
 1. **Classify (no tokens spent).** Keyword rules match the request to a skill: General, Frontend, Backend, Coding, Design, Reasoning, or skills you add. For a build request, the thing being built decides the main skill ("…a website" → Frontend). Signals such as a build request, scope words ("complete", "production"), several skills, several parts, or length set the difficulty: light, standard, or strong.
 2. **Pick a mode (Auto).** Light and standard work → **Quick**. Strong single-skill work → **Reviewed**. Strong multi-skill work or a build request → **Deep**, where the planner labels each subtask with a skill and difficulty.
-3. **Pick a model for every generator call.** Candidates are ranked: strong enough for the task → no reasoning model for light work (they spend hidden thinking tokens) → has the skill → generalist → the lightest tier that is enough → your fallback order. If a model fails or is rate-limited, the next one is tried once.
+3. **Pick a model and an effort for every generator call.** Candidates are ranked: strong enough for the task → has the skill ("General" is not a specialty) → generalist → for light work, a model without hidden reasoning → the lightest tier that is enough → your fallback order. Thinking models get a matching effort: low for light and standard work, medium for strong work. With **Free first** routing, paid models are a backup after three free attempts. A failed or rate-limited model is skipped and backs off exponentially (30 seconds up to an hour).
 4. **Explain it.** The live view and the run log show each decision and its reason, for example `task_2 [frontend · standard] → gemini-2.5-flash: has the frontend skill; standard tier fits standard work`.
 
 `POST /api/route` (and the MCP tool `leo_route`) previews the decision for any prompt without calling a model.
@@ -73,6 +77,11 @@ flowchart LR
 | ![Per-chat usage panel](docs/screenshots/chat-usage-panel.jpg) | ![Usage page](docs/screenshots/usage-page.jpg) |
 | Context level (Comfortable / Moderate / High / Near limit) and every breakdown as a percentage. *(Real run: OpenRouter Nemotron + Gemini 2.5 Flash)* | Tokens, success rate, fullest context, and shares by model, role, and outcome. *(Real data)* |
 
+| Web research with cited sources | Discover every model a key can use |
+| --- | --- |
+| ![Answer citing three recipe pages](docs/screenshots/research-answer.jpg) | ![Model discovery list](docs/screenshots/discover-models.jpg) |
+| "Find the best egg sandwich recipe and cite your sources": L.E.O. searched SearXNG, read three pages, and one free model (Gemma 4 26B) answered with [n] citations: 1 call, 6,761 tokens. *(Real run)* | OpenRouter: the free chat models your key can use, with suggested strength, thinking, and skills. *(Real data)* |
+
 | Settings: routing profiles and skills |
 | --- |
 | ![Settings with model routing profiles and skills](docs/screenshots/settings-routing.jpg) |
@@ -82,21 +91,22 @@ flowchart LR
 
 v0.2 is a working prototype, not a finished product.
 
-**Working and tested** (50 automated tests plus browser checks):
+**Working and tested** (82 automated tests plus browser checks):
 
-- Connections to OpenAI-compatible, OpenAI Responses, and Anthropic Messages endpoints, with streaming and provider-reported token usage. Live-tested with OpenRouter and Gemini AI Studio.
-- The routing head, Auto mode, skills, routing profiles, per-subtask routing in Deep mode, and fallback between providers (live-tested: OpenRouter failure → Gemini answered).
+- Connections to OpenAI-compatible, OpenAI Responses, and Anthropic Messages endpoints, with streaming and provider-reported usage, including hidden thinking tokens that some providers leave out of their output count. Live-tested with OpenRouter (12 free models) and Gemini AI Studio; a Claude key was connected and its catalog read, but no generation was tested (the account had no credits).
+- HEAD: skills, routing profiles, Auto mode, per-subtask routing in Deep mode, effort by difficulty, model discovery, and fallback between providers (live: rate-limited models handed over to others with no failed runs).
+- Web research through a self-hosted SearXNG, with safe page reading and cited answers (live-tested).
 - Durable runs: background worker, checkpoints, crash recovery, Stop, resumable streams, history.
-- Per-run limits on calls, tokens, time, and estimated cost; paid usage only with explicit opt-in.
-- Live run view, sandboxed canvas, per-chat and global usage views.
+- Per-run limits on calls, tokens, time, and estimated cost; paid usage only with explicit opt-in, and paid models as a backup under Free first routing.
+- Chat with rendered Markdown, live run view, sandboxed canvas, per-chat and global usage views.
 - MCP server over stdio (tested as a real subprocess and against live models).
 
 **Not yet proven or not yet built:**
 
-- **Token savings from smart routing are not yet measured.** The before-routing benchmark is below; the Auto-mode run was stopped because the Gemini free-tier quota ran out, so it would only have measured fallback. It needs a re-run.
-- Rate-limit handling is basic: a rate-limited model is skipped for about 30 seconds, then tried again, even when its daily quota is exhausted.
-- Review is a model's opinion. In the benchmark a reviewer approved code that fails on import. Generated code is never executed by the server.
-- Not run yet: Docker Compose / PostgreSQL deployment, and live use of OpenAI, Anthropic, Qwen, OpenCode, Ollama, LM Studio, and vLLM.
+- **Builds cost more than one strong model.** On website and app tasks, Deep mode used 2–4× the tokens of a single strong model. Those runs predate two fixes (no review loop for design work in Auto, and the last subtask's result reused as the answer); a re-run is pending.
+- **Free-tier limits dominate in practice.** Rate limits (429) and outages (503) hit Gemini, Laguna, and Gemma throughout testing. L.E.O. routes around them, which is its main practical advantage today.
+- Review is a model's opinion. In a benchmark a reviewer approved code that fails on import. Generated code is never executed by the server.
+- Not run yet: Docker Compose / PostgreSQL deployment, and live use of OpenAI, Qwen, OpenCode, Ollama, LM Studio, vLLM, and Claude generation.
 - Single owner only: no multi-user accounts. The schema has no migrations yet.
 
 ## Quick start
@@ -120,8 +130,8 @@ No model is downloaded and no provider is contacted during setup. Add your own c
 2. Set the API base URL and exact model ID. Enter an API key if the endpoint requires one; keys are encrypted on the server and never shown again.
 3. Set the **routing profile**: skills, strength (light, standard, strong), and **Reasoning model** if it spends hidden thinking tokens. Presets suggest one.
 4. **Save**, then **Check** to test the model catalog. This does not send a generation request; manual model IDs work when a provider has no compatible catalog.
-5. Add more models. Optionally assign planner and reviewer roles.
-6. For a paid model, enter input/output prices per million tokens and enable **Allow paid API usage**. Prices are your estimates, not live billing data.
+5. Click **Models** on the connection to add every other model the same key can use (see [Discover models](#discover-models)), or add models by hand. A new connection can also **reuse a saved key** for the same host. Optionally assign planner and reviewer roles.
+6. For a paid model, enter input/output prices per million tokens and enable **Allow paid API usage**. Prices are your estimates, not live billing data. Cloud connections without a key are flagged in Settings.
 
 | Provider | Preset / protocol | Suggested profile |
 | --- | --- | --- |
@@ -137,6 +147,17 @@ No model is downloaded and no provider is contacted during setup. Add your own c
 
 Presets are editable. Provider eligibility, model names, free quotas, and prices change often. A ChatGPT or Claude chat subscription is not API access; connecting an API key uses API billing. **No API charge** means you have verified the endpoint is free for this usage. It does not stop a provider from billing you if it is set incorrectly.
 
+## Discover models
+
+A key usually unlocks many models. **Models** on a connection reads the provider's whole catalog and suggests a routing profile for each chat model:
+
+- **OpenRouter:** free models only (price 0 or a `:free` ID). Audio models, safety filters, and router aliases are left out.
+- **Gemini AI Studio:** text chat models from the native catalog. Image, speech, audio, live, embedding, robotics, and agent products and `-latest` aliases are left out.
+- **Anthropic:** Claude 4.5 and later, with suggested list prices you can edit.
+- **Other OpenAI-compatible servers:** whatever their `/models` lists.
+
+Profiles come from the catalog itself: strength from size and family (e.g. 550B, Pro, Opus → strong; Flash-Lite, Mini, Haiku, small sizes → light), thinking from what the provider reports, and coding skills only for models the provider describes as coding models. With **Check access first** (on by default), L.E.O. sends one tiny request per model and skips the ones your key cannot use, with the reason (not on your plan, rate-limited, timed out); a model that rejects an effort setting is kept with effort off. Selected models are added in one click, reusing the saved key.
+
 ## Skills and routing profiles
 
 **Settings → Skills** manages the skills the router matches on. Each skill has a name, a description (shown to the Deep-mode planner), keywords (matched as whole words), instructions added to the prompt whenever a model works on that skill, and an on/off switch. Six starter skills are created on first start; edit, disable, delete, or add your own, such as "Data analysis" with keywords `pandas, dataframe, chart`.
@@ -144,6 +165,20 @@ Presets are editable. Provider eligibility, model names, free quotas, and prices
 A connection with no skills is a **generalist**: it can take any task but loses ties to a specialist. Give strong-but-expensive models the **strong** tier so they are used only for strong work, and mark reasoning models so they are not used for simple questions.
 
 Turn off **Smart routing** in Settings → Orchestration to go back to fixed roles: the generator assignment and fallback order decide.
+
+## Web research
+
+HEAD searches only when a request needs fresh or outside information: explicit intent such as "search for", "latest", "news", "price of", "how much does", "sources", "cite", "according to", "weather", or a link in the message. Plain questions ("Make me a recipe for an egg sandwich") are answered from model knowledge, because reading pages is the most expensive part of a run. The 🌐 **Search** toggle in the message box forces research for one message.
+
+- **Simple research:** L.E.O. searches with your words, reads the top pages (3 by default), and one model answers citing them as [n]. The search costs no model tokens.
+- **Deep runs:** the planner can plan its own search tasks with up to three queries; only those tasks receive the page text.
+- **Safety:** pages are fetched only from public addresses (never your local network or cloud metadata services, including after redirects), capped in size and time, stripped to readable text (about 8,000 characters per page), and passed to models as information, never as instructions.
+
+Search uses your own [SearXNG](https://github.com/searxng/searxng) instance with JSON output enabled (`deploy/searxng/settings.yml`). With Docker: `docker compose up searxng`, then set **Settings → Web search** to `http://localhost:8888` and click **Test search**.
+
+## Paid models as a backup (Claude)
+
+Connect a paid API (for example Anthropic Claude: preset **Anthropic / Claude**, then **Models** to add Haiku, Sonnet, and Opus), enable **Allow paid API usage**, set a **Max estimated cost / run**, and choose **Free first** routing. Each step then tries up to three free models, then the paid model that fits (Haiku for light, Sonnet for standard, Opus for strong work), then the remaining free models. L.E.O. reserves the worst-case cost before every paid call and stops before the cap. Claude receives a thinking-effort setting by difficulty, refusals hand the step to the next model, and an empty provider balance is reported as such.
 
 ## Modes, limits, and context
 
@@ -189,29 +224,58 @@ Set `LEO_API_URL` if the API is not at `http://127.0.0.1:8000`, and `LEO_API_TOK
 
 ## Benchmarks
 
-`benchmarks/run.py` sends the same prompts to single models directly ("one app, one model") and to each L.E.O. mode. It then checks every answer against hidden acceptance tests, which run in a macOS sandbox with network access and writes blocked, and a timeout.
+`benchmarks/run.py` sends the same prompts to single models directly ("one app, one model", like using the Gemini app) and to L.E.O. It checks coding answers against hidden acceptance tests (run in a macOS sandbox with network and writes blocked), scores websites with a 14-point rubric (complete page, mobile viewport, menu with prices, call to action, hours or contact, responsive layout, interactivity, accessibility…), and checks the long app task for its required features. `benchmarks/report.py` merges result files and recomputes L.E.O.'s **actual** tokens from each run's call ledger; unbilled reservations of failed calls are shown separately.
 
 ```sh
-LEO_DATA_DIR=/path/to/data uv run python -m benchmarks.run --cheap <cheap model> --strong <strong model>
+LEO_DATA_DIR=.leo-bench uv run python -m benchmarks.run --single gemini-3.5-flash --single <other model> --leo auto
+uv run python -m benchmarks.report benchmarks/results/<file>.json [...]
 ```
 
-**Before smart routing** (29 Oct 2026; Nemotron 3.5 Lightning via OpenRouter as cheap, Gemini 2.5 Flash as strong; L.E.O. used a fixed generator: Nemotron):
+Tasks: six coding functions with edge cases, "Create me a coffee shop website", "Create a landing page with a clean, minimalist design for a note-taking app", and a long task: a complete personal finance tracker in one HTML file.
+
+### 30 Oct 2026: L.E.O. Auto with a team of free models
+
+L.E.O.'s team: Gemini 2.5 Flash, Laguna S (coding), Nemotron 3.5 Lightning (reasoning), and Nemotron 3 Ultra 550B (strong), all free. Baselines: Gemini 3.5 Flash alone (closest to the free Gemini app) and Nemotron 3 Ultra alone. Thinking tokens are counted.
+
+| Approach | Correct | Blocked by provider | Tokens per correct task | Mean time |
+| --- | --- | --- | --- | --- |
+| Gemini 3.5 Flash alone | 2/2 | 7 of 9 (free quota exhausted) | 2,746 | 17 s |
+| **L.E.O. Auto** | **8/9** | **0** | 14,822 | 116 s |
+| Nemotron 3 Ultra alone (pages and app only) | 2/3 | 0 | 20,143 | 347 s |
+
+| Task | Gemini 3.5 Flash | L.E.O. Auto | Nemotron 3 Ultra |
+| --- | --- | --- | --- |
+| roman | ✅ 3,446 | ✅ **1,803** | — |
+| intervals | ✅ 2,047 | ✅ **1,601** | — |
+| duration, top-k, LRU | rate-limited | ✅ 1,430 · 537 · 640 | — |
+| ipv4 | rate-limited | ❌ accepted Arabic-Indic digits | — |
+| coffee shop website | rate-limited | ✅ rubric 100%, 21,707 | ✅ rubric 100%, **11,481** |
+| minimalist landing page | rate-limited | ✅ rubric 93%, 36,599 | ❌ rubric 71%, 16,418 |
+| finance tracker app | rate-limited | ✅ all features, 52,830 | ✅ all features, **12,387** |
+
+**What this shows**
+
+- **Everyday coding: L.E.O. used fewer tokens** than Gemini 3.5 Flash alone on every task both answered (−48% and −22%), by routing to a coding model and giving thinking models low effort.
+- **Resilience: L.E.O. answered every task**, while the single free model was blocked by its quota after two. Routing across many free models is L.E.O.'s clearest advantage today.
+- **Builds: L.E.O. cost 2–4× the tokens of one strong model.** Splitting a page across models, plus a review-and-repair loop, costs more than one capable model writing it once. Two fixes since then (no review loop for design work in Auto; the last subtask's result reused as the answer) target this; a re-run is pending.
+- **Quality on pages:** L.E.O. passed all three page/app checks; Nemotron Ultra alone missed the landing page's footer, contact details, interactivity, and a complete document.
+- **Shared limits:** most models, including L.E.O.'s, failed the IPv4 edge case. Routing cannot add knowledge the models lack.
+
+### 29 Oct 2026: before smart routing
+
+Nemotron 3.5 Lightning (cheap) and Gemini 2.5 Flash (strong); L.E.O. used a fixed generator (Nemotron). Gemini's thinking tokens were not yet counted, so its numbers are understated.
 
 | Approach | Passed | Tokens per passed task | Mean calls |
 | --- | --- | --- | --- |
-| Gemini 2.5 Flash alone | 5/6 (1 rate limit) | **1,406** | 1.3 |
+| Gemini 2.5 Flash alone | 5/6 (1 rate limit) | 1,406 | 1.3 |
 | Nemotron alone | 5/6 | 5,337 | 1.0 |
 | L.E.O. Quick (fixed generator) | 4/6 | 4,814 | 1.2 |
 | L.E.O. Reviewed | 4/6 | 9,132 | 2.3 |
 | L.E.O. Deep | 3/3 | 18,813 | 6.3 |
 
-What this showed, and what v0.2 changes:
+This run exposed the problems fixed in v0.2: a fixed generator, a reasoning model running out of output before answering, uncounted thinking tokens, a context bug in Deep mode, and review approving code that fails on import.
 
-- A fixed generator sent everything to a reasoning model, which twice used its whole 8K output limit without answering. The routing head now prefers the efficient model for coding and skips reasoning models for light work.
-- Deep mode was the most reliable (3/3) but cost about 13× more tokens. Auto now uses it only for build or multi-skill requests.
-- Reviewed mode approved code that fails on import: review is not a test run.
-
-The Auto-mode comparison is pending (see [Status](#status)). Full results are in `benchmarks/results/`. With 6 tasks, treat differences as indicative.
+Full results are in `benchmarks/results/`. Samples are small; treat differences as indicative, not statistically significant. Still to do: re-run the builds with the 12-model team after the fixes, judge page designs visually, and test Claude generation once its account has credits.
 
 ## Persistence and recovery
 
@@ -255,7 +319,7 @@ make check   # backend tests + frontend type check
 make build   # build the frontend served by the API
 ```
 
-The backend suite (50 tests) covers routing classification and ranking, per-subtask routing, Auto mode, skills, the MCP server over stdio, protocol streaming and usage, fallback and cooldown, paid opt-in and limits, key encryption, origin/host/token checks, idempotent submission, cancellation, context trimming, review and repair, task dependencies, checkpoint recovery, and usage reporting. Tests use deterministic HTTP transports and never call real providers.
+The backend suite (82 tests) covers routing classification and ranking, web research and page-reading safety, model discovery, per-subtask routing, Auto mode, skills, the MCP server over stdio, protocol streaming and usage, fallback and cooldown, paid opt-in and limits, key encryption, origin/host/token checks, idempotent submission, cancellation, context trimming, review and repair, task dependencies, checkpoint recovery, and usage reporting. Tests use deterministic HTTP transports and never call real providers.
 
 For manual browser testing without real models, run the QA fixture and connect it with model `leo-test-model` (local, no API charge), using a separate `LEO_DATA_DIR`:
 
@@ -271,7 +335,9 @@ Interactive API docs are at `/api/docs` while the backend runs. The product requ
 
 | Path | Purpose |
 | --- | --- |
-| `backend/router.py` | The routing head: starter skills, classification, Auto mode, model ranking |
+| `backend/router.py` | HEAD: starter skills, classification, search cues, Auto mode, effort, model ranking |
+| `backend/tools.py` | Web search (SearXNG) and safe page reading |
+| `backend/discovery.py` | Model discovery and automatic routing profiles |
 | `backend/orchestrator.py` | Per-task routing, budgets, planning, subtasks, review, and repair |
 | `backend/providers.py` | Chat Completions, Responses, and Anthropic streaming adapters |
 | `backend/store.py` | Persistence, encrypted keys, skills, job leases, usage ledger and reports |
@@ -279,7 +345,8 @@ Interactive API docs are at `/api/docs` while the backend runs. The product requ
 | `backend/worker.py` | Durable background worker and cancellation |
 | `backend/context.py` | Context selection, plan validation, syntax checks |
 | `backend/mcp_server.py` | MCP server for Claude Code and other clients |
-| `frontend/src/scripts/chat.ts` | Chat, settings, skills, live run view |
+| `frontend/src/scripts/chat.ts` | Chat, settings, skills, model discovery, live run view |
+| `frontend/src/scripts/markdown.ts` | Safe Markdown rendering for answers (DOM only, no HTML) |
 | `frontend/src/scripts/canvas.ts` | Sandboxed live preview of generated pages |
 | `frontend/src/scripts/usage-ui.ts`, `usage.ts` | Context levels and percentage breakdowns |
 | `benchmarks/` | Tasks with hidden tests, the comparison runner, results |
@@ -288,11 +355,12 @@ Interactive API docs are at `/api/docs` while the backend runs. The product requ
 
 ## Roadmap
 
-- Re-run the benchmark in Auto mode once free quotas reset, and publish the comparison.
-- Quota-aware cooldowns: read each provider's retry delay and back off for the whole quota window.
+- Re-run the build tasks with the full free-model team after the Deep-mode fixes, and judge page designs visually.
+- Test Claude generation (Haiku, Sonnet, Opus as paid backup) once the account has credits.
+- Read each provider's own retry window so daily-quota exhaustion is detected, not just retried later.
 - Run acceptance tests in an isolated execution service so review can be checked by real tests.
-- Learn routing from results: tune skills, tiers, and Auto thresholds from benchmark outcomes instead of hand-set rules.
-- MCP client support (models calling tools) with explicit per-tool permissions.
+- Learn routing from results: tune skills, tiers, effort, and Auto thresholds from benchmark outcomes instead of hand-set rules.
+- More tools for HEAD to plan (code execution in a sandbox, files) and MCP client support, with explicit per-tool permissions.
 - Database migrations, a Docker smoke test, and multi-user accounts before any shared hosting.
 
 ---

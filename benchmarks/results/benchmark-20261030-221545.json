@@ -8,6 +8,20 @@
     "max_output_tokens": 16384,
     "max_repairs": 1
   },
+  "summary": [
+    {
+      "arm": "single:nvidia/nemotron-3-ultra-550b-a55b:free",
+      "tasks": 3,
+      "passed": 2,
+      "errors": 0,
+      "pass_rate": 0.67,
+      "mean_tokens": 13429,
+      "total_tokens": 40286,
+      "tokens_per_pass": 20143,
+      "mean_calls": 1,
+      "mean_seconds": 347.2
+    }
+  ],
   "results": [
     {
       "status": "completed",
