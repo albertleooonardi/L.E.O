@@ -218,6 +218,7 @@ class Orchestrator:
                 self.store.update_call(call_id, status="completed", input_tokens=input_tokens, output_tokens=output_tokens,
                                        estimated=estimated, cost=cost, elapsed_ms=int((time.monotonic() - started) * 1000))
                 if finish in {"length", "max_tokens"}:
+                    self.state.setdefault("truncated", []).append(stage)
                     self.store.event(self.id, "warning", {"message": "Output limit reached; response may be incomplete."})
                 _strikes.pop(provider["id"], None)
                 if role == "generator":
@@ -244,6 +245,21 @@ class Orchestrator:
                 self.store.event(self.id, "warning", {"message": f"{provider['name']}: {error.rstrip('.')}." + (" Trying the next eligible connection." if more else "")})
                 # Retain full reservations for failed/ambiguous requests: they may have been billed.
         raise ValueError("; ".join(dict.fromkeys(errors)) or "No eligible connection is available. Check enabled providers, paid usage, and rate-limit cooldowns.")
+
+    async def continue_cut_off(self, stage, answer, route, difficulty, rounds=2):
+        """An answer cut off by the output limit inside a code block (a page, a long file) is continued, not rerun."""
+        for n in range(rounds):
+            if stage not in self.state.get("truncated", []) or answer.count("```") % 2 == 0:
+                break
+            stage = f"continuing_{n}"
+            more = await self.call(stage, "generator",
+                self.run["prompt"] + "\n\nYOUR ANSWER SO FAR ENDS WITH THIS (it was cut off by the length limit):\n" + answer[-4000:] +
+                "\n\nContinue exactly where it stops. Output only the missing remainder, starting with the next character. "
+                "Do not repeat anything, do not restart the file, and close any open code block.",
+                skill=route["skill"], difficulty=difficulty)
+            answer += more
+            self.save(output=answer)
+        return answer
 
     async def execute(self):
         answer = ""
@@ -337,6 +353,7 @@ class Orchestrator:
                 final_stage = "generating"
                 answer = await self.call("generating", "generator", prompt, history=self.state["history"], visible=True,
                                          skill=route["skill"], difficulty=difficulty)
+            answer = await self.continue_cut_off(final_stage, answer, route, difficulty)
             checks = static_review(answer)
             self.state["checks"] = checks
             if final_stage not in replayed:

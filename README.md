@@ -1,12 +1,12 @@
 # L.E.O. — Language Model Efficiency Orchestrator
 
-> **🚧 Work in progress (v0.2).** L.E.O. runs end to end and has an automated test suite, but it is still under active development. Routing rules, defaults, and the database schema may change without migrations. Benchmarks so far show token savings and resilience on everyday coding tasks, while multi-step builds still cost more tokens than one strong model (see [Benchmarks](#benchmarks)). Use it with your own models and keys; do not expose it to the internet without the access settings described below.
+> **🚧 Work in progress (v0.2).** L.E.O. runs end to end and has an automated test suite, but it is still under active development. Routing rules, defaults, and the database schema may change without migrations. In the latest QA loop, L.E.O. on free models matched the Gemini and ChatGPT web apps on every coding and reasoning task and scored higher on a landing-page test, but its reviewed coding answers take 1–3 minutes instead of seconds (see [Benchmarks](#benchmarks)). Use it with your own models and keys; do not expose it to the internet without the access settings described below.
 
 **Use your free and local models like a pro subscription.** L.E.O. connects the models you already have (Ollama, LM Studio, vLLM, every free model on OpenRouter, Gemini AI Studio, and paid APIs such as Claude if you choose) and puts a **routing head (HEAD)** in front of them. HEAD reads each task, decides what skill it needs and how hard it is, searches the web when the task needs current information, and sends each step to the cheapest model that can do it well, at a matching thinking effort. A quick question goes to a small model at low effort, code to a coding model, a website's design to your design model, and paid models only step in when free ones cannot.
 
-![A generated coffee shop website running in L.E.O.'s canvas](docs/screenshots/canvas-preview.jpg)
+![A generated coffee landing page running in L.E.O.'s canvas](docs/screenshots/canvas-preview.jpg)
 
-<sub>"Create me a coffee shop website" in Auto mode: the request was split into a design task and a frontend task, each routed to its specialist, and the result runs live in the sandboxed canvas. Captured with the built-in QA fixture (mock models), so the page is fixture output.</sub>
+<sub>"Create me a minimalist, clean dan informatic landing page about coffee" in Auto mode. HEAD saw one self-contained page, so it made a single call to the best free frontend model (Gemini 2.5 Flash, medium thinking effort): 66 seconds, about 15K tokens including thinking, 93% on the page checklist with no broken links or placeholders. The page runs live in the sandboxed canvas. *(Real run)*</sub>
 
 ## Contents
 
@@ -67,10 +67,20 @@ flowchart LR
 
 ## Screenshots
 
+| Chats sidebar and a reviewed coding answer | Settings → Models |
+| --- | --- |
+| ![Sidebar with chats grouped by day, and a reviewed answer](docs/screenshots/sidebar-chat.jpg) | ![Models grouped by provider with switches, prices, and tokens per call](docs/screenshots/settings-models.jpg) |
+| Chats grouped by day with times; delete asks once to confirm. The answer's label shows HEAD's choice: Auto → reviewed, coding, standard, 4 calls (two free models were rate-limited, Nemotron 3 Ultra wrote it, Nemotron Super VL reviewed it). *(Real run)* | One row per provider; each model has an on/off switch, its strength and skills, its price ("Free" here), and its average tokens per call from real use. *(Real data)* |
+
+| Settings → Routing |
+| --- |
+| ![Routing tab with Auto, Free first, Local first, By priority](docs/screenshots/settings-routing.jpg) |
+| **Auto** (recommended) weighs every model you turned on: fit first, then the cost per call, priced from each model's own token use. Settings are split into tabs: Models, Skills, Routing, Web search, Limits, General. |
+
 | Live run with the routing decision | Routing log: each subtask goes to its specialist |
 | --- | --- |
 | ![Live run view with stage track](docs/screenshots/live-run.jpg) | ![Run activity showing per-subtask routing reasons](docs/screenshots/routing-log.jpg) |
-| Auto chose Deep for a frontend build. Stages light up as they run; placeholder lines appear until the first text arrives. *(QA fixture)* | Design task → design model, frontend task → frontend model, each with the reason. *(QA fixture)* |
+| A Deep run: stages light up as they run; placeholder lines appear until the first text arrives. Auto now uses Deep for apps and multi-skill builds; a single page gets one call. *(QA fixture)* | Design task → design model, frontend task → frontend model, each with the reason. *(QA fixture)* |
 
 | Per-chat usage panel | Usage across all chats |
 | --- | --- |
@@ -82,23 +92,20 @@ flowchart LR
 | ![Answer citing three recipe pages](docs/screenshots/research-answer.jpg) | ![Model discovery list](docs/screenshots/discover-models.jpg) |
 | "Find the best egg sandwich recipe and cite your sources": L.E.O. searched SearXNG, read three pages, and one free model (Gemma 4 26B) answered with [n] citations: 1 call, 6,761 tokens. *(Real run)* | OpenRouter: the free chat models your key can use, with suggested strength, thinking, and skills. *(Real data)* |
 
-| Settings: routing profiles and skills |
-| --- |
-| ![Settings with model routing profiles and skills](docs/screenshots/settings-routing.jpg) |
-| Each connection has skills, a strength tier, and a reasoning flag. Each skill lists the models that have it. Keys are never shown. |
 
 ## Status
 
 v0.2 is a working prototype, not a finished product.
 
-**Working and tested** (82 automated tests plus browser checks):
+**Working and tested** (93 automated tests plus browser checks):
 
 - Connections to OpenAI-compatible, OpenAI Responses, and Anthropic Messages endpoints, with streaming and provider-reported usage, including hidden thinking tokens that some providers leave out of their output count. Live-tested with OpenRouter (12 free models) and Gemini AI Studio; a Claude key was connected and its catalog read, but no generation was tested (the account had no credits).
 - HEAD: skills, routing profiles, Auto mode, per-subtask routing in Deep mode, effort by difficulty, model discovery, and fallback between providers (live: rate-limited models handed over to others with no failed runs).
 - Web research through a self-hosted SearXNG, with safe page reading and cited answers (live-tested).
 - Durable runs: background worker, checkpoints, crash recovery, Stop, resumable streams, history.
 - Per-run limits on calls, tokens, time, and estimated cost; paid usage only with explicit opt-in, priced per call from each model's real token use under Auto routing.
-- Chat with rendered Markdown, live run view, sandboxed canvas, per-chat and global usage views.
+- Chat with rendered Markdown, live run view, sandboxed canvas, per-chat and global usage views, a date-grouped chats sidebar, and tabbed Settings.
+- QA loop against the Gemini and ChatGPT web apps: equal on 4 coding/reasoning tasks, higher on a landing page (see [Benchmarks](#benchmarks)).
 - MCP server over stdio (tested as a real subprocess and against live models).
 
 **Not yet proven or not yet built:**
@@ -250,12 +257,17 @@ The same prompts went to **gemini.google.com** (Gemini 3.5 Flash) and **chatgpt.
 | … words / specific facts | 235 / 9 | 314 / 0 | **515–556 / 9–19** | |
 | … defects | 4 empty links, Tailwind from a CDN | 1 empty link, 5 hot-linked photos | **none**, self-contained | |
 
+![The three coffee pages side by side](docs/screenshots/qa-coffee-pages.jpg)
+
+<sub>The same prompt in each app, rendered at desktop width and shown whole. Checklist and content counts from `benchmarks/qa.py` and the browser. ChatGPT's page is the most photographic; L.E.O.'s has the most content and no defects.</sub>
+
 What changed between rounds:
 
 - **Independent review where rules are stated.** In Auto, a coding or backend request with explicit requirements ("only", "exactly", "raise ValueError"…) is reviewed by the strongest available model that did not write the answer. The reviewer lists each requirement, traces the code on the request's own examples, and watches for loose checks such as `isdigit()`.
 - **Static checks that trigger one repair even in Quick mode:** several versions of the same function, in-page links to missing sections, and placeholder text.
 - **Pages with depth:** 5–7 sections and 400+ words of specific content, a link target for every section, and medium thinking effort for single-page builds.
 - **Self-correcting profiles:** a model that spends its whole output limit on hidden thinking is marked as a reasoning model, so later calls cap its effort (Laguna S 2.1 took 249 s and 16K tokens before this).
+- **Cut-off answers are continued, not lost:** if a page or file hits the output limit inside a code block, the same model is asked to continue from where it stopped (up to twice), so the canvas still gets a complete page.
 
 The price is speed and tokens on code: a reviewed answer takes 1–3 minutes and 7–18K free-model tokens, against about 10 seconds in the web apps, whose token use is not shown. Reproduce with `uv run python -m benchmarks.qa .leo-bench/qa/<round> --leo` after saving the web apps' replies as `<round>/<assistant>/<task>.md`.
 
@@ -345,7 +357,7 @@ make check   # backend tests + frontend type check
 make build   # build the frontend served by the API
 ```
 
-The backend suite (92 tests) covers routing classification and ranking, web research and page-reading safety, model discovery, per-subtask routing, Auto mode, skills, the MCP server over stdio, protocol streaming and usage, fallback and cooldown, paid opt-in and limits, key encryption, origin/host/token checks, idempotent submission, cancellation, context trimming, review and repair, task dependencies, checkpoint recovery, and usage reporting. Tests use deterministic HTTP transports and never call real providers.
+The backend suite (93 tests) covers routing classification and ranking, web research and page-reading safety, model discovery, per-subtask routing, Auto mode, skills, the MCP server over stdio, protocol streaming and usage, fallback and cooldown, paid opt-in and limits, key encryption, origin/host/token checks, idempotent submission, cancellation, context trimming, review and repair, task dependencies, checkpoint recovery, and usage reporting. Tests use deterministic HTTP transports and never call real providers.
 
 For manual browser testing without real models, run the QA fixture and connect it with model `leo-test-model` (local, no API charge), using a separate `LEO_DATA_DIR`:
 

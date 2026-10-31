@@ -520,3 +520,11 @@ async def test_hidden_thinking_marks_the_model_as_reasoning(store):
         return sse_response('answer')
     run = await execute(store, make_run(store), handler)
     assert run['output'] == 'answer' and store.get_connection(thinker['id'])['reasoning'] is True
+
+
+async def test_answer_cut_off_inside_a_code_block_is_continued(store):
+    add_provider(store)
+    first = 'data: ' + json.dumps({'choices': [{'delta': {'content': '```html\n<main>half'}, 'finish_reason': 'length'}]}) + '\n\ndata: [DONE]\n\n'
+    replies = iter([httpx.Response(200, text=first, headers={'content-type': 'text/event-stream'}), sse_response(' page</main>\n```')])
+    run = await execute(store, make_run(store, mode='quick', prompt='Make a page'), lambda r: next(replies))
+    assert run['output'] == '```html\n<main>half page</main>\n```' and run['usage']['calls'] == 2

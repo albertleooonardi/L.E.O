@@ -640,3 +640,13 @@ h1 { font-size: clamp(26px, 2.5vw, 32px); font-weight: 400; letter-spacing: -.65
 @media (max-width: 640px) {
   .row-meta { display: none; }
 }
+
+/* The composer's tool row shrinks with the composer (sidebar open on a narrow window) instead of pushing Send out. */
+.composer { container-type: inline-size; }
+.composer-row > * { min-width: 0; }
+.composer-row select { flex: 0 1 auto; text-overflow: ellipsis; }
+.composer-row .context-meter { flex: 0 1 auto; overflow: hidden; }
+.context-meter #context-text { overflow: hidden; text-overflow: ellipsis; }
+@container (max-width: 600px) {
+  .context-meter .meter { display: none; }
+}
