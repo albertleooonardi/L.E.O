@@ -14,7 +14,7 @@ Use your free and local models like a pro subscription.
 
 </div>
 
-![L.E.O. with a generated coffee landing page in the live preview](docs/screenshots/hero.jpg)
+![L.E.O. with a generated coffee landing page in the live preview](docs/screenshots/hero.png)
 
 <sub>"Create me a minimalist, clean dan informatic landing page about coffee" in Auto mode. HEAD saw one self-contained page, so it made one call to the best free frontend model (Gemini 2.5 Flash): 38 seconds, 9.2K tokens, three real Wikimedia photos with their photographers credited, no broken links. Shown in the preview at desktop width. *(Real run)*</sub>
 
