@@ -3,7 +3,7 @@ import { renderMarkdown } from './markdown';
 import { breakdowns, compact, levelMeter, levelOf, money, node, percent, seconds, successRate, tokens, type Report } from './usage-ui';
 
 type Mode = 'auto' | 'quick' | 'reviewed' | 'deep';
-type Provider = { id: string; name: string; protocol: string; base_url: string; model: string; local: boolean; free: boolean; enabled: boolean; has_key: boolean; priority: number; context_window: number; input_price: number | null; output_price: number | null; token_parameter: string; skills: string[]; tier: string; reasoning: boolean };
+type Provider = { id: string; name: string; protocol: string; base_url: string; model: string; local: boolean; free: boolean; enabled: boolean; has_key: boolean; priority: number; context_window: number; input_price: number | null; output_price: number | null; token_parameter: string; skills: string[]; tier: string; reasoning: boolean; calls?: number; avg_input_tokens?: number | null; avg_output_tokens?: number | null };
 type Skill = { id: string; name: string; description: string; keywords: string[]; instructions: string; enabled: boolean };
 type Preset = { id: string; name: string; protocol: string; base_url: string; local?: boolean; free?: boolean; hint: string; skills?: string[]; tier?: string; reasoning?: boolean };
 type Preferences = { generator_id: string | null; planner_id: string | null; reviewer_id: string | null; mode: Mode; routing: string; allow_paid: boolean; max_cost: number; max_calls: number; max_repairs: number; max_output_tokens: number; context_tokens: number; token_budget: number; timeout_seconds: number; max_run_seconds: number; system_prompt: string; smart_routing?: boolean; web_search?: string; search_url?: string; search_pages?: number };
@@ -390,6 +390,7 @@ async function setEnabled(p: Provider, enabled: boolean) {
   const body = Object.fromEntries(CONNECTION_FIELDS.map(key => [key, p[key]]));
   try { await send(`/connections/${p.id}`, 'PUT', { ...body, enabled }); await loadSettings(); } catch (e) { toast(errorText(e)); await loadSettings(); }
 }
+function compactTokens(n: number) { return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K` : String(n); }
 function skillNames(ids: string[]) { return ids.map(id => skills.find(s => s.id === id)?.name || id).join(', '); }
 function modelRow(p: Provider) {
   const row = document.createElement('div'); row.className = `model-row${p.enabled ? '' : ' off'}`;
@@ -407,10 +408,17 @@ function modelRow(p: Provider) {
     row.classList.add('needs-key');
     detail.append(Object.assign(document.createElement('small'), { className: 'key-warning', textContent: 'No API key saved. Click Edit and paste the key.' }));
   }
+  const meta = document.createElement('div'); meta.className = 'row-meta';
+  const price = document.createElement('span');
+  price.textContent = p.free || p.local ? 'Free' : p.input_price == null ? 'Price not set' : `$${p.input_price} / $${p.output_price} per 1M`;
+  const tokens = document.createElement('span');
+  tokens.textContent = p.calls ? `~${compactTokens((p.avg_input_tokens || 0) + (p.avg_output_tokens || 0))} tokens a call` : 'Not used yet';
+  if (p.calls) tokens.title = `${p.calls} call${p.calls === 1 ? '' : 's'}: about ${p.avg_input_tokens} in and ${p.avg_output_tokens} out each`;
+  meta.append(price, tokens);
   const edit = document.createElement('button'); edit.className = 'text-button'; edit.textContent = 'Edit';
   edit.setAttribute('aria-label', `Edit ${modelLabel(p)}`);
   edit.addEventListener('click', () => editProvider(p, row));
-  row.append(toggle, detail, edit);
+  row.append(toggle, detail, meta, edit);
   return row;
 }
 function renderProviders() {
@@ -449,15 +457,21 @@ function renderProviders() {
   for (const role of ['generator', 'planner', 'reviewer'] as const) select(`${role}-id`).replaceChildren(...roleOptions(preferences?.[`${role}_id`] || null));
   refreshConnectionStatus();
 }
+function routingInputs() { return [...document.querySelectorAll<HTMLInputElement>('input[name=routing]')]; }
+function setRouting(value: string) { for (const input of routingInputs()) input.checked = input.value === value; if (!routingInputs().some(i => i.checked)) routingInputs()[0].checked = true; }
+function routingChoice() { return routingInputs().find(i => i.checked)?.value || 'auto'; }
+// The cost limit only matters when paid models are allowed.
+function syncPaidLimit() { el('paid-limit').classList.toggle('open', field('allow-paid').checked); }
+field('allow-paid').addEventListener('change', syncPaidLimit);
 const numericFields = ['max_cost', 'max_calls', 'max_repairs', 'max_output_tokens', 'context_tokens', 'token_budget', 'timeout_seconds', 'max_run_seconds'] as const;
 async function loadSettings() {
   [connections, preferences, presets, skills] = await Promise.all([api<Provider[]>('/connections'), api<Preferences>('/settings'), api<Preset[]>('/presets'), api<Skill[]>('/skills')]);
   select('provider-preset').replaceChildren(...presets.map(p => new Option(p.name, p.id)));
   renderProviders(); renderSkills();
-  select('routing').value = preferences.routing; select('mode-select').value = preferences.mode; select('composer-mode').value = preferences.mode;
+  setRouting(preferences.routing); select('mode-select').value = preferences.mode; select('composer-mode').value = preferences.mode;
   field('smart-routing').checked = preferences.smart_routing ?? true;
   select('web-search').value = preferences.web_search || 'auto'; field('search-url').value = preferences.search_url || ''; field('search-pages').value = String(preferences.search_pages ?? 3);
-  field('allow-paid').checked = preferences.allow_paid; el<HTMLTextAreaElement>('system-prompt').value = preferences.system_prompt;
+  field('allow-paid').checked = preferences.allow_paid; syncPaidLimit(); el<HTMLTextAreaElement>('system-prompt').value = preferences.system_prompt;
   for (const key of numericFields) field(key.replaceAll('_', '-')).value = String(preferences[key]);
 }
 function applyPreset() {
@@ -633,7 +647,7 @@ el('provider-form').addEventListener('submit', async event => {
 });
 el('orchestration-form').addEventListener('submit', async event => {
   event.preventDefault();
-  const body: Preferences = { ...preferences, mode: select('mode-select').value as Mode, routing: select('routing').value, allow_paid: field('allow-paid').checked, smart_routing: field('smart-routing').checked,
+  const body: Preferences = { ...preferences, mode: select('mode-select').value as Mode, routing: routingChoice(), allow_paid: field('allow-paid').checked, smart_routing: field('smart-routing').checked,
     web_search: select('web-search').value, search_url: field('search-url').value.trim(), search_pages: Number(field('search-pages').value), system_prompt: el<HTMLTextAreaElement>('system-prompt').value };
   for (const key of numericFields) body[key] = Number(field(key.replaceAll('_', '-')).value);
   for (const role of ['generator', 'planner', 'reviewer'] as const) body[`${role}_id`] = select(`${role}-id`).value || null;
@@ -659,11 +673,18 @@ function showSettingsTab(tab: HTMLButtonElement, focus = false) {
     other.setAttribute('aria-selected', String(selected)); other.tabIndex = selected ? 0 : -1;
     el(other.getAttribute('aria-controls')!).hidden = !selected;
   }
+  moveTabMarker(tab);
   // Routing, search, and limits share one form and one Save button.
   el('settings-save').hidden = !['tab-routing', 'tab-search', 'tab-limits'].includes(tab.id);
   if (focus) tab.focus();
   try { localStorage.setItem('leo-settings-tab', tab.id); } catch { /* Remembering the tab is optional. */ }
 }
+function moveTabMarker(tab: HTMLButtonElement) {
+  const marker = document.querySelector<HTMLElement>('.tab-marker'); if (!marker || !tab.offsetWidth) return;
+  marker.style.transform = `translate(${tab.offsetLeft}px, ${tab.offsetTop}px)`;
+  marker.style.width = `${tab.offsetWidth}px`; marker.style.height = `${tab.offsetHeight}px`;
+}
+window.addEventListener('resize', () => { const tab = settingsTabs.find(t => t.getAttribute('aria-selected') === 'true'); if (tab) moveTabMarker(tab); });
 settingsTabs.forEach((tab, index) => {
   tab.addEventListener('click', () => showSettingsTab(tab));
   tab.addEventListener('keydown', event => {
@@ -677,6 +698,10 @@ function openSettings(tabId?: string) {
   try { saved = localStorage.getItem('leo-settings-tab'); } catch { /* Fall back to the first tab. */ }
   showSettingsTab(settingsTabs.find(t => t.id === (tabId || saved)) || settingsTabs[0]);
   dialog('settings-dialog').showModal(); void loadSettings().catch(e => toast(errorText(e)));
+  // Place the tab marker without animating it from the corner, then let later tab changes slide it.
+  const marker = document.querySelector<HTMLElement>('.tab-marker')!; marker.classList.remove('animate');
+  moveTabMarker(settingsTabs.find(t => t.getAttribute('aria-selected') === 'true')!);
+  requestAnimationFrame(() => requestAnimationFrame(() => marker.classList.add('animate')));
 }
 el('open-settings').addEventListener('click', () => openSettings());
 el('connect-models').addEventListener('click', () => { openSettings('tab-models'); editProvider(); });

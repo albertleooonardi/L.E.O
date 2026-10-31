@@ -15,6 +15,31 @@ BIG = {'id': 'b', 'name': 'Big', 'model': 'big-coder', 'skills': ['coding', 'bac
 PREFS = {'routing': 'local_first'}
 
 
+def paid(id, input_price, output_price, **extra):
+    return {**GEMINI, 'id': id, 'model': id, 'free': False, 'input_price': input_price, 'output_price': output_price, 'priority': 1, **extra}
+
+
+def test_auto_routing_weighs_every_chosen_model_by_cost():
+    haiku, opus = paid('haiku', 0.1, 0.5), paid('opus', 5, 25)
+    ordered, reason = rank([opus, haiku, GEMINI], 'frontend', 'standard', {'routing': 'auto'})
+    assert [c['id'] for c in ordered] == ['g', 'haiku', 'opus'], 'free first, then the cheaper paid model, despite priority'
+    assert reason.endswith('free')
+    ordered, reason = rank([opus, haiku], 'frontend', 'standard', {'routing': 'auto'})
+    assert ordered[0]['id'] == 'haiku' and '$0.0010 per call' in reason
+
+
+def test_auto_routing_prices_paid_models_from_their_own_token_use():
+    # Same prices, but one model has used far more output tokens per call (e.g. long hidden thinking).
+    verbose = paid('verbose', 1, 5, avg_input_tokens=3000, avg_output_tokens=9000)
+    concise = paid('concise', 1, 5, avg_input_tokens=3000, avg_output_tokens=600)
+    assert rank([verbose, concise], 'frontend', 'standard', {'routing': 'auto'})[0][0]['id'] == 'concise'
+
+
+def test_auto_routing_still_puts_fit_before_cost():
+    strong_paid = paid('opus', 5, 25, tier='strong', skills=['coding', 'backend'])
+    assert rank([SMALL, strong_paid], 'coding', 'strong', {'routing': 'auto'})[0][0]['id'] == 'opus', 'a free model too light for the task loses'
+
+
 def test_classify_skill_and_difficulty():
     simple = classify('What is the capital of France?', SKILLS)
     assert simple['skill'] == 'general' and simple['difficulty'] == 'light' and choose_mode(simple) == 'quick'
@@ -125,3 +150,13 @@ def test_simple_questions_are_light_and_general_work_goes_to_the_lightest_capabl
     flash = {**GEMINI, 'skills': ['general', 'frontend']}
     ordered, reason = rank([flash, lite], 'general', 'light', PREFS)
     assert ordered[0]['id'] == 'l' and 'lightest capable' in reason
+
+
+async def test_connections_report_calls_and_average_tokens(store):
+    from .test_orchestrator import add_provider
+    provider = add_provider(store)
+    unused = store.save_connection(Connection(name='Unused', base_url='http://unused.test/v1', model='unused', free=True, priority=90).model_dump())
+    await execute(store, make_run(store), lambda request: sse_response('hello'))
+    rows = {c['id']: c for c in store.with_usage(store.list_connections())}
+    assert rows[provider['id']]['calls'] == 1 and rows[provider['id']]['avg_output_tokens'] is not None
+    assert rows[unused['id']]['calls'] == 0 and rows[unused['id']]['avg_output_tokens'] is None

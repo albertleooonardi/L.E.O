@@ -6,7 +6,7 @@ import uuid
 
 from . import providers, tools
 from .context import parse_plan, parse_review, prepare_context, static_review, token_bound
-from .router import EFFORT, SEARCH_CUES, choose_mode, classify, rank, wants_review
+from .router import EFFORT, SEARCH_CUES, call_cost, choose_mode, classify, rank, wants_review
 from .store import LostLease
 
 
@@ -71,14 +71,15 @@ class Orchestrator:
                    if p["enabled"] and (p["free"] or self.prefs["allow_paid"])]
         # Live disabled/deleted connections are never used, even by queued snapshots.
         live = {p["id"]: p for p in self.store.list_connections()}
-        choices = [p for p in choices if p["id"] in live and live[p["id"]]["enabled"] and live[p["id"]]["cooldown_until"] <= time.time()]
+        choices = self.store.with_usage([p for p in choices if p["id"] in live and live[p["id"]]["enabled"] and live[p["id"]]["cooldown_until"] <= time.time()])
         if role == "generator" and skill and self.prefs.get("smart_routing", True):
             # The routing head picks the generator for each task; planner/reviewer assignments still apply.
             ordered, reason = rank(choices, skill, difficulty or "standard", self.prefs)
         else:
             route = self.prefs["routing"]
             ordered = sorted(choices, key=lambda p: (p["id"] != selected if selected else False,
-                             not p["local"] if route == "local_first" else not p["free"] if route == "free_first" else False,
+                             round(call_cost(p), 6) if route == "auto" else 0,
+                             not p["local"] if route in ("local_first", "auto") else not p["free"] if route == "free_first" else False,
                              p["priority"], p["id"]))
             reason = "assigned in Settings" if selected and ordered and ordered[0]["id"] == selected else "fallback order"
         if self.prefs["routing"] == "free_first" and not (selected and role != "generator"):

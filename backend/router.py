@@ -8,6 +8,21 @@ import re
 TIERS = {"light": 0, "standard": 1, "strong": 2}
 # Thinking effort sent to reasoning models by task difficulty; planning and review count as light.
 EFFORT = {"light": "low", "standard": "low", "strong": "medium"}
+# Tokens assumed for one call before a model has history (input, output).
+TYPICAL_CALL = (3000, 1500)
+
+
+def call_tokens(c):
+    """Average tokens per call from this model's completed calls, or a typical call when it has none."""
+    return (c.get("avg_input_tokens") or TYPICAL_CALL[0], c.get("avg_output_tokens") or TYPICAL_CALL[1])
+
+
+def call_cost(c):
+    """Estimated dollars for one call: free and local models cost nothing; paid ones by price and observed token use."""
+    if c.get("free") or c.get("local"):
+        return 0.0
+    tokens_in, tokens_out = call_tokens(c)
+    return ((c.get("input_price") or 0) * tokens_in + (c.get("output_price") or 0) * tokens_out) / 1_000_000
 
 # Starter skills seeded on first start; owners can edit, disable, delete, or add their own.
 STARTER_SKILLS = [
@@ -117,10 +132,12 @@ def rank(connections, skill, difficulty, prefs, pinned=None):
 
     Prefer a model strong enough for the task, then one that has the skill, then (for light work) one without hidden
     reasoning, then the lightest sufficient tier (cheaper). Reasoning models also get a low effort setting on simple work
-    (see EFFORT). Ties follow the fallback order setting.
+    (see EFFORT). Ties follow the fallback order setting. With "auto", every enabled model competes: among models that
+    fit, the cheapest per call wins (free ones cost nothing; paid ones are priced from their own past token use).
     """
     need = TIERS.get(difficulty, 1)
-    route = prefs.get("routing", "local_first")
+    route = prefs.get("routing", "auto")
+    auto = route == "auto"
 
     def key(c):
         tier = TIERS.get(c.get("tier", "standard"), 1)
@@ -132,10 +149,11 @@ def rank(connections, skill, difficulty, prefs, pinned=None):
             c["id"] != pinned if pinned else False,
             not enough,  # Never hand a task to a model too light for it while a capable one is available.
             not has, not generalist and not has,
+            round(call_cost(c), 6) if auto else 0,
             bool(c.get("reasoning")) and need == 0,  # Among fitting models, avoid hidden reasoning tokens on light work.
             tier - need if enough else need - tier,
             bool(c.get("reasoning")) and need < 2,
-            not c["local"] if route == "local_first" else not c["free"] if route == "free_first" else False,
+            not c["local"] if route in ("local_first", "auto") else not c["free"] if route == "free_first" else False,
             c["priority"], c["id"],
         )
 
@@ -158,4 +176,7 @@ def rank(connections, skill, difficulty, prefs, pinned=None):
     reasons.append(f"{tier} tier fits {difficulty} work" if TIERS.get(tier, 1) >= need else f"strongest available ({tier}) for {difficulty} work")
     if first.get("reasoning"):
         reasons.append("reasoning model")
+    if auto:
+        cost = call_cost(first)
+        reasons.append("free" if not cost else f"about ${cost:.4f} per call, cheapest fit")
     return ordered, "; ".join(reasons)

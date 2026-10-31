@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
 from sqlalchemy import (JSON, Boolean, Column, Float, Integer, MetaData, String, Table, Text,
-                        and_, create_engine, delete, event, insert, inspect, or_, select, update)
+                        and_, create_engine, delete, event, func, insert, inspect, or_, select, update)
 from sqlalchemy.exc import IntegrityError
 
 from .config import Config
@@ -151,6 +151,17 @@ class Store:
             rows = db.execute(select(connections)).mappings().all()
         return [{"skills": [], "tier": "standard", "reasoning": False, **row["config"], "id": row["id"], "has_key": bool(row["secret"]),
                  "cooldown_until": row["cooldown_until"], **({"secret": row["secret"]} if private else {})} for row in rows]
+
+    def model_usage(self):
+        """Per model: completed calls and their average input and output tokens, for cost-aware routing."""
+        query = select(calls.c.model, func.count(), func.avg(calls.c.input_tokens), func.avg(calls.c.output_tokens)).where(
+            calls.c.status == "completed").group_by(calls.c.model)
+        with self.engine.connect() as db:
+            return {model: {"calls": n, "avg_input_tokens": round(a or 0), "avg_output_tokens": round(b or 0)} for model, n, a, b in db.execute(query)}
+
+    def with_usage(self, connections_list):
+        usage = self.model_usage()
+        return [{**c, "calls": 0, "avg_input_tokens": None, "avg_output_tokens": None, **usage.get(c["model"], {})} for c in connections_list]
 
     def get_connection(self, connection_id, private=False):
         return next((c for c in self.list_connections(private) if c["id"] == connection_id), None)

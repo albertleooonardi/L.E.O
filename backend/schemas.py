@@ -47,7 +47,7 @@ class Preferences(StrictModel):
     planner_id: str | None = None
     reviewer_id: str | None = None
     mode: Literal["auto", "quick", "reviewed", "deep"] = "auto"
-    routing: Literal["priority", "local_first", "free_first"] = "local_first"
+    routing: Literal["auto", "priority", "local_first", "free_first"] = "auto"
     smart_routing: bool = True
     # Web research: HEAD searches when a request needs fresh or external information (auto) or never (off).
     web_search: Literal["auto", "off"] = "auto"

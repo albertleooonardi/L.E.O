@@ -117,7 +117,7 @@ def create_app(config=None, store=None):
 
     @app.get("/api/connections")
     def read_connections():
-        return store.list_connections()
+        return store.with_usage(store.list_connections())
 
     @app.post("/api/connections", status_code=201)
     def create_connection(body: Connection):
@@ -179,7 +179,7 @@ def create_app(config=None, store=None):
         route = classify(body.prompt, skills)
         mode = body.mode or prefs.get("mode", "auto")
         mode = choose_mode(route) if mode == "auto" else mode
-        eligible = [c for c in store.list_connections() if c["enabled"] and (c["free"] or prefs["allow_paid"])]
+        eligible = store.with_usage([c for c in store.list_connections() if c["enabled"] and (c["free"] or prefs["allow_paid"])])
         ordered, reason = rank(eligible, route["skill"], route["difficulty"], prefs) if prefs.get("smart_routing", True) else (eligible, "smart routing is off")
         return {**route, "mode": mode, "reason": reason,
                 "note": "Deep mode asks the planner to label each subtask; those subtasks are routed the same way." if mode == "deep" else "",

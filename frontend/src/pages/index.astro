@@ -113,6 +113,7 @@ import '../styles/global.css';
       <div class="dialog-heading"><h2 id="settings-heading">Settings</h2><button class="icon-button" data-close-dialog aria-label="Close settings"><Icon name="close" size={18} /></button></div>
       <div class="settings-layout">
         <div class="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
+          <span class="tab-marker" aria-hidden="true"></span>
           <button type="button" role="tab" id="tab-models" aria-controls="panel-models" aria-selected="true">Models</button>
           <button type="button" role="tab" id="tab-skills" aria-controls="panel-skills" aria-selected="false" tabindex="-1">Skills</button>
           <button type="button" role="tab" id="tab-routing" aria-controls="panel-routing" aria-selected="false" tabindex="-1">Routing</button>
@@ -200,16 +201,26 @@ import '../styles/global.css';
           <form id="orchestration-form" class="orchestration-form">
             <section class="settings-panel" role="tabpanel" id="panel-routing" aria-labelledby="tab-routing" hidden>
               <div class="panel-intro"><p>How L.E.O. picks a model for each task.</p></div>
-              <div class="field-grid">
-                <label>Default mode<select id="mode-select"><option value="auto">Auto</option><option value="quick">Quick</option><option value="reviewed">Reviewed</option><option value="deep">Deep</option></select></label>
-                <label>When a model fails, try<select id="routing"><option value="free_first">Free models first</option><option value="local_first">Local models first</option><option value="priority">By priority</option></select></label>
+              <fieldset class="choice-list">
+                <legend>Model choice</legend>
+                <label class="choice"><input type="radio" name="routing" value="auto" /><span><strong>Auto <em>Recommended</em></strong><small>Considers every model you turned on. Picks one that fits the task, then the cheapest: free models cost nothing, paid ones are priced from the tokens they actually use.</small></span></label>
+                <label class="choice"><input type="radio" name="routing" value="free_first" /><span><strong>Free first</strong><small>Tries up to 3 free models before any paid one.</small></span></label>
+                <label class="choice"><input type="radio" name="routing" value="local_first" /><span><strong>Local first</strong><small>Prefers models running on this computer.</small></span></label>
+                <label class="choice"><input type="radio" name="routing" value="priority" /><span><strong>By priority</strong><small>Follows each model's priority number.</small></span></label>
+              </fieldset>
+              <div class="toggle-row">
+                <span><strong>Match tasks to skills</strong><small>Sends coding to coders, design to designers, and keeps light work on light models.</small></span>
+                <input id="smart-routing" type="checkbox" class="switch" aria-label="Match tasks to skills" />
               </div>
-              <label class="check-label"><input id="smart-routing" type="checkbox" /> Smart routing: send each task to the cheapest model with the right skill and strength</label>
-              <label class="check-label"><input id="allow-paid" type="checkbox" /> Allow paid models</label>
-              <label class="narrow">Max cost per run ($)<input id="max-cost" type="number" min="0.001" max="100" step="any" required /></label>
+              <div class="toggle-row">
+                <span><strong>Allow paid models</strong><small>Used only within the cost limit below.</small></span>
+                <input id="allow-paid" type="checkbox" class="switch" aria-label="Allow paid models" />
+              </div>
+              <div class="reveal" id="paid-limit"><div><label class="narrow">Max cost per run ($)<input id="max-cost" type="number" min="0.001" max="100" step="any" required /></label></div></div>
+              <label class="narrow">Default mode<select id="mode-select"><option value="auto">Auto</option><option value="quick">Quick</option><option value="reviewed">Reviewed</option><option value="deep">Deep</option></select></label>
               <details class="advanced">
                 <summary>Fixed roles and instructions</summary>
-                <p class="field-hint">Generator is used only when smart routing is off.</p>
+                <p class="field-hint">Generator is used only when matching tasks to skills is off.</p>
                 <div class="field-grid">
                   <label>Generator<select id="generator-id"></select></label>
                   <label>Planner<select id="planner-id"></select></label>

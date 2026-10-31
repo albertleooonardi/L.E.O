@@ -60,7 +60,7 @@ flowchart LR
 0. **Research when needed.** If the request needs fresh or outside information ("cite sources", "latest", "price of", a link…), L.E.O. searches your SearXNG and reads the top pages first; see [Web research](#web-research).
 1. **Classify (no tokens spent).** Keyword rules match the request to a skill: General, Frontend, Backend, Coding, Design, Reasoning, or skills you add. For a build request, the thing being built decides the main skill ("…a website" → Frontend). Signals such as a build request, scope words ("complete", "production"), several skills, several parts, or length set the difficulty: light, standard, or strong.
 2. **Pick a mode (Auto).** Light and standard work → **Quick**. Strong single-skill work → **Reviewed**. Strong multi-skill work or a build request → **Deep**, where the planner labels each subtask with a skill and difficulty.
-3. **Pick a model and an effort for every generator call.** Candidates are ranked: strong enough for the task → has the skill ("General" is not a specialty) → generalist → for light work, a model without hidden reasoning → the lightest tier that is enough → your fallback order. Thinking models get a matching effort: low for light and standard work, medium for strong work. With **Free first** routing, paid models are a backup after three free attempts. A failed or rate-limited model is skipped and backs off exponentially (30 seconds up to an hour).
+3. **Pick a model and an effort for every generator call.** Candidates are ranked: strong enough for the task → has the skill ("General" is not a specialty) → generalist → for light work, a model without hidden reasoning → the lightest tier that is enough → your model choice setting. With **Auto** (the default), every model you turned on competes: among models that fit, the cheapest per call wins. Free and local models cost nothing; a paid model's cost is estimated from its prices and the tokens it actually used in earlier calls, so a model that thinks at length counts as more expensive. Settings → Models shows each model's price and average tokens per call. Thinking models get a matching effort: low for light and standard work, medium for strong work. With **Free first**, paid models are a backup after three free attempts. A failed or rate-limited model is skipped and backs off exponentially (30 seconds up to an hour).
 4. **Explain it.** The live view and the run log show each decision and its reason, for example `task_2 [frontend · standard] → gemini-2.5-flash: has the frontend skill; standard tier fits standard work`.
 
 `POST /api/route` (and the MCP tool `leo_route`) previews the decision for any prompt without calling a model.
@@ -97,7 +97,7 @@ v0.2 is a working prototype, not a finished product.
 - HEAD: skills, routing profiles, Auto mode, per-subtask routing in Deep mode, effort by difficulty, model discovery, and fallback between providers (live: rate-limited models handed over to others with no failed runs).
 - Web research through a self-hosted SearXNG, with safe page reading and cited answers (live-tested).
 - Durable runs: background worker, checkpoints, crash recovery, Stop, resumable streams, history.
-- Per-run limits on calls, tokens, time, and estimated cost; paid usage only with explicit opt-in, and paid models as a backup under Free first routing.
+- Per-run limits on calls, tokens, time, and estimated cost; paid usage only with explicit opt-in, priced per call from each model's real token use under Auto routing.
 - Chat with rendered Markdown, live run view, sandboxed canvas, per-chat and global usage views.
 - MCP server over stdio (tested as a real subprocess and against live models).
 
@@ -163,7 +163,7 @@ Profiles come from the catalog itself: strength from size and family (e.g. 550B,
 
 A connection with no skills is a **generalist**: it can take any task but loses ties to a specialist. Give strong-but-expensive models the **strong** tier so they are used only for strong work, and mark reasoning models so they are not used for simple questions.
 
-Turn off **Smart routing** in Settings → Orchestration to go back to fixed roles: the generator assignment and fallback order decide.
+Turn off **Match tasks to skills** in Settings → Routing to go back to fixed roles: the generator assignment and model choice setting decide.
 
 ## Web research
 
@@ -177,7 +177,7 @@ Search uses your own [SearXNG](https://github.com/searxng/searxng) instance with
 
 ## Paid models as a backup (Claude)
 
-Connect a paid API (for example Anthropic Claude: preset **Anthropic / Claude**, then **Models** to add Haiku, Sonnet, and Opus), enable **Allow paid API usage**, set a **Max estimated cost / run**, and choose **Free first** routing. Each step then tries up to three free models, then the paid model that fits (Haiku for light, Sonnet for standard, Opus for strong work), then the remaining free models. L.E.O. reserves the worst-case cost before every paid call and stops before the cap. Claude receives a thinking-effort setting by difficulty, refusals hand the step to the next model, and an empty provider balance is reported as such.
+Connect a paid API (for example Anthropic Claude: preset **Anthropic / Claude**, then **Models** to add Haiku, Sonnet, and Opus), enable **Allow paid API usage**, and set a **Max cost per run** (Settings → Routing). With **Auto**, a paid model is chosen when it fits the task better than the free ones, or when it is the cheapest fit (Haiku for light, Sonnet for standard, Opus for strong work). Choose **Free first** to treat paid models strictly as a backup: each step then tries up to three free models, then the paid model that fits, then the remaining free models. L.E.O. reserves the worst-case cost before every paid call and stops before the cap. Claude receives a thinking-effort setting by difficulty, refusals hand the step to the next model, and an empty provider balance is reported as such.
 
 ## Modes, limits, and context
 
