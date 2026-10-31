@@ -114,11 +114,10 @@ v0.2 is a working prototype, not a finished product.
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and Node.js 22.12+ (Node 24 recommended).
 
 ```sh
-make install
-make dev
+./start.sh
 ```
 
-Open **http://127.0.0.1:8000**. `make dev` runs the FastAPI API and one durable worker together; the API serves the built Astro frontend. Dependencies are locked in `uv.lock` and `frontend/package-lock.json`.
+That one command installs dependencies on first run, rebuilds the UI when its source changed, starts web search (SearXNG) if it is installed, runs the API and one durable worker, and opens **http://127.0.0.1:8000**. Ctrl+C stops everything. Your connections, keys, chats, and settings live in `.leo/`; to use another workspace folder, pass it: `./start.sh .leo-bench`. `make start` does the same, and `make dev` runs only the API and worker. Dependencies are locked in `uv.lock` and `frontend/package-lock.json`.
 
 For frontend development, run `make frontend` in another terminal and open **http://127.0.0.1:4321**. Astro proxies `/api` to port 8000. Rebuild with `make build` to update the frontend served on port 8000.
 
@@ -174,7 +173,7 @@ HEAD searches only when a request needs fresh or outside information: explicit i
 - **Deep runs:** the planner can plan its own search tasks with up to three queries; only those tasks receive the page text.
 - **Safety:** pages are fetched only from public addresses (never your local network or cloud metadata services, including after redirects), capped in size and time, stripped to readable text (about 8,000 characters per page), and passed to models as information, never as instructions.
 
-Search uses your own [SearXNG](https://github.com/searxng/searxng) instance with JSON output enabled (`deploy/searxng/settings.yml`). With Docker: `docker compose up searxng`, then set **Settings → Web search** to `http://localhost:8888` and click **Test search**.
+Search uses your own [SearXNG](https://github.com/searxng/searxng) instance with JSON output enabled (`deploy/searxng/settings.yml`). `./start.sh` starts it automatically when it is installed from source in `<workspace>/searxng` (a `venv` with SearXNG's requirements plus its `src` checkout), or uses one already running on port 8888. With Docker: `docker compose up searxng`. Then set **Settings → Web search** to `http://localhost:8888` and click **Test search**.
 
 ## Paid models as a backup (Claude)
 
