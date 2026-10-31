@@ -170,18 +170,57 @@ function logActivity(message: string) {
   while (el('run-events').children.length > 80) el('run-events').firstChild?.remove();
 }
 async function refreshHistory() { conversations = await api<Conversation[]>('/conversations'); renderHistory(); }
+// Chats are grouped by when they were last active, newest first.
+function historyGroup(updated: number) {
+  const day = 86_400_000, startOfToday = new Date().setHours(0, 0, 0, 0), time = updated * 1000;
+  if (time >= startOfToday) return 'Today';
+  if (time >= startOfToday - day) return 'Yesterday';
+  if (time >= startOfToday - 6 * day) return 'Previous 7 days';
+  if (time >= startOfToday - 29 * day) return 'Previous 30 days';
+  return 'Older';
+}
+function historyTime(updated: number) {
+  const date = new Date(updated * 1000), group = historyGroup(updated);
+  if (group === 'Today' || group === 'Yesterday') return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (group === 'Previous 7 days') return date.toLocaleDateString([], { weekday: 'short' });
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
 function renderHistory() {
   el('history-list').replaceChildren(); el('history-empty').hidden = conversations.length > 0;
-  for (const chat of conversations) {
+  let group = '', list: HTMLElement | null = null;
+  for (const chat of [...conversations].sort((a, b) => b.updated_at - a.updated_at)) {
+    if (historyGroup(chat.updated_at) !== group) {
+      group = historyGroup(chat.updated_at);
+      const section = document.createElement('div'); section.className = 'history-group';
+      const heading = document.createElement('h3'); heading.textContent = group;
+      list = document.createElement('div'); list.className = 'history-items';
+      section.append(heading, list); el('history-list').append(section);
+    }
     const row = document.createElement('div'); row.className = `history-item${chat.id === activeId ? ' active' : ''}`;
-    const button = document.createElement('button'); button.className = 'history-open';
-    const span = document.createElement('span'); span.textContent = `${chat.active_run ? '◌ ' : ''}${chat.title}`; button.append(span); button.title = chat.title;
+    const button = document.createElement('button'); button.className = 'history-open'; button.title = chat.title;
+    if (chat.id === activeId) button.setAttribute('aria-current', 'page');
+    if (chat.active_run) button.append(Object.assign(document.createElement('span'), { className: 'status-dot', title: 'Running' }));
+    button.dataset.status = chat.active_run ? 'running' : '';
+    const title = Object.assign(document.createElement('span'), { className: 'history-title', textContent: chat.title });
+    const time = Object.assign(document.createElement('span'), { className: 'history-time', textContent: historyTime(chat.updated_at) });
+    button.append(title, time);
+    button.querySelector('.status-dot')?.setAttribute('data-status', 'running');
     button.addEventListener('click', () => void openChat(chat.id).catch(e => toast(errorText(e))));
-    const remove = document.createElement('button'); remove.className = 'history-delete'; remove.textContent = '×'; remove.setAttribute('aria-label', `Delete ${chat.title}`);
+    const remove = document.createElement('button'); remove.className = 'history-delete'; remove.setAttribute('aria-label', `Delete ${chat.title}`);
+    remove.append(el<HTMLTemplateElement>('icon-trash').content.cloneNode(true), Object.assign(document.createElement('span'), { textContent: 'Delete' }));
+    // Deleting asks once: the first click arms the button, the second deletes.
+    let disarm = 0;
     remove.addEventListener('click', async () => {
+      if (!row.classList.contains('confirming')) {
+        row.classList.add('confirming'); remove.setAttribute('aria-label', `Confirm deleting ${chat.title}`);
+        disarm = window.setTimeout(() => { row.classList.remove('confirming'); remove.setAttribute('aria-label', `Delete ${chat.title}`); }, 3000);
+        return;
+      }
+      clearTimeout(disarm);
       try { await send(`/conversations/${chat.id}`, 'DELETE'); if (activeId === chat.id) newChat(); await refreshHistory(); }
       catch (e) { toast(errorText(e)); }
-    }); row.append(button, remove); el('history-list').append(row);
+    });
+    row.append(button, remove); list!.append(row);
   }
 }
 async function openChat(id: string) {
@@ -365,6 +404,7 @@ prompt.addEventListener('keydown', event => { if (event.key === 'Enter' && !even
 function refreshConnectionStatus() {
   const enabled = connections.filter(p => p.enabled);
   el('connection-status').textContent = ready ? `${enabled.length} model${enabled.length === 1 ? '' : 's'} connected` : 'Server offline';
+  el('sidebar-status').textContent = el('connection-status').textContent; el('sidebar-dot').dataset.status = ready && enabled.length ? 'completed' : '';
   el('connect-models').hidden = enabled.length > 0;
   el('composer-note').textContent = enabled.length ? 'Auto picks the right model for each task. Answers can be wrong; check what matters.' : 'Connect a local model or API in Settings.';
 }
@@ -717,7 +757,8 @@ function syncSidebar() { const mobile = matchMedia('(max-width: 800px)').matches
 function closeSidebar() { document.body.classList.remove('sidebar-open'); document.body.classList.add('sidebar-collapsed'); syncSidebar(); }
 el('open-sidebar').addEventListener('click', () => { document.body.classList.toggle(matchMedia('(max-width: 800px)').matches ? 'sidebar-open' : 'sidebar-collapsed'); syncSidebar(); });
 el('collapse-sidebar').addEventListener('click', closeSidebar); el('sidebar-scrim').addEventListener('click', closeSidebar); window.addEventListener('resize', syncSidebar);
-el('new-chat').addEventListener('click', newChat); el('header-new-chat').addEventListener('click', newChat);
+el('new-chat').addEventListener('click', newChat); el('sidebar-settings').addEventListener('click', () => { if (matchMedia('(max-width: 800px)').matches) closeSidebar(); openSettings(); });
+document.querySelectorAll<HTMLElement>('kbd.shortcut').forEach(k => { k.textContent = `${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl '}${k.dataset.key}`; }); el('header-new-chat').addEventListener('click', newChat);
 function renderSearch() {
   const query = field('search-input').value.toLowerCase(); el('search-results').replaceChildren();
   for (const chat of conversations.filter(c => c.title.toLowerCase().includes(query))) {
@@ -751,7 +792,7 @@ async function initialize() {
     await loadSettings(); await refreshHistory(); ready = true; refreshConnectionStatus();
     let saved: string | null = null; try { saved = localStorage.getItem('leo-active-chat'); } catch {}
     if (saved && conversations.some(c => c.id === saved)) await openChat(saved);
-  } catch (e) { ready = false; el('connection-status').textContent = 'Server unavailable'; el('composer-note').textContent = 'Start the L.E.O. backend, then reload this page.'; toast(errorText(e)); }
+  } catch (e) { ready = false; el('connection-status').textContent = 'Server unavailable'; el('sidebar-status').textContent = 'Server unavailable'; el('composer-note').textContent = 'Start the L.E.O. backend, then reload this page.'; toast(errorText(e)); }
   updateSend();
 }
 
