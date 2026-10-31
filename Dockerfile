@@ -11,6 +11,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 COPY backend/ ./backend/
+COPY deploy/start.sh ./deploy/start.sh
 COPY --from=frontend /build/dist/ ./frontend/dist/
 RUN useradd --uid 10001 --create-home leo && mkdir /app/.leo && chown leo:leo /app/.leo
 USER leo
