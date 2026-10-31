@@ -111,128 +111,160 @@ import '../styles/global.css';
     </dialog>
     <dialog id="settings-dialog" class="dialog settings-dialog" aria-labelledby="settings-heading">
       <div class="dialog-heading"><h2 id="settings-heading">Settings</h2><button class="icon-button" data-close-dialog aria-label="Close settings"><Icon name="close" size={18} /></button></div>
-      <div class="settings-row">
-        <label for="theme-select">Appearance</label>
-        <select id="theme-select"><option value="dark">Dark</option><option value="light">Light</option></select>
-      </div>
-      <section class="settings-section" aria-labelledby="connections-heading">
-        <div class="section-heading"><h3 id="connections-heading">Model connections</h3><button class="secondary-button" id="add-connection">Add provider</button></div>
-        <p class="field-hint">Add a provider’s key once with Add provider, then use Add models to choose which of its models L.E.O. may use. The switch turns a model on or off.</p>
-        <div id="provider-list" class="provider-list"></div>
-        <section id="discover-panel" class="discover-panel" aria-labelledby="discover-title" hidden>
-          <div class="section-heading"><h3 id="discover-title">Models this key can use</h3><button type="button" class="secondary-button" id="discover-close">Close</button></div>
-          <p class="field-hint" id="discover-hint"></p>
-          <div id="discover-list" class="discover-list"></div>
-          <label class="check-label"><input id="discover-check" type="checkbox" checked /> Check access first (one tiny request per model; skips models your key cannot use)</label>
-          <p class="form-feedback" id="discover-feedback" role="status"></p>
-          <div class="form-actions"><button type="button" class="secondary-button" id="discover-none">Select none</button><button type="button" class="primary-button" id="discover-add">Add selected</button></div>
-        </section>
-        <form id="provider-form" class="provider-form" hidden>
-          <input id="provider-id" type="hidden" />
-          <div class="field-grid">
-            <label>Provider<select id="provider-preset"></select></label>
-            <label>Connection name<input id="provider-name" maxlength="80" required placeholder="My coding model" /></label>
-          </div>
-          <p class="field-hint" id="provider-hint"></p>
-          <label>API base URL<input id="provider-url" type="url" required placeholder="http://localhost:11434/v1" /></label>
-          <div class="field-grid">
-            <label>Protocol<select id="provider-protocol"><option value="openai">Chat Completions</option><option value="responses">OpenAI Responses</option><option value="anthropic">Anthropic Messages</option></select></label>
-            <label>Model ID<input id="provider-model" list="model-catalog" required placeholder="Exact model name" maxlength="160" /></label>
-          </div>
-          <datalist id="model-catalog"></datalist>
-          <label>API key<input id="provider-key" type="password" autocomplete="new-password" placeholder="Optional for local servers" /></label>
-          <label id="provider-key-from-row" hidden>Or reuse a saved key <span class="field-hint">Only connections to the same host are listed</span><select id="provider-key-from"><option value="">No, use the key above</option></select></label>
-          <label class="check-label"><input id="provider-clear-key" type="checkbox" /> Remove saved API key</label>
-          <div class="field-grid">
-            <label>Context window<input id="provider-context" type="number" value="32768" min="1024" max="2000000" required /></label>
-            <label>Priority <span class="field-hint">Lower goes first</span><input id="provider-priority" type="number" value="10" min="0" max="100" required /></label>
-          </div>
-          <div class="field-grid">
-            <label>Strength<select id="provider-tier"><option value="light">Light · small or fast model</option><option value="standard">Standard</option><option value="strong">Strong · top model</option></select></label>
-            <label class="check-label inline-check"><input id="provider-reasoning" type="checkbox" /> Reasoning model (spends hidden thinking tokens)</label>
-          </div>
-          <fieldset class="skill-picker"><legend>Skills</legend><p class="field-hint">What this model is good at. The router sends matching tasks here; a model with no skills is a generalist.</p><div id="provider-skills" class="skill-options"></div></fieldset>
-          <div class="check-row">
-            <label class="check-label"><input id="provider-local" type="checkbox" /> Local server</label>
-            <label class="check-label"><input id="provider-free" type="checkbox" /> No API charge</label>
-            <label class="check-label"><input id="provider-enabled" type="checkbox" checked /> Enabled</label>
-          </div>
-          <p class="field-hint">Only mark “No API charge” for local inference or a verified free endpoint. This does not change the provider’s billing.</p>
-          <div class="field-grid">
-            <label>Input price / 1M tokens ($)<input id="provider-input-price" type="number" step="any" min="0" max="10000" placeholder="Required for paid models" /></label>
-            <label>Output price / 1M tokens ($)<input id="provider-output-price" type="number" step="any" min="0" max="10000" placeholder="Required for paid models" /></label>
-          </div>
-          <label>Chat Completions output parameter<select id="provider-token-param"><option value="max_tokens">max_tokens (most servers)</option><option value="max_completion_tokens">max_completion_tokens (newer OpenAI models)</option></select></label>
-          <p class="form-feedback" id="provider-feedback" role="status"></p>
-          <div class="form-actions"><button type="button" class="secondary-button" id="cancel-provider">Cancel</button><button type="submit" class="primary-button">Save connection</button></div>
-        </form>
-      </section>
-      <section class="settings-section" aria-labelledby="skills-heading">
-        <div class="section-heading"><h3 id="skills-heading">Skills</h3><button class="secondary-button" id="add-skill">Add skill</button></div>
-        <p class="field-hint">The router matches each task to a skill by its keywords, sends it to a model with that skill, and adds the skill's instructions to the prompt.</p>
-        <div id="skill-list" class="provider-list"></div>
-        <form id="skill-form" class="provider-form" hidden>
-          <input id="skill-id" type="hidden" />
-          <div class="field-grid">
-            <label>Name<input id="skill-name" maxlength="60" required placeholder="Data analysis" /></label>
-            <label>Description<input id="skill-description" maxlength="300" placeholder="What tasks belong here" /></label>
-          </div>
-          <label>Keywords <span class="field-hint">Comma separated; matched as whole words</span><input id="skill-keywords" placeholder="pandas, dataframe, chart" /></label>
-          <label>Instructions <span class="field-hint">Added to the prompt for tasks with this skill</span><textarea id="skill-instructions" rows="3" maxlength="4000"></textarea></label>
-          <label class="check-label"><input id="skill-enabled" type="checkbox" checked /> Enabled</label>
-          <p class="form-feedback" id="skill-feedback" role="status"></p>
-          <div class="form-actions"><button type="button" class="secondary-button" id="cancel-skill">Cancel</button><button type="submit" class="primary-button">Save skill</button></div>
-        </form>
-      </section>
-      <form id="orchestration-form" class="settings-section">
-        <h3>Orchestration</h3>
-        <div class="field-grid">
-          <label>Generator<select id="generator-id"></select></label>
-          <label>Reviewer<select id="reviewer-id"></select></label>
-          <label>Planner<select id="planner-id"></select></label>
-          <label>Fallback order<select id="routing"><option value="local_first">Local first</option><option value="free_first">Free first</option><option value="priority">Priority order</option></select></label>
+      <div class="settings-layout">
+        <div class="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
+          <button type="button" role="tab" id="tab-models" aria-controls="panel-models" aria-selected="true">Models</button>
+          <button type="button" role="tab" id="tab-skills" aria-controls="panel-skills" aria-selected="false" tabindex="-1">Skills</button>
+          <button type="button" role="tab" id="tab-routing" aria-controls="panel-routing" aria-selected="false" tabindex="-1">Routing</button>
+          <button type="button" role="tab" id="tab-search" aria-controls="panel-search" aria-selected="false" tabindex="-1">Web search</button>
+          <button type="button" role="tab" id="tab-limits" aria-controls="panel-limits" aria-selected="false" tabindex="-1">Limits</button>
+          <button type="button" role="tab" id="tab-general" aria-controls="panel-general" aria-selected="false" tabindex="-1">General</button>
         </div>
-        <label class="check-label"><input id="smart-routing" type="checkbox" /> Smart routing: pick the generator for each task by skill and difficulty</label>
-        <p class="field-hint">With smart routing, the generator assignment is ignored and each task goes to the cheapest model with the right skill and strength. Planner and reviewer assignments still apply. On failure, L.E.O. tries the next eligible connection.</p>
-        <fieldset class="search-settings"><legend>Web search</legend>
-          <p class="field-hint">For requests that need current or outside information (sources, latest, news, prices, a link), L.E.O. searches your SearXNG instance, reads the top pages, and cites them. Reading pages costs tokens, so plain questions are answered from model knowledge.</p>
-          <div class="field-grid">
-            <label>When to search<select id="web-search"><option value="auto">Auto: when the request needs it</option><option value="off">Off</option></select></label>
-            <label>Pages per search<input id="search-pages" type="number" min="1" max="5" required /></label>
-          </div>
-          <label>SearXNG address <span class="field-hint">e.g. http://localhost:8888, with JSON output enabled</span><input id="search-url" type="url" placeholder="http://localhost:8888" /></label>
-          <div class="form-actions"><button type="button" class="secondary-button" id="test-search">Test search</button></div>
-        </fieldset>
-        <label>Default mode<select id="mode-select"><option value="auto">Auto · L.E.O. decides</option><option value="quick">Quick</option><option value="reviewed">Reviewed</option><option value="deep">Deep</option></select></label>
-        <label class="check-label"><input id="allow-paid" type="checkbox" /> Allow paid API usage within the run limit</label>
-        <div class="field-grid">
-          <label>Max estimated cost / run ($)<input id="max-cost" type="number" min="0.001" max="100" step="any" required /></label>
-          <label>Max model calls / run<input id="max-calls" type="number" min="1" max="20" required /></label>
-          <label>Max repair rounds<input id="max-repairs" type="number" min="0" max="3" required /></label>
-          <label>Max output tokens / call<input id="max-output-tokens" type="number" min="128" max="65536" required /></label>
-          <label>Context tokens / call<input id="context-tokens" type="number" min="1024" max="1000000" required /></label>
-          <label>Total token allowance / run<input id="token-budget" type="number" min="2048" max="2000000" required /></label>
-          <label>Provider timeout (seconds)<input id="timeout-seconds" type="number" min="10" max="600" required /></label>
-          <label>Run time limit (seconds)<input id="max-run-seconds" type="number" min="30" max="3600" required /></label>
+        <div class="settings-panels">
+          <section class="settings-panel" role="tabpanel" id="panel-models" aria-labelledby="tab-models">
+            <div class="panel-intro"><p>Add a provider once, then choose which of its models to use.</p><button class="secondary-button" id="add-connection">Add provider</button></div>
+            <form id="provider-form" class="provider-form" hidden>
+              <input id="provider-id" type="hidden" />
+              <div class="field-grid">
+                <label>Provider<select id="provider-preset"></select></label>
+                <label>Name<input id="provider-name" maxlength="80" required placeholder="My coding model" /></label>
+              </div>
+              <p class="field-hint" id="provider-hint"></p>
+              <label>Model ID<input id="provider-model" list="model-catalog" required placeholder="Exact model name" maxlength="160" /></label>
+              <datalist id="model-catalog"></datalist>
+              <label>API key<input id="provider-key" type="password" autocomplete="new-password" placeholder="Optional for local servers" /></label>
+              <label id="provider-key-from-row" hidden>Or reuse a saved key<select id="provider-key-from"><option value="">No, use the key above</option></select></label>
+              <div class="field-grid">
+                <label>Strength<select id="provider-tier"><option value="light">Light: small or fast</option><option value="standard">Standard</option><option value="strong">Strong: top model</option></select></label>
+                <label class="check-label inline-check"><input id="provider-reasoning" type="checkbox" /> Thinks before answering</label>
+              </div>
+              <fieldset class="skill-picker"><legend>Good at</legend><div id="provider-skills" class="skill-options"></div></fieldset>
+              <label class="check-label"><input id="provider-enabled" type="checkbox" checked /> Use this model</label>
+              <details class="advanced" id="provider-advanced">
+                <summary>Address, cost, and limits</summary>
+                <label>API base URL<input id="provider-url" type="url" required placeholder="http://localhost:11434/v1" /></label>
+                <div class="field-grid">
+                  <label>Protocol<select id="provider-protocol"><option value="openai">Chat Completions</option><option value="responses">OpenAI Responses</option><option value="anthropic">Anthropic Messages</option></select></label>
+                  <label>Output parameter<select id="provider-token-param"><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></label>
+                  <label>Context window<input id="provider-context" type="number" value="32768" min="1024" max="2000000" required /></label>
+                  <label>Priority (lower first)<input id="provider-priority" type="number" value="10" min="0" max="100" required /></label>
+                </div>
+                <div class="check-row">
+                  <label class="check-label"><input id="provider-local" type="checkbox" /> Local server</label>
+                  <label class="check-label"><input id="provider-free" type="checkbox" /> No API charge</label>
+                  <label class="check-label"><input id="provider-clear-key" type="checkbox" /> Remove saved key</label>
+                </div>
+                <div class="field-grid">
+                  <label>Input $ / 1M tokens<input id="provider-input-price" type="number" step="any" min="0" max="10000" placeholder="Paid models" /></label>
+                  <label>Output $ / 1M tokens<input id="provider-output-price" type="number" step="any" min="0" max="10000" placeholder="Paid models" /></label>
+                </div>
+              </details>
+              <p class="form-feedback" id="provider-feedback" role="status"></p>
+              <div class="form-actions">
+                <button type="button" class="text-button danger" id="remove-provider">Remove</button>
+                <button type="button" class="secondary-button" id="check-provider">Check</button>
+                <button type="button" class="secondary-button" id="cancel-provider">Cancel</button>
+                <button type="submit" class="primary-button">Save</button>
+              </div>
+            </form>
+            <div id="provider-list" class="provider-list"></div>
+            <section id="discover-panel" class="discover-panel" aria-labelledby="discover-title" hidden>
+              <div class="section-heading"><h3 id="discover-title">Models this key can use</h3><button type="button" class="text-button" id="discover-close">Close</button></div>
+              <p class="field-hint" id="discover-hint"></p>
+              <div id="discover-list" class="discover-list"></div>
+              <label class="check-label"><input id="discover-check" type="checkbox" checked /> Test each model first and skip ones the key can't use</label>
+              <p class="form-feedback" id="discover-feedback" role="status"></p>
+              <div class="form-actions"><button type="button" class="secondary-button" id="discover-none">Select none</button><button type="button" class="primary-button" id="discover-add">Add selected</button></div>
+            </section>
+          </section>
+          <section class="settings-panel" role="tabpanel" id="panel-skills" aria-labelledby="tab-skills" hidden>
+            <div class="panel-intro"><p>Each task is matched to a skill by keywords and sent to a model that has it.</p><button class="secondary-button" id="add-skill">Add skill</button></div>
+            <form id="skill-form" class="provider-form" hidden>
+              <input id="skill-id" type="hidden" />
+              <div class="field-grid">
+                <label>Name<input id="skill-name" maxlength="60" required placeholder="Data analysis" /></label>
+                <label>Description<input id="skill-description" maxlength="300" placeholder="What tasks belong here" /></label>
+              </div>
+              <label>Keywords, comma separated<input id="skill-keywords" placeholder="pandas, dataframe, chart" /></label>
+              <label>Instructions added to the prompt<textarea id="skill-instructions" rows="3" maxlength="4000"></textarea></label>
+              <label class="check-label"><input id="skill-enabled" type="checkbox" checked /> Use this skill</label>
+              <p class="form-feedback" id="skill-feedback" role="status"></p>
+              <div class="form-actions">
+                <button type="button" class="text-button danger" id="remove-skill">Remove</button>
+                <button type="button" class="secondary-button" id="cancel-skill">Cancel</button>
+                <button type="submit" class="primary-button">Save</button>
+              </div>
+            </form>
+            <div id="skill-list" class="skill-list"></div>
+          </section>
+          <form id="orchestration-form" class="orchestration-form">
+            <section class="settings-panel" role="tabpanel" id="panel-routing" aria-labelledby="tab-routing" hidden>
+              <div class="panel-intro"><p>How L.E.O. picks a model for each task.</p></div>
+              <div class="field-grid">
+                <label>Default mode<select id="mode-select"><option value="auto">Auto</option><option value="quick">Quick</option><option value="reviewed">Reviewed</option><option value="deep">Deep</option></select></label>
+                <label>When a model fails, try<select id="routing"><option value="free_first">Free models first</option><option value="local_first">Local models first</option><option value="priority">By priority</option></select></label>
+              </div>
+              <label class="check-label"><input id="smart-routing" type="checkbox" /> Smart routing: send each task to the cheapest model with the right skill and strength</label>
+              <label class="check-label"><input id="allow-paid" type="checkbox" /> Allow paid models</label>
+              <label class="narrow">Max cost per run ($)<input id="max-cost" type="number" min="0.001" max="100" step="any" required /></label>
+              <details class="advanced">
+                <summary>Fixed roles and instructions</summary>
+                <p class="field-hint">Generator is used only when smart routing is off.</p>
+                <div class="field-grid">
+                  <label>Generator<select id="generator-id"></select></label>
+                  <label>Planner<select id="planner-id"></select></label>
+                  <label>Reviewer<select id="reviewer-id"></select></label>
+                </div>
+                <label>Instructions for every answer<textarea id="system-prompt" rows="3" maxlength="4000"></textarea></label>
+              </details>
+            </section>
+            <section class="settings-panel" role="tabpanel" id="panel-search" aria-labelledby="tab-search" hidden>
+              <div class="panel-intro"><p>Searches only when a request needs current information, then cites the pages it read.</p></div>
+              <div class="field-grid">
+                <label>When to search<select id="web-search"><option value="auto">When needed</option><option value="off">Never</option></select></label>
+                <label>Pages to read<input id="search-pages" type="number" min="1" max="5" required /></label>
+              </div>
+              <label>SearXNG address<input id="search-url" type="url" placeholder="http://localhost:8888" /></label>
+              <div class="form-actions start"><button type="button" class="secondary-button" id="test-search">Test search</button></div>
+            </section>
+            <section class="settings-panel" role="tabpanel" id="panel-limits" aria-labelledby="tab-limits" hidden>
+              <div class="panel-intro"><p>Caps for each run. Failed calls still count, since the provider may have charged for them.</p></div>
+              <div class="field-grid">
+                <label>Model calls per run<input id="max-calls" type="number" min="1" max="20" required /></label>
+                <label>Repair rounds<input id="max-repairs" type="number" min="0" max="3" required /></label>
+                <label>Output tokens per call<input id="max-output-tokens" type="number" min="128" max="65536" required /></label>
+                <label>Context tokens per call<input id="context-tokens" type="number" min="1024" max="1000000" required /></label>
+                <label>Tokens per run<input id="token-budget" type="number" min="2048" max="2000000" required /></label>
+                <label>Provider timeout (s)<input id="timeout-seconds" type="number" min="10" max="600" required /></label>
+                <label>Run time limit (s)<input id="max-run-seconds" type="number" min="30" max="3600" required /></label>
+              </div>
+            </section>
+            <div class="settings-save" id="settings-save" hidden>
+              <p class="form-feedback" id="settings-feedback" role="status"></p>
+              <button type="submit" class="primary-button">Save changes</button>
+            </div>
+          </form>
+          <section class="settings-panel" role="tabpanel" id="panel-general" aria-labelledby="tab-general" hidden>
+            <div class="settings-row">
+              <label for="theme-select">Appearance</label>
+              <select id="theme-select"><option value="dark">Dark</option><option value="light">Light</option></select>
+            </div>
+            <div class="settings-row"><span>Conversation history <small>Saved on your L.E.O. server</small></span><button class="secondary-button" id="clear-history">Clear</button></div>
+            <div id="clear-confirmation" class="clear-confirmation" hidden>
+              <p>Delete all conversations? This cannot be undone.</p>
+              <div><button class="secondary-button" id="cancel-clear">Cancel</button><button class="secondary-button danger" id="confirm-clear">Delete all</button></div>
+            </div>
+            <details class="shortcuts">
+              <summary>Keyboard shortcuts<Icon name="down" size={15} /></summary>
+              <div class="shortcut-row"><span>New chat</span><kbd>⌘ / Ctrl + K</kbd></div>
+              <div class="shortcut-row"><span>Search conversations</span><kbd>⌘ / Ctrl + /</kbd></div>
+              <div class="shortcut-row"><span>Send message</span><kbd>Enter</kbd></div>
+              <div class="shortcut-row"><span>New line</span><kbd>Shift + Enter</kbd></div>
+            </details>
+            <div class="settings-about"><strong>L.E.O</strong><span>LLM Efficiency Orchestrator</span><p>Provider keys are encrypted on your server. Messages are sent to the models you turn on. Chat subscriptions and API access are separate.</p></div>
+          </section>
         </div>
-        <p class="field-hint">Cost estimates use your configured prices. Failed calls retain their allowance because the provider may have charged for them.</p>
-        <label>Assistant instructions<textarea id="system-prompt" rows="3" maxlength="4000"></textarea></label>
-        <p class="form-feedback" id="settings-feedback" role="status"></p>
-        <div class="form-actions"><button type="submit" class="primary-button">Save orchestration</button></div>
-      </form>
-      <div class="settings-row"><span>Conversation history <small>Saved on your L.E.O. server</small></span><button class="secondary-button" id="clear-history">Clear</button></div>
-      <div id="clear-confirmation" class="clear-confirmation" hidden>
-        <p>Delete all conversations? This cannot be undone.</p>
-        <div><button class="secondary-button" id="cancel-clear">Cancel</button><button class="secondary-button danger" id="confirm-clear">Delete all</button></div>
       </div>
-      <details class="shortcuts">
-        <summary>Keyboard shortcuts<Icon name="down" size={15} /></summary>
-        <div class="shortcut-row"><span>New chat</span><kbd>⌘ / Ctrl + K</kbd></div>
-        <div class="shortcut-row"><span>Search conversations</span><kbd>⌘ / Ctrl + /</kbd></div>
-        <div class="shortcut-row"><span>Send message</span><kbd>Enter</kbd></div>
-        <div class="shortcut-row"><span>New line</span><kbd>Shift + Enter</kbd></div>
-      </details>
-      <div class="settings-about"><strong>L.E.O</strong><span>LLM Efficiency Orchestrator</span><p>Provider keys are encrypted on your server. Messages are sent to the models you enable. Chat subscriptions and API access are separate.</p></div>
     </dialog>
     <dialog id="login-dialog" class="dialog" aria-labelledby="login-heading">
       <h2 id="login-heading">Connect to your server</h2>

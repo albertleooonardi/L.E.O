@@ -390,40 +390,32 @@ async function setEnabled(p: Provider, enabled: boolean) {
   const body = Object.fromEntries(CONNECTION_FIELDS.map(key => [key, p[key]]));
   try { await send(`/connections/${p.id}`, 'PUT', { ...body, enabled }); await loadSettings(); } catch (e) { toast(errorText(e)); await loadSettings(); }
 }
+function skillNames(ids: string[]) { return ids.map(id => skills.find(s => s.id === id)?.name || id).join(', '); }
 function modelRow(p: Provider) {
   const row = document.createElement('div'); row.className = `model-row${p.enabled ? '' : ' off'}`;
-  const toggle = Object.assign(document.createElement('input'), { type: 'checkbox', className: 'switch', checked: p.enabled, title: p.enabled ? 'In use; click to turn off' : 'Off; click to use' });
+  const toggle = Object.assign(document.createElement('input'), { type: 'checkbox', className: 'switch', checked: p.enabled });
   toggle.setAttribute('aria-label', `Use ${modelLabel(p)}`);
   toggle.addEventListener('change', () => void setEnabled(p, toggle.checked));
-  const detail = document.createElement('div'); detail.className = 'model-detail';
+  const detail = document.createElement('div'); detail.className = 'model-detail'; detail.title = p.model;
   const name = document.createElement('strong'); name.textContent = modelLabel(p);
+  const strength = p.tier[0].toUpperCase() + p.tier.slice(1);
   const profile = document.createElement('small');
-  profile.textContent = `${p.model} · ${p.tier}${p.reasoning ? ' · reasoning' : ''} · ${p.skills.length ? p.skills.map(id => skills.find(s => s.id === id)?.name || id).join(', ') : 'generalist'}${p.free ? '' : ' · paid'}`;
+  profile.textContent = `${strength}${p.skills.length ? `, ${skillNames(p.skills).toLowerCase()}` : ', any task'}${p.free ? '' : ', paid'}`;
   detail.append(name, profile);
   if (!p.has_key && !p.local) {
     // Cloud models almost always need a key; make a missing one impossible to miss.
     row.classList.add('needs-key');
-    detail.append(Object.assign(document.createElement('small'), { className: 'key-warning', textContent: 'No API key saved. Click Edit, paste the key, then Save connection.' }));
+    detail.append(Object.assign(document.createElement('small'), { className: 'key-warning', textContent: 'No API key saved. Click Edit and paste the key.' }));
   }
-  const actions = document.createElement('div'); actions.className = 'provider-actions';
-  for (const [label, handler] of [
-    ['Edit', () => editProvider(p)],
-    ['Check', async () => {
-      try {
-        toast('Checking model catalog…');
-        const result = await send<{ models: string[]; model_found: boolean }>(`/connections/${p.id}/test`, 'POST');
-        editProvider(p); el('model-catalog').replaceChildren(...result.models.map(id => new Option(id, id)));
-        el('provider-feedback').textContent = result.model_found ? 'Connected. Model is listed. Inference will be checked on your first message.' : 'Connected. This model was not in the catalog; choose a listed ID or confirm it with your provider.';
-      } catch (e) { toast(errorText(e)); }
-    }],
-    ['Remove', async () => { try { await send(`/connections/${p.id}`, 'DELETE'); await loadSettings(); } catch (e) { toast(errorText(e)); } }],
-  ] as [string, () => void | Promise<void>][]) {
-    const b = document.createElement('button'); b.className = 'secondary-button'; b.textContent = label; b.addEventListener('click', handler); actions.append(b);
-  }
-  row.append(toggle, detail, actions);
+  const edit = document.createElement('button'); edit.className = 'text-button'; edit.textContent = 'Edit';
+  edit.setAttribute('aria-label', `Edit ${modelLabel(p)}`);
+  edit.addEventListener('click', () => editProvider(p, row));
+  row.append(toggle, detail, edit);
   return row;
 }
 function renderProviders() {
+  // Forms open inside the list, under the row being edited; move them out before the list is rebuilt.
+  el('provider-list').before(el('provider-form')); el('provider-list').after(el('discover-panel'));
   el('provider-list').replaceChildren();
   if (!connections.length) { const p = document.createElement('p'); p.className = 'empty-providers'; p.textContent = 'No models connected. Start with Ollama or your preferred API.'; el('provider-list').append(p); }
   // One collapsible group per provider endpoint: a key added once shows up as one row, its models inside.
@@ -441,14 +433,14 @@ function renderProviders() {
     const title = document.createElement('div'); title.className = 'group-title';
     const name = document.createElement('strong'); name.textContent = groupLabel(list);
     const status = document.createElement('small');
-    status.textContent = `${list.length} model${list.length === 1 ? '' : 's'} · ${on} in use · ${list[0].local ? 'local' : missingKey ? 'key missing' : 'key saved'}${list.every(p => p.free) ? ' · no API charge' : list.some(p => p.free) ? '' : ' · paid'}`;
+    status.textContent = `${on} of ${list.length} in use${missingKey ? ', key missing' : ''}${list[0].local ? ', local' : list.every(p => p.free) ? ', free' : list.some(p => p.free) ? '' : ', paid'}`;
     if (missingKey) group.classList.add('needs-key');
     title.append(name, status);
     summary.append(chevron, title);
     const keyed = list.find(p => p.has_key || p.local);
     if (keyed) {
-      const add = document.createElement('button'); add.type = 'button'; add.className = 'secondary-button'; add.textContent = 'Add models';
-      add.addEventListener('click', event => { event.preventDefault(); void discoverModels(keyed); });
+      const add = document.createElement('button'); add.type = 'button'; add.className = 'text-button'; add.textContent = 'Add models';
+      add.addEventListener('click', event => { event.preventDefault(); group.after(el('discover-panel')); void discoverModels(keyed); });
       const actions = document.createElement('div'); actions.className = 'provider-actions'; actions.append(add); summary.append(actions);
     }
     const rows = document.createElement('div'); rows.className = 'model-rows'; rows.append(...list.map(modelRow));
@@ -492,11 +484,11 @@ async function discoverModels(source: Provider, message = '') {
   discoverSource = source; discovered = [];
   el('discover-panel').hidden = false; el('discover-list').replaceChildren(); el('discover-feedback').textContent = message;
   el('discover-title').textContent = `Models available with ${source.name.split(' · ')[0]}`;
-  el('discover-hint').textContent = 'Reading the provider catalog…'; el('discover-panel').scrollIntoView({ block: 'start', behavior: 'smooth' });
+  el('discover-hint').textContent = 'Reading the provider catalog…'; el('discover-panel').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   try {
     const result = await send<{ provider: string; models: Discovered[]; skipped: { model: string; reason: string }[] }>(`/connections/${source.id}/discover`, 'POST');
     discovered = result.models;
-    el('discover-hint').textContent = `${result.provider === 'openrouter' ? 'Free models only. ' : ''}${result.models.length} chat models found, ${result.skipped.length} left out (image, audio, speech, embeddings, aliases). Profiles are suggestions from the catalog: strength from size and family, thinking from the provider, coding skills for coding models. HEAD routes among every model you add.`;
+    el('discover-hint').textContent = `${result.models.length} ${result.provider === 'openrouter' ? 'free ' : ''}chat models found. Strength and skills are suggestions; change them before adding if you like.`;
     el('discover-list').replaceChildren(...discovered.map((m, index) => {
       const row = document.createElement('label'); row.className = `discover-row${m.added ? ' added' : ''}`; row.title = m.description;
       const box = document.createElement('input'); box.type = 'checkbox'; box.checked = !m.added; box.disabled = Boolean(m.added); box.dataset.index = String(index);
@@ -530,26 +522,45 @@ function renderSkillPicker(selected: string[]) {
     label.append(box, ` ${skill.name}${skill.enabled ? '' : ' (disabled)'}`); return label;
   }));
 }
+function skillBody(skill: Skill, enabled = skill.enabled) {
+  return { name: skill.name, description: skill.description, keywords: skill.keywords, instructions: skill.instructions, enabled };
+}
 function renderSkills() {
+  el('skill-list').before(el('skill-form'));
   el('skill-list').replaceChildren(...skills.map(skill => {
-    const card = document.createElement('div'); card.className = 'provider-card';
-    const detail = document.createElement('div'); const name = document.createElement('strong'); name.textContent = `${skill.name}${skill.enabled ? '' : ' (disabled)'}`;
-    const models = connections.filter(c => c.skills.includes(skill.id)).map(c => c.model);
-    const info = document.createElement('small'); info.textContent = `${skill.description || 'No description'} · ${models.length ? `models: ${models.join(', ')}` : 'no model has this skill yet'}`;
+    const row = document.createElement('div'); row.className = `model-row${skill.enabled ? '' : ' off'}`;
+    const toggle = Object.assign(document.createElement('input'), { type: 'checkbox', className: 'switch', checked: skill.enabled });
+    toggle.setAttribute('aria-label', `Use the ${skill.name} skill`);
+    toggle.addEventListener('change', async () => {
+      try { await send(`/skills/${skill.id}`, 'PUT', skillBody(skill, toggle.checked)); } catch (e) { toast(errorText(e)); }
+      await loadSettings();
+    });
+    const detail = document.createElement('div'); detail.className = 'model-detail';
+    const name = document.createElement('strong'); name.textContent = skill.name;
+    const info = document.createElement('small'); info.className = 'one-line'; info.textContent = skill.description || 'No description';
     detail.append(name, info);
-    const actions = document.createElement('div'); actions.className = 'provider-actions';
-    const edit = document.createElement('button'); edit.className = 'secondary-button'; edit.textContent = 'Edit'; edit.addEventListener('click', () => editSkill(skill));
-    const remove = document.createElement('button'); remove.className = 'secondary-button'; remove.textContent = 'Remove';
-    remove.addEventListener('click', async () => { try { await send(`/skills/${skill.id}`, 'DELETE'); await loadSettings(); toast('Skill removed'); } catch (e) { toast(errorText(e)); } });
-    actions.append(edit, remove); card.append(detail, actions); return card;
+    const models = connections.filter(c => c.enabled && c.skills.includes(skill.id));
+    const count = document.createElement('span'); count.className = `row-count${models.length ? '' : ' empty'}`;
+    count.textContent = models.length ? `${models.length} model${models.length === 1 ? '' : 's'}` : 'No model';
+    count.title = models.length ? models.map(modelLabel).join('\n') : 'Turn on a model with this skill, or tasks go to a generalist';
+    const edit = document.createElement('button'); edit.className = 'text-button'; edit.textContent = 'Edit';
+    edit.setAttribute('aria-label', `Edit the ${skill.name} skill`);
+    edit.addEventListener('click', () => editSkill(skill, row));
+    row.append(toggle, detail, count, edit); return row;
   }));
 }
-function editSkill(skill?: Skill) {
+function editSkill(skill?: Skill, anchor?: Element) {
   el<HTMLFormElement>('skill-form').reset(); el('skill-form').hidden = false; el('skill-feedback').textContent = '';
+  if (anchor) anchor.after(el('skill-form')); else el('skill-list').before(el('skill-form'));
   field('skill-id').value = skill?.id || ''; field('skill-name').value = skill?.name || ''; field('skill-description').value = skill?.description || '';
   field('skill-keywords').value = skill?.keywords.join(', ') || ''; el<HTMLTextAreaElement>('skill-instructions').value = skill?.instructions || '';
-  field('skill-enabled').checked = skill?.enabled ?? true; field('skill-name').focus();
+  field('skill-enabled').checked = skill?.enabled ?? true; el('remove-skill').hidden = !skill;
+  el('skill-form').scrollIntoView({ block: 'nearest', behavior: 'smooth' }); field('skill-name').focus({ preventScroll: true });
 }
+el('remove-skill').addEventListener('click', async () => {
+  const id = field('skill-id').value; if (!id) return;
+  try { await send(`/skills/${id}`, 'DELETE'); el('skill-form').hidden = true; await loadSettings(); toast('Skill removed'); } catch (e) { el('skill-feedback').textContent = errorText(e); }
+});
 el('add-skill').addEventListener('click', () => editSkill());
 el('cancel-skill').addEventListener('click', () => { el('skill-form').hidden = true; });
 el('skill-form').addEventListener('submit', async event => {
@@ -560,8 +571,10 @@ el('skill-form').addEventListener('submit', async event => {
   try { await send(id ? `/skills/${id}` : '/skills', id ? 'PUT' : 'POST', body); el('skill-form').hidden = true; await loadSettings(); toast('Skill saved'); }
   catch (e) { el('skill-feedback').textContent = errorText(e); }
 });
-function editProvider(provider?: Provider) {
+function editProvider(provider?: Provider, anchor?: Element) {
   el<HTMLFormElement>('provider-form').reset(); el('provider-form').hidden = false; el('provider-feedback').textContent = ''; el('model-catalog').replaceChildren();
+  if (anchor) anchor.after(el('provider-form')); else el('provider-list').before(el('provider-form'));
+  el('remove-provider').hidden = !provider; el('check-provider').hidden = !provider;
   field('provider-id').value = provider?.id || ''; field('provider-key').value = '';
   field('provider-key').placeholder = provider?.has_key ? 'Leave blank to keep the saved key' : 'Optional for local servers';
   if (!provider) { select('provider-preset').value = 'ollama'; applyPreset(); }
@@ -573,9 +586,31 @@ function editProvider(provider?: Provider) {
     select('provider-tier').value = provider.tier || 'standard'; renderSkillPicker(provider.skills || []); renderKeySources();
     el('provider-hint').textContent = presets.find(p => p.id === select('provider-preset').value)?.hint || '';
   }
-  field('provider-name').focus();
+  syncAdvanced();
+  el('provider-form').scrollIntoView({ block: 'nearest', behavior: 'smooth' }); field('provider-name').focus({ preventScroll: true });
 }
-select('provider-preset').addEventListener('change', applyPreset);
+// Address and prices live under a fold; open it when they matter (custom servers, paid models).
+function syncAdvanced() {
+  const preset = select('provider-preset').value;
+  if (preset === 'custom' || preset === 'vllm' || !field('provider-free').checked) el<HTMLDetailsElement>('provider-advanced').open = true;
+}
+el('provider-form').addEventListener('invalid', event => {
+  if (el('provider-advanced').contains(event.target as Node)) el<HTMLDetailsElement>('provider-advanced').open = true;
+}, true);
+el('check-provider').addEventListener('click', async () => {
+  const id = field('provider-id').value; if (!id) return;
+  el('provider-feedback').textContent = 'Checking the model catalog…';
+  try {
+    const result = await send<{ models: string[]; model_found: boolean }>(`/connections/${id}/test`, 'POST');
+    el('model-catalog').replaceChildren(...result.models.map(m => new Option(m, m)));
+    el('provider-feedback').textContent = result.model_found ? 'Connected, and this model is listed.' : 'Connected, but this model is not in the catalog. Pick a listed ID or confirm it with your provider.';
+  } catch (e) { el('provider-feedback').textContent = errorText(e); }
+});
+el('remove-provider').addEventListener('click', async () => {
+  const id = field('provider-id').value; if (!id) return;
+  try { await send(`/connections/${id}`, 'DELETE'); el('provider-form').hidden = true; await loadSettings(); toast('Model removed'); } catch (e) { el('provider-feedback').textContent = errorText(e); }
+});
+select('provider-preset').addEventListener('change', () => { applyPreset(); syncAdvanced(); });
 el('add-connection').addEventListener('click', () => editProvider());
 el('cancel-provider').addEventListener('click', () => { field('provider-key').value = ''; el('provider-form').hidden = true; });
 el('provider-form').addEventListener('submit', async event => {
@@ -617,9 +652,34 @@ el('search-toggle').addEventListener('click', () => {
   const on = el('search-toggle').getAttribute('aria-pressed') !== 'true';
   el('search-toggle').setAttribute('aria-pressed', String(on));
 });
-function openSettings() { dialog('settings-dialog').showModal(); void loadSettings().catch(e => toast(errorText(e))); }
-el('open-settings').addEventListener('click', openSettings);
-el('connect-models').addEventListener('click', () => { openSettings(); editProvider(); });
+const settingsTabs = [...document.querySelectorAll<HTMLButtonElement>('.settings-tabs [role=tab]')];
+function showSettingsTab(tab: HTMLButtonElement, focus = false) {
+  for (const other of settingsTabs) {
+    const selected = other === tab;
+    other.setAttribute('aria-selected', String(selected)); other.tabIndex = selected ? 0 : -1;
+    el(other.getAttribute('aria-controls')!).hidden = !selected;
+  }
+  // Routing, search, and limits share one form and one Save button.
+  el('settings-save').hidden = !['tab-routing', 'tab-search', 'tab-limits'].includes(tab.id);
+  if (focus) tab.focus();
+  try { localStorage.setItem('leo-settings-tab', tab.id); } catch { /* Remembering the tab is optional. */ }
+}
+settingsTabs.forEach((tab, index) => {
+  tab.addEventListener('click', () => showSettingsTab(tab));
+  tab.addEventListener('keydown', event => {
+    const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[event.key];
+    if (step) { event.preventDefault(); showSettingsTab(settingsTabs[(index + step + settingsTabs.length) % settingsTabs.length], true); }
+    else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); showSettingsTab(settingsTabs[event.key === 'Home' ? 0 : settingsTabs.length - 1], true); }
+  });
+});
+function openSettings(tabId?: string) {
+  let saved: string | null = null;
+  try { saved = localStorage.getItem('leo-settings-tab'); } catch { /* Fall back to the first tab. */ }
+  showSettingsTab(settingsTabs.find(t => t.id === (tabId || saved)) || settingsTabs[0]);
+  dialog('settings-dialog').showModal(); void loadSettings().catch(e => toast(errorText(e)));
+}
+el('open-settings').addEventListener('click', () => openSettings());
+el('connect-models').addEventListener('click', () => { openSettings('tab-models'); editProvider(); });
 
 function setTheme(theme: string) {
   document.documentElement.dataset.theme = theme; select('theme-select').value = theme;
