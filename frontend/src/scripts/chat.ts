@@ -371,37 +371,88 @@ function refreshConnectionStatus() {
 function roleOptions(value: string | null) {
   return [new Option('Auto · follow fallback order', ''), ...connections.map(p => new Option(`${p.name} · ${p.model}${p.enabled ? '' : ' (disabled)'}`, p.id, false, p.id === value))];
 }
+// Fields the connection API accepts; used to flip one setting without resending the key.
+const CONNECTION_FIELDS = ['name', 'protocol', 'base_url', 'model', 'local', 'free', 'enabled', 'priority', 'context_window', 'input_price', 'output_price', 'token_parameter', 'skills', 'tier', 'reasoning'] as const;
+const openGroups = new Set<string>();
+function groupLabel(list: Provider[]) {
+  const preset = presets.find(x => x.base_url === list[0].base_url && x.id !== 'custom');
+  if (preset) return preset.name;
+  const prefix = list[0].name.split(' · ')[0];
+  if (list.every(p => p.name.startsWith(prefix))) return prefix;
+  try { return new URL(list[0].base_url).host; } catch { return list[0].base_url; }
+}
+function modelLabel(p: Provider) {
+  // Discovered models are named "<provider> · <model>"; the group header already names the provider.
+  const parts = p.name.split(' · ');
+  return parts.length > 1 ? parts.slice(1).join(' · ') : p.name;
+}
+async function setEnabled(p: Provider, enabled: boolean) {
+  const body = Object.fromEntries(CONNECTION_FIELDS.map(key => [key, p[key]]));
+  try { await send(`/connections/${p.id}`, 'PUT', { ...body, enabled }); await loadSettings(); } catch (e) { toast(errorText(e)); await loadSettings(); }
+}
+function modelRow(p: Provider) {
+  const row = document.createElement('div'); row.className = `model-row${p.enabled ? '' : ' off'}`;
+  const toggle = Object.assign(document.createElement('input'), { type: 'checkbox', className: 'switch', checked: p.enabled, title: p.enabled ? 'In use; click to turn off' : 'Off; click to use' });
+  toggle.setAttribute('aria-label', `Use ${modelLabel(p)}`);
+  toggle.addEventListener('change', () => void setEnabled(p, toggle.checked));
+  const detail = document.createElement('div'); detail.className = 'model-detail';
+  const name = document.createElement('strong'); name.textContent = modelLabel(p);
+  const profile = document.createElement('small');
+  profile.textContent = `${p.model} · ${p.tier}${p.reasoning ? ' · reasoning' : ''} · ${p.skills.length ? p.skills.map(id => skills.find(s => s.id === id)?.name || id).join(', ') : 'generalist'}${p.free ? '' : ' · paid'}`;
+  detail.append(name, profile);
+  if (!p.has_key && !p.local) {
+    // Cloud models almost always need a key; make a missing one impossible to miss.
+    row.classList.add('needs-key');
+    detail.append(Object.assign(document.createElement('small'), { className: 'key-warning', textContent: 'No API key saved. Click Edit, paste the key, then Save connection.' }));
+  }
+  const actions = document.createElement('div'); actions.className = 'provider-actions';
+  for (const [label, handler] of [
+    ['Edit', () => editProvider(p)],
+    ['Check', async () => {
+      try {
+        toast('Checking model catalog…');
+        const result = await send<{ models: string[]; model_found: boolean }>(`/connections/${p.id}/test`, 'POST');
+        editProvider(p); el('model-catalog').replaceChildren(...result.models.map(id => new Option(id, id)));
+        el('provider-feedback').textContent = result.model_found ? 'Connected. Model is listed. Inference will be checked on your first message.' : 'Connected. This model was not in the catalog; choose a listed ID or confirm it with your provider.';
+      } catch (e) { toast(errorText(e)); }
+    }],
+    ['Remove', async () => { try { await send(`/connections/${p.id}`, 'DELETE'); await loadSettings(); } catch (e) { toast(errorText(e)); } }],
+  ] as [string, () => void | Promise<void>][]) {
+    const b = document.createElement('button'); b.className = 'secondary-button'; b.textContent = label; b.addEventListener('click', handler); actions.append(b);
+  }
+  row.append(toggle, detail, actions);
+  return row;
+}
 function renderProviders() {
   el('provider-list').replaceChildren();
   if (!connections.length) { const p = document.createElement('p'); p.className = 'empty-providers'; p.textContent = 'No models connected. Start with Ollama or your preferred API.'; el('provider-list').append(p); }
-  for (const p of connections) {
-    const card = document.createElement('div'); card.className = 'provider-card';
-    const detail = document.createElement('div'); const name = document.createElement('strong'); name.textContent = p.name;
-    const subtitle = document.createElement('small'); subtitle.textContent = `${p.model} · ${p.local ? 'local' : 'cloud'} · ${p.free ? 'no API charge' : 'paid'}${p.enabled ? '' : ' · disabled'}${p.has_key ? ' · key saved' : ''}`;
-    const profile = document.createElement('small'); profile.textContent = `${p.tier} tier${p.reasoning ? ' · reasoning' : ''} · ${p.skills.length ? p.skills.map(id => skills.find(s => s.id === id)?.name || id).join(', ') : 'generalist'}`;
-    detail.append(name, subtitle, profile);
-    if (!p.has_key && !p.local) {
-      // Cloud models almost always need a key; make a missing one impossible to miss.
-      card.classList.add('needs-key');
-      detail.append(Object.assign(document.createElement('small'), { className: 'key-warning', textContent: 'No API key saved. Click Edit, paste the key, then Save connection.' }));
+  // One collapsible group per provider endpoint: a key added once shows up as one row, its models inside.
+  const groups = new Map<string, Provider[]>();
+  for (const p of connections) groups.set(p.base_url, [...(groups.get(p.base_url) || []), p]);
+  for (const [url, list] of groups) {
+    list.sort((a, b) => Number(b.enabled) - Number(a.enabled));
+    const on = list.filter(p => p.enabled).length;
+    const missingKey = list.some(p => !p.has_key && !p.local);
+    const group = document.createElement('details'); group.className = 'provider-group';
+    group.open = openGroups.has(url) || missingKey;
+    group.addEventListener('toggle', () => { if (group.open) openGroups.add(url); else openGroups.delete(url); });
+    const summary = document.createElement('summary');
+    const chevron = document.createElement('span'); chevron.className = 'chevron'; chevron.setAttribute('aria-hidden', 'true');
+    const title = document.createElement('div'); title.className = 'group-title';
+    const name = document.createElement('strong'); name.textContent = groupLabel(list);
+    const status = document.createElement('small');
+    status.textContent = `${list.length} model${list.length === 1 ? '' : 's'} · ${on} in use · ${list[0].local ? 'local' : missingKey ? 'key missing' : 'key saved'}${list.every(p => p.free) ? ' · no API charge' : list.some(p => p.free) ? '' : ' · paid'}`;
+    if (missingKey) group.classList.add('needs-key');
+    title.append(name, status);
+    summary.append(chevron, title);
+    const keyed = list.find(p => p.has_key || p.local);
+    if (keyed) {
+      const add = document.createElement('button'); add.type = 'button'; add.className = 'secondary-button'; add.textContent = 'Add models';
+      add.addEventListener('click', event => { event.preventDefault(); void discoverModels(keyed); });
+      const actions = document.createElement('div'); actions.className = 'provider-actions'; actions.append(add); summary.append(actions);
     }
-    const actions = document.createElement('div'); actions.className = 'provider-actions';
-    for (const [label, handler] of [
-      ['Edit', () => editProvider(p)],
-      ...(p.has_key || p.local ? [['Models', () => void discoverModels(p)]] : []),
-      ['Check', async () => {
-        try {
-          toast('Checking model catalog…');
-          const result = await send<{ models: string[]; model_found: boolean }>(`/connections/${p.id}/test`, 'POST');
-          editProvider(p); el('model-catalog').replaceChildren(...result.models.map(id => new Option(id, id)));
-          el('provider-feedback').textContent = result.model_found ? 'Connected. Model is listed. Inference will be checked on your first message.' : 'Connected. This model was not in the catalog; choose a listed ID or confirm it with your provider.';
-        } catch (e) { toast(errorText(e)); }
-      }],
-      ['Remove', async () => { try { await send(`/connections/${p.id}`, 'DELETE'); await loadSettings(); } catch (e) { toast(errorText(e)); } }],
-    ] as [string, () => void | Promise<void>][]) {
-      const b = document.createElement('button'); b.className = 'secondary-button'; b.textContent = label; b.addEventListener('click', handler); actions.append(b);
-    }
-    card.append(detail, actions); el('provider-list').append(card);
+    const rows = document.createElement('div'); rows.className = 'model-rows'; rows.append(...list.map(modelRow));
+    group.append(summary, rows); el('provider-list').append(group);
   }
   for (const role of ['generator', 'planner', 'reviewer'] as const) select(`${role}-id`).replaceChildren(...roleOptions(preferences?.[`${role}_id`] || null));
   refreshConnectionStatus();

@@ -125,11 +125,11 @@ No model is downloaded and no provider is contacted during setup. Add your own c
 
 ## Connect models
 
-1. Open **Settings → Add model** and choose a provider preset.
+1. Open **Settings → Add provider** and choose a provider preset.
 2. Set the API base URL and exact model ID. Enter an API key if the endpoint requires one; keys are encrypted on the server and never shown again.
 3. Set the **routing profile**: skills, strength (light, standard, strong), and **Reasoning model** if it spends hidden thinking tokens. Presets suggest one.
 4. **Save**, then **Check** to test the model catalog. This does not send a generation request; manual model IDs work when a provider has no compatible catalog.
-5. Click **Models** on the connection to add every other model the same key can use (see [Discover models](#discover-models)), or add models by hand. A new connection can also **reuse a saved key** for the same host. Optionally assign planner and reviewer roles.
+5. Click **Add models** on the provider to add every other model the same key can use (see [Discover models](#discover-models)), or add models by hand. A new connection can also **reuse a saved key** for the same host. Settings lists one collapsible row per provider with its models inside; each model's switch turns it on or off. Optionally assign planner and reviewer roles.
 6. For a paid model, enter input/output prices per million tokens and enable **Allow paid API usage**. Prices are your estimates, not live billing data. Cloud connections without a key are flagged in Settings.
 
 | Provider | Preset / protocol | Suggested profile |
@@ -148,7 +148,7 @@ Presets are editable. Provider eligibility, model names, free quotas, and prices
 
 ## Discover models
 
-A key usually unlocks many models. **Models** on a connection reads the provider's whole catalog and suggests a routing profile for each chat model:
+A key usually unlocks many models. **Add models** on a provider reads the provider's whole catalog and suggests a routing profile for each chat model:
 
 - **OpenRouter:** free models only (price 0 or a `:free` ID). Audio models, safety filters, and router aliases are left out.
 - **Gemini AI Studio:** text chat models from the native catalog. Image, speech, audio, live, embedding, robotics, and agent products and `-latest` aliases are left out.
