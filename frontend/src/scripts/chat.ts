@@ -6,7 +6,7 @@ type Mode = 'auto' | 'quick' | 'reviewed' | 'deep';
 type Provider = { id: string; name: string; protocol: string; base_url: string; model: string; local: boolean; free: boolean; enabled: boolean; has_key: boolean; priority: number; context_window: number; input_price: number | null; output_price: number | null; token_parameter: string; skills: string[]; tier: string; reasoning: boolean; calls?: number; avg_input_tokens?: number | null; avg_output_tokens?: number | null };
 type Skill = { id: string; name: string; description: string; keywords: string[]; instructions: string; enabled: boolean };
 type Preset = { id: string; name: string; protocol: string; base_url: string; local?: boolean; free?: boolean; hint: string; skills?: string[]; tier?: string; reasoning?: boolean };
-type Preferences = { generator_id: string | null; planner_id: string | null; reviewer_id: string | null; mode: Mode; routing: string; allow_paid: boolean; max_cost: number; max_calls: number; max_repairs: number; max_output_tokens: number; context_tokens: number; token_budget: number; timeout_seconds: number; max_run_seconds: number; system_prompt: string; smart_routing?: boolean; web_search?: string; search_url?: string; search_pages?: number };
+type Preferences = { generator_id: string | null; planner_id: string | null; reviewer_id: string | null; mode: Mode; routing: string; allow_paid: boolean; max_cost: number; max_calls: number; max_repairs: number; max_output_tokens: number; context_tokens: number; token_budget: number; timeout_seconds: number; max_run_seconds: number; system_prompt: string; smart_routing?: boolean; web_search?: string; search_url?: string; search_pages?: number; page_photos?: boolean };
 type Usage = { route?: RouteInfo; calls?: number; input_tokens?: number; output_tokens?: number; estimated_cost?: number; estimated?: boolean; uncertain_calls?: number; context_messages_omitted?: number; review_passed?: boolean | null };
 type Run = { id: string; conversation_id: string; status: string; phase: string; output: string; error?: string; usage: Usage; mode: Mode; created_at?: number };
 type Conversation = { id: string; title: string; updated_at: number; active_run: string | null };
@@ -510,6 +510,7 @@ async function loadSettings() {
   renderProviders(); renderSkills();
   setRouting(preferences.routing); select('mode-select').value = preferences.mode; select('composer-mode').value = preferences.mode;
   field('smart-routing').checked = preferences.smart_routing ?? true;
+  field('page-photos').checked = preferences.page_photos ?? true;
   select('web-search').value = preferences.web_search || 'auto'; field('search-url').value = preferences.search_url || ''; field('search-pages').value = String(preferences.search_pages ?? 3);
   field('allow-paid').checked = preferences.allow_paid; syncPaidLimit(); el<HTMLTextAreaElement>('system-prompt').value = preferences.system_prompt;
   for (const key of numericFields) field(key.replaceAll('_', '-')).value = String(preferences[key]);
@@ -688,7 +689,7 @@ el('provider-form').addEventListener('submit', async event => {
 el('orchestration-form').addEventListener('submit', async event => {
   event.preventDefault();
   const body: Preferences = { ...preferences, mode: select('mode-select').value as Mode, routing: routingChoice(), allow_paid: field('allow-paid').checked, smart_routing: field('smart-routing').checked,
-    web_search: select('web-search').value, search_url: field('search-url').value.trim(), search_pages: Number(field('search-pages').value), system_prompt: el<HTMLTextAreaElement>('system-prompt').value };
+    web_search: select('web-search').value, search_url: field('search-url').value.trim(), search_pages: Number(field('search-pages').value), page_photos: field('page-photos').checked, system_prompt: el<HTMLTextAreaElement>('system-prompt').value };
   for (const key of numericFields) body[key] = Number(field(key.replaceAll('_', '-')).value);
   for (const role of ['generator', 'planner', 'reviewer'] as const) body[`${role}_id`] = select(`${role}-id`).value || null;
   try { preferences = await send<Preferences>('/settings', 'PUT', body); select('composer-mode').value = preferences.mode; el('settings-feedback').textContent = 'Saved. These settings apply to new runs.'; }

@@ -505,6 +505,7 @@ def test_static_review_flags_duplicate_versions_and_page_defects():
 
 async def test_quick_mode_repairs_failed_static_checks_once(store):
     add_provider(store)
+    store.set_preferences({**store.preferences(), 'page_photos': False})  # These replies are scripted; no photo search.
     replies = iter(['```html\n<a href="#gone">Go</a>\n```', '```html\n<a href="#top">Top</a><main id="top"></main>\n```'])
     run = await execute(store, make_run(store, mode='quick', prompt='Make a page'), lambda r: sse_response(next(replies)))
     assert run['status'] == 'completed' and 'id="top"' in run['output'] and run['usage']['calls'] == 2
@@ -524,7 +525,26 @@ async def test_hidden_thinking_marks_the_model_as_reasoning(store):
 
 async def test_answer_cut_off_inside_a_code_block_is_continued(store):
     add_provider(store)
+    store.set_preferences({**store.preferences(), 'page_photos': False})  # These replies are scripted; no photo search.
     first = 'data: ' + json.dumps({'choices': [{'delta': {'content': '```html\n<main>half'}, 'finish_reason': 'length'}]}) + '\n\ndata: [DONE]\n\n'
     replies = iter([httpx.Response(200, text=first, headers={'content-type': 'text/event-stream'}), sse_response(' page</main>\n```')])
     run = await execute(store, make_run(store, mode='quick', prompt='Make a page'), lambda r: next(replies))
     assert run['output'] == '```html\n<main>half page</main>\n```' and run['usage']['calls'] == 2
+
+
+async def test_page_builds_get_verified_photos_and_other_requests_do_not(store, monkeypatch):
+    from backend import tools
+    add_provider(store)
+    asked = []
+    async def fake_photos(topic, transport=None, limit=4, timeout=15):
+        asked.append(topic)
+        return {'topic': topic, 'photos': [{'n': 1, 'url': 'https://upload.wikimedia.org/c.jpg', 'title': 'Roasted beans', 'author': 'Ana', 'licence': 'CC0', 'source': 'https://commons.wikimedia.org/wiki/File:c.jpg'}], 'errors': []}
+    monkeypatch.setattr(tools, 'find_photos', fake_photos)
+    prompts = []
+    def handler(request):
+        prompts.append(json.loads(request.content)['messages'][-1]['content'])
+        return sse_response('```html\n<main id="top">ok</main>\n```')
+    await execute(store, make_run(store, mode='auto', prompt='Create me a minimalist landing page about coffee'), handler)
+    assert asked == ['coffee'] and 'https://upload.wikimedia.org/c.jpg' in prompts[-1] and 'Credit each photo' in prompts[-1]
+    await execute(store, make_run(store, mode='auto', prompt='What is an API?'), lambda r: sse_response('An interface.'))
+    assert asked == ['coffee'], 'no photo search outside page builds'

@@ -98,6 +98,7 @@ import '../styles/global.css';
           <button role="tab" id="canvas-tab-code" aria-selected="false" aria-controls="canvas-code">Code</button>
         </div>
         <div class="canvas-actions">
+          <button class="icon-button" id="canvas-wide" title="Desktop width" aria-label="Show the page at desktop width" aria-pressed="false"><Icon name="expand" size={16} /></button>
           <button class="icon-button" id="canvas-reload" title="Run again" aria-label="Run the page again"><Icon name="refresh" size={16} /></button>
           <button class="icon-button" id="canvas-open" title="Open in a new tab" aria-label="Open in a new tab"><Icon name="diagonal" size={16} /></button>
           <button class="icon-button" id="canvas-download" title="Download .html" aria-label="Download HTML file"><Icon name="down" size={16} /></button>
@@ -241,6 +242,10 @@ import '../styles/global.css';
               </div>
               <label>SearXNG address<input id="search-url" type="url" placeholder="http://localhost:8888" /></label>
               <div class="form-actions start"><button type="button" class="secondary-button" id="test-search">Test search</button></div>
+              <div class="toggle-row">
+                <span><strong>Real photos for pages</strong><small>Finds openly licensed photos on Wikimedia Commons, checks that they load, and credits the photographers. No key needed.</small></span>
+                <input id="page-photos" type="checkbox" class="switch" aria-label="Real photos for pages" />
+              </div>
             </section>
             <section class="settings-panel" role="tabpanel" id="panel-limits" aria-labelledby="tab-limits" hidden>
               <div class="panel-intro"><p>Caps for each run. Failed calls still count, since the provider may have charged for them.</p></div>

@@ -167,3 +167,61 @@ async def research(queries, urls, search_url, pages=3, transport=None, resolver=
 
 def sources_block(sources):
     return "\n\n".join(f"[{s['n']}] {s['title']} — {s['url']}\n{s['text']}" for s in sources)
+
+
+# Photos for generated pages: real, openly licensed images from Wikimedia Commons (free, no key), each checked to load.
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+PHOTO_HOST = "upload.wikimedia.org"
+STYLE_WORDS = re.compile(r"\b(minimalist|minimal|clean|modern|simple|elegant|sleek|beautiful|informative|informatic|responsive|"
+                         r"one[- ]page|single[- ]page|landing|page|website|site|web|html|dan|and|with|design|layout)\b", re.I)
+
+
+def photo_topic(prompt):
+    """What a page is about, for a photo search: "a landing page about coffee" → "coffee"."""
+    text = prompt[:300]
+    found = re.search(r"\b(?:about|for|on|of)\s+(?:an?\s+|the\s+|my\s+|our\s+)?([a-z][\w' -]{2,50}?)(?=[.,;:!?]|\s+(?:with|that|which|using|as|in|to)\b|$)",
+                      text, re.I) or re.search(r"\b(?:an?|the|my|our)\s+([\w' -]{3,40}?)\s+(?:website|landing page|web ?page|site|page)\b", text, re.I)
+    topic = STYLE_WORDS.sub(" ", found.group(1) if found else text)
+    return " ".join(topic.split()[:4]).strip(" -'") or None
+
+
+def _plain(html_text, limit):
+    return " ".join(re.sub(r"<[^>]+>", " ", html_text or "").split())[:limit]
+
+
+async def find_photos(topic, transport=None, limit=4, timeout=15):
+    """Up to `limit` wide, openly licensed photos for `topic`, with author and licence; never an unchecked URL."""
+    params = {"action": "query", "format": "json", "generator": "search", "gsrsearch": f"{topic} filetype:bitmap", "gsrnamespace": 6,
+              "gsrlimit": 40, "prop": "imageinfo", "iiprop": "url|extmetadata|size|mime", "iiurlwidth": 1600}
+    photos, errors = [], []
+    try:
+        async with httpx.AsyncClient(timeout=timeout, transport=transport, trust_env=False, follow_redirects=False,
+                                     headers={"User-Agent": USER_AGENT}) as client:
+            response = await client.get(COMMONS_API, params=params)
+            response.raise_for_status()
+            pages = sorted((response.json().get("query") or {}).get("pages", {}).values(), key=lambda p: p.get("index", 0))
+            for page in pages:
+                info = (page.get("imageinfo") or [{}])[0]
+                meta = info.get("extmetadata") or {}
+                licence = _plain((meta.get("LicenseShortName") or {}).get("value"), 40)
+                url = (info.get("thumburl") or info.get("url") or "").split("?")[0]  # Drop Wikimedia's tracking parameters.
+                width, height = info.get("width") or 0, info.get("height") or 0
+                # Photographs (JPEG), landscape, large enough for a hero, under an open licence, from Wikimedia's own image host.
+                if (info.get("mime") != "image/jpeg" or width < 1000 or width < height * 1.15 or urlsplit(url).hostname != PHOTO_HOST
+                        or not re.search(r"\bCC\b|CC0|CC-BY|Public domain|PD", licence, re.I)):
+                    continue
+                check = await client.head(url)
+                if check.status_code != 200 or not check.headers.get("content-type", "").startswith("image/"):
+                    continue
+                title = re.sub(r"\.\w+$", "", page.get("title", "").removeprefix("File:")).replace("_", " ")
+                photos.append({"n": len(photos) + 1, "url": url, "title": _plain(title, 90), "author": _plain((meta.get("Artist") or {}).get("value"), 60) or "Unknown",
+                               "licence": licence, "source": info.get("descriptionurl", "")})
+                if len(photos) >= limit:
+                    break
+    except (httpx.HTTPError, ValueError) as exc:
+        errors.append(f"Photo search failed: {type(exc).__name__}")
+    return {"topic": topic, "photos": photos, "errors": errors}
+
+
+def photos_block(photos):
+    return "\n".join(f"[P{p['n']}] {p['url']} — \"{p['title']}\" — by {p['author']}, {p['licence']} — source page: {p['source']}" for p in photos)

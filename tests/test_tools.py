@@ -174,3 +174,32 @@ async def test_recovery_does_not_search_again(store):
         return sse_response('Python 9 [1]')
     result = await execute(store, run, handler)
     assert result['status'] == 'completed' and '[1] Saved — https://saved.test' in prompts[0]
+
+
+def test_photo_topic_reads_what_the_page_is_about():
+    from backend.tools import photo_topic
+    assert photo_topic('Create me a minimalist, clean dan informatic landing page about coffee') == 'coffee'
+    assert photo_topic('Create me a coffee shop website') == 'coffee shop'
+    assert photo_topic('Build a website for my bakery in Jakarta') == 'bakery'
+
+
+COMMONS = {'query': {'pages': {
+    '1': {'index': 1, 'title': 'File:Diagram.png', 'imageinfo': [{'mime': 'image/png', 'width': 2000, 'height': 1000, 'thumburl': 'https://upload.wikimedia.org/a.png', 'extmetadata': {'LicenseShortName': {'value': 'CC BY 4.0'}}}]},
+    '2': {'index': 2, 'title': 'File:Tall cup.jpg', 'imageinfo': [{'mime': 'image/jpeg', 'width': 1000, 'height': 1500, 'thumburl': 'https://upload.wikimedia.org/b.jpg', 'extmetadata': {'LicenseShortName': {'value': 'CC0'}}}]},
+    '3': {'index': 3, 'title': 'File:Roasted beans.jpg', 'imageinfo': [{'mime': 'image/jpeg', 'width': 2400, 'height': 1600, 'thumburl': 'https://upload.wikimedia.org/c.jpg?utm_source=x',
+          'descriptionurl': 'https://commons.wikimedia.org/wiki/File:Roasted_beans.jpg', 'extmetadata': {'LicenseShortName': {'value': 'CC BY-SA 4.0'}, 'Artist': {'value': '<a href="x">Ana</a>'}}}]},
+    '4': {'index': 4, 'title': 'File:Broken.jpg', 'imageinfo': [{'mime': 'image/jpeg', 'width': 2400, 'height': 1600, 'thumburl': 'https://upload.wikimedia.org/gone.jpg', 'extmetadata': {'LicenseShortName': {'value': 'CC0'}}}]},
+    '5': {'index': 5, 'title': 'File:Elsewhere.jpg', 'imageinfo': [{'mime': 'image/jpeg', 'width': 2400, 'height': 1600, 'thumburl': 'https://evil.test/d.jpg', 'extmetadata': {'LicenseShortName': {'value': 'CC0'}}}]},
+    '6': {'index': 6, 'title': 'File:Rights reserved.jpg', 'imageinfo': [{'mime': 'image/jpeg', 'width': 2400, 'height': 1600, 'thumburl': 'https://upload.wikimedia.org/e.jpg', 'extmetadata': {'LicenseShortName': {'value': 'Fair use'}}}]},
+}}}
+
+
+async def test_find_photos_keeps_only_wide_open_photos_that_load():
+    from backend.tools import find_photos
+    def handler(request):
+        if request.url.host == 'commons.wikimedia.org':
+            return httpx.Response(200, json=COMMONS)
+        return httpx.Response(404 if 'gone' in request.url.path else 200, headers={'content-type': 'image/jpeg'})
+    found = await find_photos('coffee', httpx.MockTransport(handler))
+    assert found['photos'] == [{'n': 1, 'url': 'https://upload.wikimedia.org/c.jpg', 'title': 'Roasted beans', 'author': 'Ana', 'licence': 'CC BY-SA 4.0',
+                                'source': 'https://commons.wikimedia.org/wiki/File:Roasted_beans.jpg'}]

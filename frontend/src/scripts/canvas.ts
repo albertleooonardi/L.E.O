@@ -84,6 +84,11 @@ export const canvas = {
 el('canvas-tab-preview').addEventListener('click', () => { setTab('preview'); render(); });
 el('canvas-tab-code').addEventListener('click', () => setTab('code'));
 el('canvas-reload').addEventListener('click', () => { setTab('preview'); render(); });
+// Pages switch to tablet layouts below about 900 px; desktop width shows them as a visitor on a laptop sees them.
+el('canvas-wide').addEventListener('click', () => {
+  const wide = el('canvas-panel').classList.toggle('wide');
+  el('canvas-wide').setAttribute('aria-pressed', String(wide)); el('canvas-wide').title = wide ? 'Normal width' : 'Desktop width';
+});
 el('canvas-close').addEventListener('click', () => canvas.close());
 el('canvas-open').addEventListener('click', () => {
   if (!current) return;

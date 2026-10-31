@@ -53,6 +53,7 @@ class Preferences(StrictModel):
     web_search: Literal["auto", "off"] = "auto"
     search_url: str = Field(default="", max_length=300)
     search_pages: int = Field(default=3, ge=1, le=5)
+    page_photos: bool = True
     allow_paid: bool = False
     max_cost: float = Field(default=0.10, gt=0, le=100, allow_inf_nan=False)
     max_calls: int = Field(default=8, ge=1, le=20)
