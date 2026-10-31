@@ -47,9 +47,9 @@ L.E.O. is built for people who:
 ```mermaid
 flowchart LR
     R[Your request] --> C{Routing head<br/>skill + difficulty}
-    C -->|light / standard| Q[Quick: one call]
+    C -->|light / standard /<br/>one page| Q[Quick: one call]
     C -->|strong, one skill| V[Reviewed: answer + review]
-    C -->|build request or<br/>several skills| D[Deep: planner splits<br/>into 1–3 subtasks]
+    C -->|app build or<br/>several skills| D[Deep: planner splits<br/>into 1–3 subtasks]
     D --> T1[Design subtask → design model]
     D --> T2[Frontend subtask → frontend model]
     D --> T3[Backend subtask → backend model]
@@ -59,8 +59,8 @@ flowchart LR
 
 0. **Research when needed.** If the request needs fresh or outside information ("cite sources", "latest", "price of", a link…), L.E.O. searches your SearXNG and reads the top pages first; see [Web research](#web-research).
 1. **Classify (no tokens spent).** Keyword rules match the request to a skill: General, Frontend, Backend, Coding, Design, Reasoning, or skills you add. For a build request, the thing being built decides the main skill ("…a website" → Frontend). Signals such as a build request, scope words ("complete", "production"), several skills, several parts, or length set the difficulty: light, standard, or strong.
-2. **Pick a mode (Auto).** Light and standard work → **Quick**. Strong single-skill work → **Reviewed**. Strong multi-skill work or a build request → **Deep**, where the planner labels each subtask with a skill and difficulty.
-3. **Pick a model and an effort for every generator call.** Candidates are ranked: strong enough for the task → has the skill ("General" is not a specialty) → generalist → for light work, a model without hidden reasoning → the lightest tier that is enough → your model choice setting. With **Auto** (the default), every model you turned on competes: among models that fit, the cheapest per call wins. Free and local models cost nothing; a paid model's cost is estimated from its prices and the tokens it actually used in earlier calls, so a model that thinks at length counts as more expensive. Settings → Models shows each model's price and average tokens per call. Thinking models get a matching effort: low for light and standard work, medium for strong work. With **Free first**, paid models are a backup after three free attempts. A failed or rate-limited model is skipped and backs off exponentially (30 seconds up to an hour).
+2. **Pick a mode (Auto).** Light and standard work → **Quick**. A single page (a landing page or website with no app, API, or scope words such as "complete" or "multi-page") is one standard deliverable → **Quick**: one capable model writes it better and cheaper than a plan-then-build chain. Strong single-skill work → **Reviewed**. Strong multi-skill work or an app build → **Deep**, where the planner labels each subtask with a skill and difficulty.
+3. **Pick a model and an effort for every generator call.** Candidates are ranked: strong enough for the task → has the skill ("General" is not a specialty) → generalist → for light work, a model without hidden reasoning → the lightest tier that is enough → your model choice setting. With **Auto** (the default), every model you turned on competes: among models that fit, the cheapest per call wins. Free and local models cost nothing; a paid model's cost is estimated from its prices and the tokens it actually used in earlier calls, so a model that thinks at length counts as more expensive. Settings → Models shows each model's price and average tokens per call. Thinking models get a matching effort: low for light and standard work, medium for strong work. With **Free first**, paid models are a backup after three free attempts. If the best model is rate-limited but the provider asks for a short wait (20 seconds or less, as Gemini does on per-minute limits), L.E.O. waits and retries it once instead of handing the task to a weaker model. Otherwise a failed or rate-limited model is skipped and backs off exponentially (30 seconds up to an hour).
 4. **Explain it.** The live view and the run log show each decision and its reason, for example `task_2 [frontend · standard] → gemini-2.5-flash: has the frontend skill; standard tier fits standard work`.
 
 `POST /api/route` (and the MCP tool `leo_route`) previews the decision for any prompt without calling a model.
@@ -155,7 +155,7 @@ A key usually unlocks many models. **Add models** on a provider reads the provid
 - **Anthropic:** Claude 4.5 and later, with suggested list prices you can edit.
 - **Other OpenAI-compatible servers:** whatever their `/models` lists.
 
-Profiles come from the catalog itself: strength from size and family (e.g. 550B, Pro, Opus → strong; Flash-Lite, Mini, Haiku, small sizes → light), thinking from what the provider reports, and coding skills only for models the provider describes as coding models. With **Check access first** (on by default), L.E.O. sends one tiny request per model and skips the ones your key cannot use, with the reason (not on your plan, rate-limited, timed out); a model that rejects an effort setting is kept with effort off. Selected models are added in one click, reusing the saved key.
+Profiles come from the catalog itself: strength from size and family (e.g. 550B, Pro, Opus → strong; Mini, Haiku, small sizes, and Gemini 2.x Flash-Lite → light; Gemini 3 and later Flash-Lite → standard, since it writes at the level of earlier Flash models), thinking from what the provider reports, and coding skills only for models the provider describes as coding models. With **Check access first** (on by default), L.E.O. sends one tiny request per model and skips the ones your key cannot use, with the reason (not on your plan, rate-limited, timed out); a model that rejects an effort setting is kept with effort off. Selected models are added in one click, reusing the saved key.
 
 ## Skills and routing profiles
 
@@ -231,6 +231,33 @@ uv run python -m benchmarks.report benchmarks/results/<file>.json [...]
 ```
 
 Tasks: six coding functions with edge cases, "Create me a coffee shop website", "Create a landing page with a clean, minimalist design for a note-taking app", and a long task: a complete personal finance tracker in one HTML file.
+
+### 31 Oct 2026: QA loop against the Gemini and ChatGPT web apps
+
+The same prompts went to **gemini.google.com** (Gemini 3.5 Flash) and **chatgpt.com** (free, logged out), and to L.E.O. Auto with its free team. Replies were graded the same way by `benchmarks/qa.py`: hidden tests for code, the known answer for the puzzle, and for the page the 14-point rubric plus visitor-facing defects (links to sections that do not exist, placeholder text) and content measured in the browser. Claude.ai needs a sign-in and was not included.
+
+**Round 1 (before fixes): L.E.O. 1/4.** Gemini 4/4, ChatGPT 4/4. L.E.O.'s cheap coding model used `str.isdigit()`, which also accepts non-ASCII digits, and left a broken draft before a "let me revise" version; its page had 130 words and a broken link.
+
+**Round 4 (after fixes): L.E.O. matches both on every correctness task and wins the page.**
+
+| Task | Gemini web | ChatGPT web | L.E.O. Auto (free models) | L.E.O. calls, tokens, time |
+| --- | --- | --- | --- | --- |
+| IPv4 validator (hidden tests) | pass | pass | pass | 2, 8.3K, 107 s |
+| Duration parser (hidden tests) | pass | pass | pass | 3, 17.7K, 161 s |
+| Roman numerals (hidden tests) | pass | pass | pass | 2, 7.5K, 54 s |
+| Stairs puzzle (927) | pass | pass | pass | 1, 1.7K, 38 s |
+| Coffee landing page: rubric | 79% | 79% | **86–93%** | 1, 4.0K, 10 s |
+| … words / specific facts | 235 / 9 | 314 / 0 | **515–556 / 9–19** | |
+| … defects | 4 empty links, Tailwind from a CDN | 1 empty link, 5 hot-linked photos | **none**, self-contained | |
+
+What changed between rounds:
+
+- **Independent review where rules are stated.** In Auto, a coding or backend request with explicit requirements ("only", "exactly", "raise ValueError"…) is reviewed by the strongest available model that did not write the answer. The reviewer lists each requirement, traces the code on the request's own examples, and watches for loose checks such as `isdigit()`.
+- **Static checks that trigger one repair even in Quick mode:** several versions of the same function, in-page links to missing sections, and placeholder text.
+- **Pages with depth:** 5–7 sections and 400+ words of specific content, a link target for every section, and medium thinking effort for single-page builds.
+- **Self-correcting profiles:** a model that spends its whole output limit on hidden thinking is marked as a reasoning model, so later calls cap its effort (Laguna S 2.1 took 249 s and 16K tokens before this).
+
+The price is speed and tokens on code: a reviewed answer takes 1–3 minutes and 7–18K free-model tokens, against about 10 seconds in the web apps, whose token use is not shown. Reproduce with `uv run python -m benchmarks.qa .leo-bench/qa/<round> --leo` after saving the web apps' replies as `<round>/<assistant>/<task>.md`.
 
 ### 30 Oct 2026: L.E.O. Auto with a team of free models
 
@@ -318,7 +345,7 @@ make check   # backend tests + frontend type check
 make build   # build the frontend served by the API
 ```
 
-The backend suite (82 tests) covers routing classification and ranking, web research and page-reading safety, model discovery, per-subtask routing, Auto mode, skills, the MCP server over stdio, protocol streaming and usage, fallback and cooldown, paid opt-in and limits, key encryption, origin/host/token checks, idempotent submission, cancellation, context trimming, review and repair, task dependencies, checkpoint recovery, and usage reporting. Tests use deterministic HTTP transports and never call real providers.
+The backend suite (92 tests) covers routing classification and ranking, web research and page-reading safety, model discovery, per-subtask routing, Auto mode, skills, the MCP server over stdio, protocol streaming and usage, fallback and cooldown, paid opt-in and limits, key encryption, origin/host/token checks, idempotent submission, cancellation, context trimming, review and repair, task dependencies, checkpoint recovery, and usage reporting. Tests use deterministic HTTP transports and never call real providers.
 
 For manual browser testing without real models, run the QA fixture and connect it with model `leo-test-model` (local, no API charge), using a separate `LEO_DATA_DIR`:
 

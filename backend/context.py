@@ -47,7 +47,26 @@ def static_review(text):
         except (SyntaxError, ValueError, RecursionError) as exc:
             # This is parsing only. Generated code is never executed by the API or worker.
             results.append({"language": language, "passed": False, "message": str(exc)[:300]})
+    # A reply that drafts a function, then "revises" it in another block, leaves the reader to guess which one is final.
+    defined = re.findall(r"(?m)^(?:def|class) (\w+)", "\n".join(code for language, code in re.findall(r"```([\w+-]*)[^\n]*\n(.*?)```", text, re.S)
+                                                              if language.lower() in {"python", "py"}))
+    for name in sorted({n for n in defined if defined.count(n) > 1}):
+        results.append({"language": "python", "passed": False, "message": f"Several versions of {name}; give one final version only"})
+    for page in re.findall(r"```html[^\n]*\n(.*?)```", text, re.S | re.I):
+        results.extend(page_review(page))
     return results
+
+
+def page_review(html):
+    """Defects a visitor notices at once: in-page links that go nowhere, and placeholder text left in the page."""
+    problems = []
+    ids = set(re.findall(r"\bid=[\"']([^\"']+)[\"']", html))
+    broken = sorted({a for a in re.findall(r"href=[\"']#([^\"']+)[\"']", html) if a not in ids})
+    if broken:
+        problems.append(f"Links to {', '.join('#' + a for a in broken)}, but no element has that id; add the sections or point the links at existing ones")
+    if re.search(r"\[[^\]\n]{0,40}\b(image|photo|placeholder|imagery|logo|icon)\b[^\]\n]{0,40}\]|lorem ipsum", html, re.I):
+        problems.append("Placeholder text is visible in the page; replace it with real content or a drawn element")
+    return [{"language": "html", "passed": not problems, "message": "; ".join(problems) or "Page checks passed"}]
 
 
 def parse_review(text):

@@ -34,7 +34,9 @@ def conn(url, **kw):
 
 def test_profiles_come_from_size_family_and_description():
     assert profile('big/ultra-550b', 'frontier reasoning model')['tier'] == 'strong'
-    assert profile('x/model-2.6b')['tier'] == 'light' and profile('gemini-9-flash-lite')['tier'] == 'light'
+    assert profile('x/model-2.6b')['tier'] == 'light' and profile('gemini-2.5-flash-lite')['tier'] == 'light'
+    assert profile('gemini-9-flash-lite')['tier'] == 'standard', 'newer Flash-Lite generations are standard'
+    assert profile('gemini-9-flash-lite')['skills'] == ['frontend', 'design', 'general']
     assert profile('gemini-9-pro')['tier'] == 'strong' and profile('gemini-9-flash')['tier'] == 'standard'
     assert profile('m/something', 'MoE with 16B active parameters')['tier'] == 'standard', 'active parameters are not total size'
     assert profile('p/laguna-s')['skills'] == ['coding', 'backend', 'frontend']

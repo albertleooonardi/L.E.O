@@ -63,7 +63,9 @@ def make_request(provider, messages, max_tokens, effort=None):
 def provider_detail(response):
     """Short provider explanation (e.g. which quota was hit). Never echoes request headers or keys."""
     try:
-        error = response.json().get("error")
+        data = response.json()
+        # Gemini's OpenAI-compatible API wraps errors in a one-item list.
+        error = (data[0] if isinstance(data, list) and data else data).get("error")
         message = error.get("message") if isinstance(error, dict) else error
         if isinstance(error, dict) and isinstance(error.get("metadata"), dict) and isinstance(error["metadata"].get("raw"), str):
             message = f"{message}: {error['metadata']['raw']}"
@@ -83,9 +85,17 @@ def check_status(response):
         retry_after = min(3600, max(1, float(response.headers.get("retry-after", "30"))))
     except ValueError:
         retry_after = 30
+    if "retry-after" not in response.headers:
+        # Gemini states the wait in the body instead ("Please retry in 17.8s", or a RetryInfo retryDelay).
+        hint = re.search(r'retry in (\d+(?:\.\d+)?)\s*s|"retryDelay":\s*"(\d+(?:\.\d+)?)s"', response.text[:20000])
+        if hint:
+            retry_after = min(3600, float(hint.group(1) or hint.group(2)))
     detail = provider_detail(response)
     hint = hints.get(code, "Provider request failed")
-    if re.search(r"credit balance|insufficient (credits|funds|quota)|billing", detail, re.I):
+    if code == 429 and re.search(r"quota", detail, re.I):
+        # Free tiers report daily or per-minute quotas as 429 and mention billing only as an upgrade path.
+        hint = "Provider quota reached; free-tier quotas reset over time"
+    elif re.search(r"credit balance|insufficient (credits|funds|quota)|billing", detail, re.I):
         hint = "Provider credits or billing are exhausted; add credits in the provider's console"
     raise ProviderError(f"{hint} (HTTP {code}){': ' + detail if detail else ''}",
                         code in {408, 429} or code >= 500, retry_after)

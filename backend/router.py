@@ -31,15 +31,15 @@ STARTER_SKILLS = [
      "instructions": "Answer directly and concisely. Use short paragraphs or lists when they help."},
     {"id": "frontend", "name": "Frontend", "description": "Websites, landing pages, HTML, CSS, JavaScript, and UI components.",
      "keywords": ["html", "css", "javascript", "website", "web page", "webpage", "landing page", "frontend", "front-end", "ui", "react", "vue", "svelte", "tailwind", "responsive", "navbar", "component", "page", "site", "dom", "animation"],
-     "instructions": "For a web page, return one complete, self-contained file in a single ```html block with CSS in <style> and JavaScript in <script>, so it can be previewed directly. Use semantic HTML, a responsive layout, accessible contrast, and real placeholder content. Avoid external dependencies unless asked."},
+     "instructions": "For a web page, return one complete, self-contained file in a single ```html block with CSS in <style> and JavaScript in <script>, so it can be previewed directly. Use semantic HTML, a responsive layout, and accessible contrast; never put light text on a busy image. Design like a careful designer: a restrained palette of 3 to 5 colors as CSS variables, one or two typefaces with a clear type scale, generous whitespace on a consistent spacing scale. Give it real depth: for an informative page, 5 to 7 sections and 400+ words of specific content for the subject (facts, numbers, names, how-tos), never bracketed placeholders or lorem ipsum. Make every link and button point to something on the page, and give every section a link target id. Avoid external dependencies except web fonts unless asked."},
     {"id": "backend", "name": "Backend", "description": "APIs, servers, databases, authentication, and integrations.",
      "keywords": ["api", "backend", "back-end", "server", "endpoint", "database", "sql", "postgres", "mysql", "sqlite", "fastapi", "flask", "django", "express", "node", "auth", "authentication", "rest", "graphql", "webhook", "orm", "migration", "checkout", "payment"],
      "instructions": "Write production-minded backend code: validate input, handle errors explicitly, never hard-code secrets, and state how to run it. Keep the data model and endpoints consistent."},
     {"id": "coding", "name": "Coding", "description": "Functions, algorithms, debugging, refactoring, and tests.",
      "keywords": ["function", "python", "algorithm", "bug", "debug", "refactor", "class", "test", "unit test", "typescript", "java", "rust", "go", "regex", "parse", "implement", "code", "script", "error", "exception", "complexity"],
-     "instructions": "Return complete, runnable code in fenced blocks. Handle edge cases the request names, validate input, and keep explanations brief."},
+     "instructions": "Return complete, runnable code in fenced blocks. Handle every rule and edge case the request names, validate input exactly as specified (for example, str.isdigit() also accepts non-ASCII digits), and keep explanations brief. Give one final version only: no drafts and no 'let me revise'."},
     {"id": "design", "name": "Design", "description": "Visual design, UX, branding, color, typography, and layout.",
-     "keywords": ["design", "ux", "user experience", "color", "colour", "palette", "typography", "font", "branding", "brand", "logo", "layout", "wireframe", "style guide", "mockup", "aesthetic", "theme"],
+     "keywords": ["design", "ux", "user experience", "color", "colour", "palette", "typography", "font", "branding", "brand", "logo", "layout", "wireframe", "style guide", "mockup", "aesthetic", "theme", "minimalist", "elegant", "sleek", "beautiful", "clean design", "clean look", "modern look"],
      "instructions": "Make specific, justified design choices: name colors as hex values, typefaces, spacing, and hierarchy. Prefer a distinctive direction that fits the subject over generic defaults."},
     {"id": "research", "name": "Research", "description": "Finding current information on the web and summarizing it with sources.",
      "keywords": ["search", "research", "sources", "references", "cite", "citations", "latest", "news", "look up", "find out", "reviews", "prices", "compare prices"],
@@ -59,6 +59,11 @@ SEARCH_CUES = re.compile(r"\b(search (for|the web|online|the internet)|web searc
 URLS = re.compile(r"https?://[^\s<>()\"']+[^\s<>().,;:!?\"']")
 # Short questions asking for an explanation or a quick transformation are light work, whatever their topic.
 SIMPLE_QUESTION = re.compile(r"^\s*(what|who|when|where|why|how (do|does|is|are|can)|explain|define|what's|is|are|can|translate|summari[sz]e)\b", re.I)
+# One self-contained page is a single deliverable: one capable model writes it better than a plan-then-build chain.
+PAGE_NOUNS = {"website", "web page", "webpage", "landing page", "site", "page"}
+APP_NOUNS = {"app", "application", "api", "server", "backend", "system", "platform", "game", "dashboard", "bot", "cli", "script"}
+REQUIREMENT_WORDS = re.compile(r"\b(only|exactly|must|raise|raises|error|invalid|valid|at most|at least|no leading|not allowed|"
+                               r"edge cases?|reject|must not|without|allowed)\b", re.I)
 HARD_WORDS = re.compile(r"\b(complete|full|production|entire|end-to-end|architecture|scalable|multi-page|multiple pages|with (a )?backend|secure|optimi[sz]e|prove)\b", re.I)
 
 
@@ -84,7 +89,12 @@ def classify(text, skills):
         skill = owner or skill
     parts = len(re.findall(r"(?m)^\s*(?:[-*•]|\d+[.)])\s+", text)) + len(re.findall(r"\b(and also|as well as|plus|then)\b", lowered))
     signals = []
-    if build:
+    built = set(re.findall(rf"\b({BUILD_NOUNS})\b", text[build.start():].lower())) if build else set()
+    single_page = (bool(built & PAGE_NOUNS) and not built & APP_NOUNS and set(matched) <= {"frontend", "design", "general"}
+                   and not HARD_WORDS.search(text) and parts < 2 and len(text) <= 1200)
+    if single_page:
+        signals.append("single-page build")
+    elif build:
         signals.append("build request")
     if HARD_WORDS.search(text):
         signals.append("scope words")
@@ -95,20 +105,24 @@ def classify(text, skills):
     if len(text) > 1200:
         signals.append("long request")
     simple = bool(SIMPLE_QUESTION.match(text)) and len(text) <= 160 and not signals and "```" not in text
+    scope = [s for s in signals if s != "single-page build"]  # A page with style words is still one standard deliverable.
     if simple:
         difficulty = "light"
         skill = skill if skill in {"reasoning", "research"} else ("general" if any(s["id"] == "general" for s in enabled) else skill)
-    elif "build request" in signals or len(signals) >= 2 or (signals and len(matched) >= 2):
+    elif "build request" in signals or len(scope) >= 2 or (scope and len(matched) >= 2):
         difficulty = "strong"
     elif signals or len(text) > 280 or matched and matched[-1] in {"coding", "backend", "reasoning", "frontend"}:
         difficulty = "standard"
     else:
         difficulty = "light"
+    # Requests that spell out rules and edge cases can be checked; Auto mode has those answers reviewed.
+    checkable = len(REQUIREMENT_WORDS.findall(text)) >= 2
     urls = list(dict.fromkeys(URLS.findall(text)))[:3]
     search = bool(urls or SEARCH_CUES.search(text))
     if search:
         signals.append("needs web" if not urls else "reads given URL")
-    return {"skill": skill, "difficulty": difficulty, "skills": matched[::-1], "signals": signals, "search": search, "urls": urls}
+    return {"skill": skill, "difficulty": difficulty, "skills": matched[::-1], "signals": signals, "search": search, "urls": urls,
+            "checkable": checkable}
 
 
 # Skills whose results a reviewer can check for correctness. Design, frontend, and writing reviews mostly
@@ -124,6 +138,8 @@ def choose_mode(route):
     """Auto mode: spend extra calls only where they are likely to pay off."""
     if route["difficulty"] == "strong":
         return "deep" if len(route["skills"]) >= 2 or "build request" in route["signals"] else "reviewed"
+    if route["difficulty"] == "standard" and route.get("checkable") and route["skill"] in REVIEWABLE:
+        return "reviewed"  # Stated rules and edge cases are where a cheap model slips and a reviewer catches it.
     return "quick"
 
 

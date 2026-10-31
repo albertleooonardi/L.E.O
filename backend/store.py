@@ -210,6 +210,13 @@ class Store:
         with self.engine.begin() as db:
             db.execute(update(connections).where(connections.c.id == connection_id).values(cooldown_until=time.time() + seconds))
 
+    def mark_reasoning(self, connection_id):
+        """Record that a model thinks before answering, so later calls send it an effort limit."""
+        with self.engine.begin() as db:
+            row = db.execute(select(connections.c.config).where(connections.c.id == connection_id)).first()
+            if row:
+                db.execute(update(connections).where(connections.c.id == connection_id).values(config={**row[0], "reasoning": True}))
+
     def list_conversations(self):
         with self.engine.connect() as db:
             return [dict(row) for row in db.execute(select(conversations).order_by(conversations.c.updated_at.desc())).mappings()]

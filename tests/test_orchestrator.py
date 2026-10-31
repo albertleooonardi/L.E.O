@@ -457,3 +457,66 @@ async def test_free_first_uses_paid_only_as_a_backup_after_three_free_attempts(s
     assert result['output'] == 'Claude backup answer'
     assert hosts == ['free0.test', 'free1.test', 'free2.test', 'claude.test'], 'three free attempts, then the paid backup'
     assert result['usage']['estimated_cost'] > 0
+
+
+async def test_short_rate_limit_waits_for_the_best_model_instead_of_falling_back(store, monkeypatch):
+    from backend import orchestrator
+    orchestrator._strikes.clear()
+    best = add_provider(store)
+    store.save_connection(Connection(name='Weaker', base_url='http://weaker.test/v1', model='weaker', free=True, priority=50).model_dump())
+    slept, hits = [], []
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+    monkeypatch.setattr(orchestrator.asyncio, 'sleep', fake_sleep)
+    def handler(request):
+        hits.append(request.url.host)
+        if request.url.host == 'local.test' and hits.count('local.test') == 1:
+            # Gemini's OpenAI-compatible API: a one-item list, with the wait in the message.
+            return httpx.Response(429, json=[{'error': {'code': 429, 'message': 'Quota exceeded. Please retry in 2.5s.'}}])
+        return sse_response('from ' + request.url.host)
+    run = await execute(store, make_run(store), handler)
+    assert run['status'] == 'completed' and run['output'] == 'from local.test'
+    assert slept == [2.5] and 'weaker.test' not in hits
+    assert store.get_connection(best['id'])['cooldown_until'] == 0, 'a retried success leaves no cooldown'
+
+
+async def test_long_rate_limit_still_falls_back(store, monkeypatch):
+    from backend import orchestrator
+    orchestrator._strikes.clear()
+    add_provider(store)
+    store.save_connection(Connection(name='Backup', base_url='http://backup.test/v1', model='backup', free=True, priority=50).model_dump())
+    def handler(request):
+        if request.url.host == 'local.test':
+            return httpx.Response(429, json={'error': {'message': 'Daily quota exceeded. Please retry in 3600s.'}})
+        return sse_response('from backup')
+    run = await execute(store, make_run(store), handler)
+    assert run['output'] == 'from backup'
+
+
+def test_static_review_flags_duplicate_versions_and_page_defects():
+    from backend.context import static_review
+    drafts = "```python\ndef f(x):\n    return x\n```\nWait, let me revise:\n```python\ndef f(x):\n    return x + 1\n```"
+    assert any('Several versions of f' in c['message'] for c in static_review(drafts))
+    page = '```html\n<a href="#menu">Menu</a><a href="#about">About</a><div>[ Hero image ]</div><section id="about"></section>\n```'
+    [check] = [c for c in static_review(page) if c['language'] == 'html']
+    assert not check['passed'] and '#menu' in check['message'] and '#about' not in check['message'] and 'Placeholder' in check['message']
+    assert all(c['passed'] for c in static_review('```html\n<a href="#a">A</a><p id="a">ok</p>\n```'))
+
+
+async def test_quick_mode_repairs_failed_static_checks_once(store):
+    add_provider(store)
+    replies = iter(['```html\n<a href="#gone">Go</a>\n```', '```html\n<a href="#top">Top</a><main id="top"></main>\n```'])
+    run = await execute(store, make_run(store, mode='quick', prompt='Make a page'), lambda r: sse_response(next(replies)))
+    assert run['status'] == 'completed' and 'id="top"' in run['output'] and run['usage']['calls'] == 2
+
+
+async def test_hidden_thinking_marks_the_model_as_reasoning(store):
+    thinker = add_provider(store)
+    store.save_connection(Connection(name='Backup', base_url='http://backup.test/v1', model='backup', free=True, priority=50).model_dump())
+    def handler(request):
+        if request.url.host == 'local.test':
+            body = 'data: ' + json.dumps({'choices': [{'delta': {}, 'finish_reason': 'length'}]}) + '\n\ndata: [DONE]\n\n'
+            return httpx.Response(200, text=body, headers={'content-type': 'text/event-stream'})
+        return sse_response('answer')
+    run = await execute(store, make_run(store), handler)
+    assert run['output'] == 'answer' and store.get_connection(thinker['id'])['reasoning'] is True

@@ -110,3 +110,12 @@ async def test_exhausted_credits_are_named_plainly():
     with pytest.raises(ProviderError, match='credits or billing are exhausted') as caught:
         [c async for c in stream(provider, 'k', [{'role': 'user', 'content': 'Hi'}], 64, 10, httpx.MockTransport(lambda r: httpx.Response(400, json=body)))]
     assert not caught.value.retryable
+
+
+async def test_free_tier_quota_is_not_reported_as_billing():
+    from backend.providers import ProviderError
+    body = [{'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. Please retry in 41s.'}}]
+    provider = {'protocol': 'openai', 'base_url': 'https://generativelanguage.googleapis.com/v1beta/openai', 'model': 'gemini-2.5-flash'}
+    with pytest.raises(ProviderError, match='quota reached') as caught:
+        [c async for c in stream(provider, 'k', [{'role': 'user', 'content': 'Hi'}], 64, 10, httpx.MockTransport(lambda r: httpx.Response(429, json=body)))]
+    assert caught.value.retryable and caught.value.retry_after == 41

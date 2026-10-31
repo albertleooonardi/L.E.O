@@ -46,9 +46,12 @@ def profile(model_id, description="", thinking=False, context=None, free=None, n
     text = f"{model_id} {name or ''}"
     description = claims(description or "")
     size = size_billions(text, description[:400])
+    # From Gemini 3 on, Flash-Lite writes at the level of earlier Flash models; the name alone undersells it.
+    generation = re.search(r"gemini-(\d+(?:\.\d+)?)", model_id)
+    modern_lite = "flash-lite" in model_id and generation is not None and float(generation.group(1)) >= 3
     if STRONG.search(text) or (size and size >= 100):
         tier = "strong"
-    elif LIGHT.search(text) or (size and size <= 10) or "flash-lite" in model_id:
+    elif not modern_lite and (LIGHT.search(text) or (size and size <= 10) or "flash-lite" in model_id):
         tier = "light"
     else:
         tier = "standard"
@@ -57,6 +60,8 @@ def profile(model_id, description="", thinking=False, context=None, free=None, n
         skills = ["coding", "backend", "frontend"]
     elif re.search(r"reasoning", f"{text} {description[:200]}", re.I) and tier == "strong":
         skills = ["reasoning", "coding", "backend"]
+    elif model_id.startswith("gemini-") and tier != "light":
+        skills = ["frontend", "design", "general"]  # Gemini's strength, as in the Gemini preset.
     # Everything else is a generalist: it can take any task and loses ties to a specialist.
     return {"model": model_id, "name": name or model_id, "tier": tier, "skills": skills, "reasoning": bool(thinking),
             "context_window": max(1024, min(int(context or 32768), 2000000)), "free": free, "description": (description or "")[:240]}

@@ -44,7 +44,11 @@ def test_classify_skill_and_difficulty():
     simple = classify('What is the capital of France?', SKILLS)
     assert simple['skill'] == 'general' and simple['difficulty'] == 'light' and choose_mode(simple) == 'quick'
     site = classify('Create me a coffee shop website using HTML', SKILLS)
-    assert site['skill'] == 'frontend' and site['difficulty'] == 'strong' and choose_mode(site) == 'deep'
+    assert site['skill'] == 'frontend' and site['difficulty'] == 'standard' and choose_mode(site) == 'quick', 'one page, one call'
+    styled = classify('Create me a minimalist, clean dan informatic landing page about coffee', SKILLS)
+    assert styled['skill'] == 'frontend' and 'single-page build' in styled['signals'] and choose_mode(styled) == 'quick'
+    app = classify('Build a complete personal finance tracker app as a single HTML file', SKILLS)
+    assert app['difficulty'] == 'strong' and 'build request' in app['signals'], 'an app or scope words keep the full treatment'
     full = classify('Build a coffee shop website with an order API and a database for orders', SKILLS)
     assert {'frontend', 'backend'} <= set(full['skills']) and choose_mode(full) == 'deep'
     assert classify('Create a website for my coffee shop', SKILLS)['skill'] == 'frontend'
