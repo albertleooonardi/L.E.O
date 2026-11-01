@@ -4,9 +4,11 @@
 
 ## 1. Product intent
 
-L.E.O. (Language Model Efficiency Orchestrator) connects local models and third-party LLM APIs. A user configures their own connections in Settings and chooses how L.E.O. routes, plans, generates, reviews, and repairs an answer within a bounded allowance.
+L.E.O. (LLM Efficiency Orchestrator) connects local models and third-party LLM APIs. A user configures their own connections in Settings and chooses how L.E.O. routes, plans, generates, reviews, and repairs an answer within a bounded allowance.
 
-**Value proposition:** Get more useful work from the models and API allowances you already have, with explicit control over quality, latency, and usage.
+**Goal:** Maximize the output of LLMs while minimizing token usage — more useful work per token spent. That is why it is called L.E.O. (LLM Efficiency Orchestrator): cheap, capable models do the bulk of the work, and large or expensive models are used only when a task genuinely needs them.
+
+**Value proposition:** Get more useful work from the models and API allowances you already have, with explicit control over quality, latency, and token usage.
 
 **Core mechanism:** a routing head matches every request, and every planned subtask, to a skill and a difficulty, then sends it to the cheapest connected model that has that skill and is strong enough. Simple work stays on light models; only hard or multi-specialty work spends extra calls. This targets the common waste of sending every task to one large model at maximum effort.
 
@@ -164,11 +166,13 @@ SSE types include `status`, `route`, `tool`, `model`, `plan`, `task`, `draft_res
 
 The server produces text and code. Python/JSON blocks receive syntax parsing; generated code is never run by the server or worker. Semantic review is a model opinion, not proof that code passes functional tests. Drafts are visible while generation/review proceeds.
 
+**Authentication.** L.E.O. supports user accounts: registration, login, and password-based sessions. Passwords are hashed with bcrypt and sessions are issued as HttpOnly cookies. Every connection, conversation, run, and usage record belongs to the user who created it. Users can only read, update, or delete their own models, chats, and runs. The legacy `LEO_API_TOKEN` (single-owner access token) still works as a server-level bearer token for the MCP server and CLI tools, but the browser UI uses per-user sessions.
+
 **Canvas.** An answer containing an HTML block (with any separate CSS/JS blocks merged) can be previewed in the browser in an `<iframe sandbox="allow-scripts allow-forms allow-modals">` without `allow-same-origin`, so page scripts get an opaque origin and cannot read L.E.O. cookies, storage, or the API. An injected CSP blocks network requests (`connect-src 'none'`, `form-action 'none'`). "Open in new tab" serves only a wrapper holding the same sandboxed frame; "Download" saves the HTML. Python and other server-side code are not run.
 
-The workspace has one owner. Local startup binds to loopback. Remote deployment requires owner-token authentication, HTTPS, and explicit host/origin configuration. Provider URL configuration deliberately supports private/local addresses and must remain trusted-owner-only. Multi-user accounts, team roles, and tenant isolation are not implemented.
+Local startup binds to loopback. Remote deployment requires HTTPS and explicit host/origin configuration. Provider URL configuration deliberately supports private/local addresses and must remain trusted-user-only. Multi-user accounts are implemented; team roles and tenant isolation are not.
 
-Provider keys stay on the server and are encrypted in stored configuration and run snapshots. Chat messages render generated text as DOM text/code, never as HTML in the app's own document. Backups must preserve both database and encryption key.
+Provider keys stay on the server and are encrypted in stored configuration and run snapshots. Each user's keys are encrypted under the server's key and scoped to that user. Chat messages render generated text as DOM text/code, never as HTML in the app's own document. Backups must preserve both database and encryption key.
 
 ## 9. Evaluation and release criteria
 

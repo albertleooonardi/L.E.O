@@ -72,9 +72,9 @@ def test_rank_prefers_capable_specialist_then_cheapest_tier():
 
 async def test_deep_routes_each_subtask_to_its_specialist(store):
     store.save_connection(Connection(name='Gemini', base_url='http://gemini.test/v1', model='gemini-flash', free=True,
-                                     skills=['frontend', 'design', 'general']).model_dump())
+                                     skills=['frontend', 'design', 'general']).model_dump(), user_id=store.user_id)
     store.save_connection(Connection(name='Coder', base_url='http://coder.test/v1', model='coder', free=True,
-                                     skills=['backend', 'coding']).model_dump())
+                                     skills=['backend', 'coding']).model_dump(), user_id=store.user_id)
     seen = []
     def handler(request):
         body = json.loads(request.content)
@@ -113,9 +113,9 @@ async def test_deep_routes_each_subtask_to_its_specialist(store):
 
 async def test_auto_mode_keeps_simple_requests_to_one_call(store):
     store.save_connection(Connection(name='Small', base_url='http://small.test/v1', model='small', free=True, local=True,
-                                     skills=['general'], tier='light').model_dump())
+                                     skills=['general'], tier='light').model_dump(), user_id=store.user_id)
     store.save_connection(Connection(name='Thinker', base_url='http://think.test/v1', model='thinker', free=True,
-                                     tier='strong', reasoning=True).model_dump())
+                                     tier='strong', reasoning=True).model_dump(), user_id=store.user_id)
     hosts = []
     def handler(request):
         hosts.append(request.url.host)
@@ -135,7 +135,7 @@ def test_skills_api_and_route_preview(client, store):
     preview = client.post('/api/route', json={'prompt': 'Clean this pandas dataframe and plot it'}).json()
     assert preview['skill'] == 'data-science' and preview['candidates'][0]['id'] == analyst['id'] and preview['mode'] == 'quick'
     assert client.delete('/api/skills/data-science').status_code == 200
-    assert store.get_connection(analyst['id'])['skills'] == []
+    assert store.get_connection(analyst['id'], store.user_id)['skills'] == []
 
 
 def test_auto_reviews_only_checkable_work():
@@ -159,8 +159,8 @@ def test_simple_questions_are_light_and_general_work_goes_to_the_lightest_capabl
 async def test_connections_report_calls_and_average_tokens(store):
     from .test_orchestrator import add_provider
     provider = add_provider(store)
-    unused = store.save_connection(Connection(name='Unused', base_url='http://unused.test/v1', model='unused', free=True, priority=90).model_dump())
+    unused = store.save_connection(Connection(name='Unused', base_url='http://unused.test/v1', model='unused', free=True, priority=90).model_dump(), user_id=store.user_id)
     await execute(store, make_run(store), lambda request: sse_response('hello'))
-    rows = {c['id']: c for c in store.with_usage(store.list_connections())}
+    rows = {c['id']: c for c in store.with_usage(store.list_connections(store.user_id))}
     assert rows[provider['id']]['calls'] == 1 and rows[provider['id']]['avg_output_tokens'] is not None
     assert rows[unused['id']]['calls'] == 0 and rows[unused['id']]['avg_output_tokens'] is None

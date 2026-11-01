@@ -6,6 +6,7 @@ import tempfile
 import uuid
 from urllib.parse import urlsplit
 
+import bcrypt
 from cryptography.fernet import Fernet
 from sqlalchemy import (JSON, Boolean, Column, Float, Integer, MetaData, String, Table, Text,
                         and_, create_engine, delete, event, func, insert, inspect, or_, select, update)
@@ -18,18 +19,18 @@ from .schemas import Preferences
 
 metadata = MetaData()
 connections = Table("connections", metadata,
-    Column("id", String(36), primary_key=True), Column("config", JSON, nullable=False),
+    Column("id", String(36), primary_key=True), Column("user_id", String(36)), Column("config", JSON, nullable=False),
     Column("secret", Text), Column("cooldown_until", Float, default=0, nullable=False))
 settings = Table("settings", metadata, Column("id", Integer, primary_key=True), Column("config", JSON, nullable=False))
 conversations = Table("conversations", metadata,
-    Column("id", String(36), primary_key=True), Column("title", Text, nullable=False),
+    Column("id", String(36), primary_key=True), Column("user_id", String(36)), Column("title", Text, nullable=False),
     Column("updated_at", Float, nullable=False), Column("active_run", String(36)))
 messages = Table("messages", metadata,
     Column("id", String(36), primary_key=True), Column("conversation_id", String(36), index=True, nullable=False),
     Column("role", String(20), nullable=False), Column("content", Text, nullable=False),
     Column("created_at", Float, nullable=False), Column("run_id", String(36)))
 runs = Table("runs", metadata,
-    Column("id", String(36), primary_key=True), Column("request_id", String(100), unique=True, nullable=False),
+    Column("id", String(36), primary_key=True), Column("user_id", String(36)), Column("request_id", String(100), unique=True, nullable=False),
     Column("conversation_id", String(36), index=True, nullable=False),
     Column("status", String(20), nullable=False), Column("phase", String(40), nullable=False),
     Column("mode", String(20), nullable=False), Column("prompt", Text, nullable=False),
@@ -51,6 +52,13 @@ calls = Table("calls", metadata,
     Column("created_at", Float, nullable=False), Column("elapsed_ms", Integer, default=0))
 skills = Table("skills", metadata,
     Column("id", String(40), primary_key=True), Column("config", JSON, nullable=False), Column("position", Integer, nullable=False))
+users = Table("users", metadata,
+    Column("id", String(36), primary_key=True), Column("username", String(80), unique=True, nullable=False),
+    Column("password_hash", String(255), nullable=False), Column("created_at", Float, nullable=False))
+user_sessions = Table("user_sessions", metadata,
+    Column("id", String(36), primary_key=True), Column("user_id", String(36), nullable=False),
+    Column("token_hash", String(255), nullable=False), Column("expires_at", Float, nullable=False),
+    Column("created_at", Float, nullable=False))
 
 TERMINAL = {"completed", "failed", "cancelled"}
 
@@ -73,8 +81,11 @@ class Store:
             def configure_sqlite(conn, _):
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA busy_timeout=30000")
+        # Check whether the skills table already exists before create_all, so we
+        # seed starter skills only on brand-new databases (not on every restart).
         seed_skills = not inspect(self.engine).has_table("skills")
         metadata.create_all(self.engine)
+        self._add_user_id_columns()
         key = os.getenv("LEO_ENCRYPTION_KEY")
         if not key:
             path = config.data_dir / "secret.key"
@@ -107,6 +118,18 @@ class Store:
             except IntegrityError:
                 pass
 
+    def _add_user_id_columns(self):
+        """Add user_id to connections, conversations, runs on existing databases."""
+        from sqlalchemy import text
+        inspector = inspect(self.engine)
+        for table, column in (("connections", "user_id"), ("conversations", "user_id"), ("runs", "user_id")):
+            cols = {c["name"] for c in inspector.get_columns(table)}
+            if column not in cols:
+                with self.engine.begin() as db:
+                    db.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} VARCHAR(36)"))
+
+    # -- preferences ------------------------------------------------------
+
     def preferences(self):
         with self.engine.connect() as db:
             return db.execute(select(settings.c.config).where(settings.c.id == 1)).scalar_one()
@@ -119,6 +142,52 @@ class Store:
                     raise ValueError(f"Unknown connection for {name}")
             db.execute(update(settings).where(settings.c.id == 1).values(config=value))
         return value
+
+    # -- users ------------------------------------------------------------
+
+    def create_user(self, username: str, password_hash: str) -> dict:
+        user_id = str(uuid.uuid4())
+        with self.engine.begin() as db:
+            db.execute(insert(users).values(id=user_id, username=username, password_hash=password_hash,
+                                            created_at=time.time()))
+        return self.get_user(user_id)
+
+    def get_user(self, user_id: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(users).where(users.c.id == user_id)).mappings().first()
+        return dict(row) if row else None
+
+    def get_user_by_username(self, username: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(users).where(users.c.username == username)).mappings().first()
+        return dict(row) if row else None
+
+    # -- sessions ---------------------------------------------------------
+
+    def create_session(self, user_id: str, token_hash: str, expires_at: float) -> str:
+        session_id = str(uuid.uuid4())
+        with self.engine.begin() as db:
+            db.execute(insert(user_sessions).values(id=session_id, user_id=user_id, token_hash=token_hash,
+                                                    expires_at=expires_at, created_at=time.time()))
+        return session_id
+
+    def get_session_by_token(self, token: str) -> dict | None:
+        """Look up a session by comparing the token against stored hashes.
+
+        Since we can't reverse the hash, we load all non-expired sessions and
+        check each one. Sessions are expected to be few per user.
+        """
+        now = time.time()
+        with self.engine.connect() as db:
+            rows = db.execute(select(user_sessions).where(user_sessions.c.expires_at > now)).mappings().all()
+        for row in rows:
+            if bcrypt.checkpw(token.encode("utf-8"), row["token_hash"].encode("utf-8")):
+                return dict(row)
+        return None
+
+    def delete_session(self, session_id: str) -> None:
+        with self.engine.begin() as db:
+            db.execute(delete(user_sessions).where(user_sessions.c.id == session_id))
 
     def list_skills(self):
         with self.engine.connect() as db:
@@ -146,9 +215,12 @@ class Store:
                     config = {**row["config"], "skills": [s for s in row["config"]["skills"] if s != skill_id]}
                     db.execute(update(connections).where(connections.c.id == row["id"]).values(config=config))
 
-    def list_connections(self, private=False):
+    def list_connections(self, user_id: str | None = None, private=False):
+        query = select(connections)
+        if user_id:
+            query = query.where(connections.c.user_id == user_id)
         with self.engine.connect() as db:
-            rows = db.execute(select(connections)).mappings().all()
+            rows = db.execute(query).mappings().all()
         return [{"skills": [], "tier": "standard", "reasoning": False, **row["config"], "id": row["id"], "has_key": bool(row["secret"]),
                  "cooldown_until": row["cooldown_until"], **({"secret": row["secret"]} if private else {})} for row in rows]
 
@@ -163,10 +235,19 @@ class Store:
         usage = self.model_usage()
         return [{**c, "calls": 0, "avg_input_tokens": None, "avg_output_tokens": None, **usage.get(c["model"], {})} for c in connections_list]
 
-    def get_connection(self, connection_id, private=False):
-        return next((c for c in self.list_connections(private) if c["id"] == connection_id), None)
+    def get_connection(self, connection_id: str, user_id: str | None = None, private=False):
+        query = select(connections).where(connections.c.id == connection_id)
+        if user_id:
+            query = query.where(connections.c.user_id == user_id)
+        with self.engine.connect() as db:
+            row = db.execute(query).mappings().first()
+        if not row:
+            return None
+        row = dict(row)
+        return {"skills": [], "tier": "standard", "reasoning": False, **row["config"], "id": row["id"], "has_key": bool(row["secret"]),
+                "cooldown_until": row["cooldown_until"], **({"secret": row["secret"]} if private else {})}
 
-    def save_connection(self, value, connection_id=None):
+    def save_connection(self, value, connection_id=None, user_id: str | None = None):
         data = dict(value)
         key = data.pop("api_key", None)
         key_from = data.pop("key_from", None)
@@ -174,14 +255,14 @@ class Store:
         unknown = [s for s in data.get("skills", []) if s not in known]
         if unknown:
             raise ValueError(f"Unknown skill: {', '.join(unknown)}")
-        existing = self.get_connection(connection_id, True) if connection_id else None
+        existing = self.get_connection(connection_id, user_id, True) if connection_id else None
         if connection_id and not existing:
             raise KeyError(connection_id)
         secret = existing.get("secret") if existing else None
         if key is not None:
             secret = self.cipher.encrypt(key.encode()).decode() if key else None
         elif key_from:
-            source = self.get_connection(key_from, True)
+            source = self.get_connection(key_from, user_id, True)
             if not source or not source.get("secret"):
                 raise ValueError("The connection to copy a key from has no saved key")
             # A key is only reused for the host it was saved for, so it can never be sent somewhere new.
@@ -193,12 +274,17 @@ class Store:
             if existing:
                 db.execute(update(connections).where(connections.c.id == connection_id).values(config=data, secret=secret, cooldown_until=0))
             else:
-                db.execute(insert(connections).values(id=connection_id, config=data, secret=secret, cooldown_until=0))
-        return self.get_connection(connection_id)
+                db.execute(insert(connections).values(id=connection_id, user_id=user_id, config=data, secret=secret, cooldown_until=0))
+        return self.get_connection(connection_id, user_id)
 
-    def delete_connection(self, connection_id):
+    def delete_connection(self, connection_id: str, user_id: str | None = None):
         with self.engine.begin() as db:
-            db.execute(delete(connections).where(connections.c.id == connection_id))
+            query = delete(connections).where(connections.c.id == connection_id)
+            if user_id:
+                query = query.where(connections.c.user_id == user_id)
+            result = db.execute(query)
+            if result.rowcount == 0:
+                raise KeyError(connection_id)
             prefs = db.execute(select(settings.c.config).where(settings.c.id == 1)).scalar_one()
             prefs = {k: None if k.endswith("_id") and v == connection_id else v for k, v in prefs.items()}
             db.execute(update(settings).where(settings.c.id == 1).values(config=prefs))
@@ -217,34 +303,48 @@ class Store:
             if row:
                 db.execute(update(connections).where(connections.c.id == connection_id).values(config={**row[0], "reasoning": True}))
 
-    def list_conversations(self):
+    def list_conversations(self, user_id: str | None = None):
+        query = select(conversations)
+        if user_id:
+            query = query.where(conversations.c.user_id == user_id)
+        query = query.order_by(conversations.c.updated_at.desc())
         with self.engine.connect() as db:
-            return [dict(row) for row in db.execute(select(conversations).order_by(conversations.c.updated_at.desc())).mappings()]
+            return [dict(row) for row in db.execute(query).mappings()]
 
-    def conversation(self, conversation_id):
+    def conversation(self, conversation_id: str, user_id: str | None = None):
+        query = select(conversations).where(conversations.c.id == conversation_id)
+        if user_id:
+            query = query.where(conversations.c.user_id == user_id)
         with self.engine.connect() as db:
-            row = db.execute(select(conversations).where(conversations.c.id == conversation_id)).mappings().first()
+            row = db.execute(query).mappings().first()
             if not row:
                 return None
             history = [dict(m) for m in db.execute(select(messages).where(messages.c.conversation_id == conversation_id).order_by(messages.c.created_at, messages.c.id)).mappings()]
             history_runs = [self.public_run(dict(r)) for r in db.execute(select(runs).where(runs.c.conversation_id == conversation_id).order_by(runs.c.created_at)).mappings()]
         return {**dict(row), "messages": history, "runs": history_runs}
 
-    def delete_conversation(self, conversation_id):
+    def delete_conversation(self, conversation_id: str, user_id: str | None = None):
         with self.engine.begin() as db:
-            active = db.execute(select(conversations.c.active_run).where(conversations.c.id == conversation_id)).scalar()
+            query = select(conversations.c.active_run).where(conversations.c.id == conversation_id)
+            if user_id:
+                query = query.where(conversations.c.user_id == user_id)
+            active = db.execute(query).scalar()
             if active:
                 raise Conflict("Stop the active run before deleting this conversation")
             ids = select(runs.c.id).where(runs.c.conversation_id == conversation_id)
             db.execute(delete(events).where(events.c.run_id.in_(ids)))
             db.execute(delete(calls).where(calls.c.run_id.in_(ids)))
             db.execute(delete(runs).where(runs.c.conversation_id == conversation_id))
-            db.execute(delete(messages).where(messages.c.conversation_id == conversation_id))
-            db.execute(delete(conversations).where(conversations.c.id == conversation_id))
+            query = delete(messages).where(messages.c.conversation_id == conversation_id)
+            db.execute(query)
+            query = delete(conversations).where(conversations.c.id == conversation_id)
+            if user_id:
+                query = query.where(conversations.c.user_id == user_id)
+            db.execute(query)
 
-    def create_run(self, request):
+    def create_run(self, request, user_id: str):
         prefs = self.preferences()
-        providers = self.list_connections(True)
+        providers = self.list_connections(user_id, True)
         eligible = [p for p in providers if p["enabled"] and (p["free"] or prefs["allow_paid"])]
         if not eligible:
             raise ValueError("Add and enable a connection in Settings. Paid connections also require paid usage to be enabled.")
@@ -262,10 +362,10 @@ class Store:
                 if not claimed.rowcount:
                     raise Conflict("Conversation is missing or already has an active run")
             else:
-                db.execute(insert(conversations).values(id=conversation_id, title=request.prompt[:70], updated_at=now, active_run=run_id))
+                db.execute(insert(conversations).values(id=conversation_id, user_id=user_id, title=request.prompt[:70], updated_at=now, active_run=run_id))
             history = [{"role": r.role, "content": r.content} for r in db.execute(select(messages).where(messages.c.conversation_id == conversation_id).order_by(messages.c.created_at, messages.c.id))]
             db.execute(insert(messages).values(id=str(uuid.uuid4()), conversation_id=conversation_id, role="user", content=request.prompt, created_at=now, run_id=run_id))
-            row = dict(id=run_id, request_id=request.request_id, conversation_id=conversation_id,
+            row = dict(id=run_id, request_id=request.request_id, conversation_id=conversation_id, user_id=user_id,
                        status="queued", phase="queued", mode=mode, prompt=request.prompt, created_at=now,
                        updated_at=now, lease_until=0, cancel_requested=False,
                        state={"preferences": prefs, "providers": providers, "skills": self.list_skills(), "history": history, "completed": {}, "repair": 0,
@@ -275,39 +375,49 @@ class Store:
             db.execute(insert(events).values(run_id=run_id, kind="status", data={"phase": "queued", "message": "Waiting for worker"}, created_at=now))
         return self.public_run(row)
 
-    def get_run(self, run_id, private=False):
+    def get_run(self, run_id: str, user_id: str | None = None, private=False):
+        query = select(runs).where(runs.c.id == run_id)
+        if user_id:
+            query = query.where(runs.c.user_id == user_id)
         with self.engine.connect() as db:
-            row = db.execute(select(runs).where(runs.c.id == run_id)).mappings().first()
+            row = db.execute(query).mappings().first()
         return (dict(row) if private else self.public_run(dict(row))) if row else None
 
     @staticmethod
     def public_run(row):
         return {k: v for k, v in row.items() if k not in {"state", "lease_owner", "lease_until", "request_id"}}
 
-    def claim(self, owner):
+    def claim(self, owner, user_id: str | None = None):
         now = time.time()
         ready = and_(runs.c.status.in_(["queued", "running"]), runs.c.lease_until < now)
+        if user_id:
+            ready = and_(ready, runs.c.user_id == user_id)
         with self.engine.begin() as db:
             candidate = db.execute(select(runs.c.id, runs.c.status).where(ready).order_by(runs.c.created_at).limit(1)).first()
             if not candidate:
                 return None
             row = db.execute(update(runs).where(runs.c.id == candidate.id, ready).values(status="running", lease_owner=owner, lease_until=now + 30, updated_at=now).returning(runs.c.id)).scalar()
             if row and candidate.status == "running":
-                # A previous worker lost its lease. Its in-flight calls may have been billed: keep their reservations.
                 interrupted = db.execute(update(calls).where(calls.c.run_id == row, calls.c.status == "started").values(status="interrupted")).rowcount
                 db.execute(insert(events).values(run_id=row, kind="warning", created_at=now, data={
                     "message": "Resumed after a worker interruption. Completed stages are reused" +
                                (f"; {interrupted} interrupted call(s) keep their reserved usage." if interrupted else ".")}))
-        return self.get_run(row, True) if row else None
+        return self.get_run(row, user_id, True) if row else None
 
-    def heartbeat(self, run_id, owner):
+    def heartbeat(self, run_id, owner, user_id: str | None = None):
         with self.engine.begin() as db:
-            result = db.execute(update(runs).where(runs.c.id == run_id, runs.c.lease_owner == owner, runs.c.status == "running").values(lease_until=time.time() + 30))
+            query = update(runs).where(runs.c.id == run_id, runs.c.lease_owner == owner, runs.c.status == "running")
+            if user_id:
+                query = query.where(runs.c.user_id == user_id)
+            result = db.execute(query.values(lease_until=time.time() + 30))
             return bool(result.rowcount)
 
-    def checkpoint(self, run_id, owner, **values):
+    def checkpoint(self, run_id, owner, user_id: str | None = None, **values):
         with self.engine.begin() as db:
-            result = db.execute(update(runs).where(runs.c.id == run_id, runs.c.lease_owner == owner, runs.c.status == "running").values(**values, updated_at=time.time()))
+            query = update(runs).where(runs.c.id == run_id, runs.c.lease_owner == owner, runs.c.status == "running")
+            if user_id:
+                query = query.where(runs.c.user_id == user_id)
+            result = db.execute(query.values(**values, updated_at=time.time()))
             if not result.rowcount:
                 raise LostLease()
 
@@ -319,42 +429,58 @@ class Store:
         with self.engine.connect() as db:
             return [dict(r) for r in db.execute(select(events).where(events.c.run_id == run_id, events.c.id > after).order_by(events.c.id).limit(200)).mappings()]
 
-    def cancel(self, run_id):
+    def cancel(self, run_id: str, user_id: str | None = None):
         with self.engine.begin() as db:
-            queued = db.execute(update(runs).where(runs.c.id == run_id, runs.c.status == "queued").values(
+            query = update(runs).where(runs.c.id == run_id, runs.c.status == "queued")
+            if user_id:
+                query = query.where(runs.c.user_id == user_id)
+            result = db.execute(query.values(
                 status="cancelled", phase="cancelled", cancel_requested=True, error="Stopped by user", updated_at=time.time()
-            ).returning(runs.c.conversation_id)).scalar()
+            ).returning(runs.c.conversation_id))
+            queued = result.scalar()
             if queued:
                 db.execute(update(conversations).where(conversations.c.id == queued, conversations.c.active_run == run_id).values(active_run=None))
                 db.execute(insert(events).values(run_id=run_id, kind="done", data={"status": "cancelled", "output": "", "error": "Stopped by user", "usage": {}}, created_at=time.time()))
                 return
-            db.execute(update(runs).where(runs.c.id == run_id, runs.c.status.not_in(TERMINAL)).values(cancel_requested=True))
+            query = update(runs).where(runs.c.id == run_id, runs.c.status.not_in(TERMINAL))
+            if user_id:
+                query = query.where(runs.c.user_id == user_id)
+            db.execute(query.values(cancel_requested=True))
 
-    def finish(self, run_id, owner, status, output="", error=None, usage=None):
+    def finish(self, run_id, owner, status, output="", error=None, usage=None, user_id: str | None = None):
         with self.engine.begin() as db:
-            row = db.execute(update(runs).where(runs.c.id == run_id, runs.c.lease_owner == owner, runs.c.status == "running").values(
+            query = update(runs).where(runs.c.id == run_id, runs.c.lease_owner == owner, runs.c.status == "running")
+            if user_id:
+                query = query.where(runs.c.user_id == user_id)
+            result = db.execute(query.values(
                 status=status, phase=status, output=output, error=error, usage=usage or {}, updated_at=time.time(), lease_until=0
-            ).returning(runs.c.conversation_id)).scalar()
+            ).returning(runs.c.conversation_id))
+            row = result.scalar()
             if not row:
                 raise LostLease()
-            # Calls cut off by Stop or a time limit stay reserved; label them instead of leaving them "started".
             db.execute(update(calls).where(calls.c.run_id == run_id, calls.c.status == "started").values(status="interrupted"))
             if output:
                 db.execute(insert(messages).values(id=str(uuid.uuid4()), conversation_id=row, role="assistant", content=output, created_at=time.time(), run_id=run_id))
             db.execute(update(conversations).where(conversations.c.id == row, conversations.c.active_run == run_id).values(active_run=None, updated_at=time.time()))
             db.execute(insert(events).values(run_id=run_id, kind="done", data={"status": status, "output": output, "error": error, "usage": usage or {}}, created_at=time.time()))
 
-    def call_rows(self, run_id):
+    def call_rows(self, run_id: str, user_id: str | None = None):
+        query = select(calls).where(calls.c.run_id == run_id)
+        if user_id:
+            query = query.where(calls.c.run_id.in_(select(runs.c.id).where(runs.c.user_id == user_id)))
         with self.engine.connect() as db:
-            return [dict(r) for r in db.execute(select(calls).where(calls.c.run_id == run_id).order_by(calls.c.created_at)).mappings()]
+            return [dict(r) for r in db.execute(query.order_by(calls.c.created_at)).mappings()]
 
-    def usage_report(self, conversation_id=None, recent=60):
+    def usage_report(self, conversation_id: str | None = None, recent: int = 60, user_id: str | None = None):
         """Per-model and per-conversation usage from the call ledger, plus each conversation's latest context size.
 
         With a conversation ID, every figure (and the call log) covers only that chat."""
         query = select(calls, runs.c.conversation_id, runs.c.mode, runs.c.status.label("run_status")).join(runs, runs.c.id == calls.c.run_id)
+        if user_id:
+            query = query.where(runs.c.user_id == user_id)
         if conversation_id:
-            query, recent = query.where(runs.c.conversation_id == conversation_id), None
+            query = query.where(runs.c.conversation_id == conversation_id)
+            recent = None
         with self.engine.connect() as db:
             rows = db.execute(query.order_by(calls.c.created_at)).mappings().all()
             titles = dict(db.execute(select(conversations.c.id, conversations.c.title)).all())

@@ -82,7 +82,7 @@ async def test_research_reads_top_pages_and_survives_a_broken_one():
 
 
 def research_setup(store, **prefs):
-    store.save_connection(Connection(name='Model', base_url='http://model.test/v1', model='m', free=True, skills=['general', 'research']).model_dump())
+    store.save_connection(Connection(name='Model', base_url='http://model.test/v1', model='m', free=True, skills=['general', 'research']).model_dump(), user_id=store.user_id)
     store.set_preferences({**store.preferences(), 'search_url': 'http://search.test', **prefs})
 
 
@@ -158,11 +158,11 @@ async def test_deep_plan_gives_sources_only_to_the_tool_task(store):
 async def test_recovery_does_not_search_again(store):
     research_setup(store)
     run = make_run(store, mode='auto', prompt='What is the latest Python version?')
-    claimed = store.claim('crashed')
+    claimed = store.claim('crashed', store.user_id)
     state = claimed['state']
     state['research'] = {'pre': {'queries': ['q'], 'results': [], 'errors': [], 'sources': [{'n': 1, 'title': 'Saved', 'url': 'https://saved.test', 'text': 'Python 9'}]}}
     state['route'] = {'skill': 'general', 'difficulty': 'light', 'skills': [], 'signals': [], 'search': True, 'urls': [], 'mode': 'quick', 'auto': True}
-    store.checkpoint(run['id'], 'crashed', state=state)
+    store.checkpoint(run['id'], 'crashed', store.user_id, state=state)
     from sqlalchemy import update
     from backend.store import runs
     with store.engine.begin() as db:

@@ -16,17 +16,17 @@ def test_keys_are_encrypted_and_never_returned(client, store):
     assert saved['has_key']
     assert 'secret-value' not in response.text
     assert 'secret-value' not in client.get('/api/connections').text
-    assert store.decrypt(store.get_connection(saved['id'], True)) == 'secret-value-never-echo'
+    assert store.decrypt(store.get_connection(saved['id'], store.user_id, True)) == 'secret-value-never-echo'
     with store.engine.connect() as db:
         from backend.store import connections
         from sqlalchemy import select
         assert 'secret-value' not in str(db.execute(select(connections)).all())
     body['api_key'] = None
     client.put('/api/connections/' + saved['id'], json=body)
-    assert store.get_connection(saved['id'])['has_key']
+    assert store.get_connection(saved['id'], store.user_id)['has_key']
     body['api_key'] = ''
     client.put('/api/connections/' + saved['id'], json=body)
-    assert not store.get_connection(saved['id'])['has_key']
+    assert not store.get_connection(saved['id'], store.user_id)['has_key']
 
 
 def test_invalid_settings_and_urls_do_not_echo_secrets(client):
@@ -53,13 +53,13 @@ def test_cancel_queued_job_without_worker(client, store):
     add_provider(store)
     run = make_run(store)
     assert client.post(f"/api/runs/{run['id']}/cancel").status_code == 200
-    assert store.get_run(run['id'])['status'] == 'cancelled'
-    assert store.conversation(run['conversation_id'])['active_run'] is None
+    assert store.get_run(run['id'], store.user_id)['status'] == 'cancelled'
+    assert store.conversation(run['conversation_id'], store.user_id)['active_run'] is None
     assert client.delete(f"/api/conversations/{run['conversation_id']}").status_code == 200
 
 
 def test_paid_connections_require_opt_in(client, store):
-    store.save_connection(Connection(name='Paid', base_url='https://example.test/v1', model='gpt', free=False).model_dump())
+    store.save_connection(Connection(name='Paid', base_url='https://example.test/v1', model='gpt', free=False).model_dump(), user_id=store.user_id)
     assert client.post('/api/runs', json={'prompt': 'Hi', 'request_id': str(uuid.uuid4())}).status_code == 400
 
 
@@ -80,18 +80,18 @@ def test_access_token_and_origin_guards(store):
 def test_deleting_connection_clears_role(store):
     provider = add_provider(store)
     store.set_preferences({**store.preferences(), 'generator_id': provider['id']})
-    store.delete_connection(provider['id'])
+    store.delete_connection(provider['id'], store.user_id)
     assert store.preferences()['generator_id'] is None
 
 
 def test_storage_and_keys_survive_reinitialization(store):
     from backend.store import Store
-    provider = store.save_connection(Connection(name='Persistent', base_url='http://test/v1', model='test', api_key='stored-secret', free=True).model_dump())
+    provider = store.save_connection(Connection(name='Persistent', base_url='http://test/v1', model='test', api_key='stored-secret', free=True).model_dump(), user_id=store.user_id)
     run = make_run(store)
     reopened = Store(store.config)
     try:
-        assert reopened.decrypt(reopened.get_connection(provider['id'], True)) == 'stored-secret'
-        assert reopened.get_run(run['id'])['status'] == 'queued'
+        assert reopened.decrypt(reopened.get_connection(provider['id'], None, True)) == 'stored-secret'
+        assert reopened.get_run(run['id'], None)['status'] == 'queued'
     finally:
         reopened.engine.dispose()
 
@@ -110,10 +110,10 @@ def test_one_key_serves_many_models_on_the_same_host_only(client, store):
     first = client.post('/api/connections', json=Connection(name='OR A', base_url='https://openrouter.ai/api/v1', model='a', api_key='shared-secret-value').model_dump()).json()
     second = client.post('/api/connections', json=Connection(name='OR B', base_url='https://openrouter.ai/api/v1', model='b', key_from=first['id']).model_dump())
     assert second.status_code == 201 and second.json()['has_key'] and 'shared-secret' not in second.text
-    assert store.decrypt(store.get_connection(second.json()['id'], True)) == 'shared-secret-value'
+    assert store.decrypt(store.get_connection(second.json()['id'], store.user_id, True)) == 'shared-secret-value'
     stolen = client.post('/api/connections', json=Connection(name='Elsewhere', base_url='https://evil.test/v1', model='x', key_from=first['id']).model_dump())
     assert stolen.status_code == 400 and 'same provider host' in stolen.json()['detail']
-    assert 'key_from' not in store.get_connection(second.json()['id'])
+    assert 'key_from' not in store.get_connection(second.json()['id'], store.user_id)
 
 
 def test_search_test_explains_missing_setup_and_settings_validate_url(client):

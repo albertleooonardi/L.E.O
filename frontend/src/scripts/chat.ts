@@ -32,6 +32,7 @@ let submitting = false;
 let ready = false;
 let toastTimer: ReturnType<typeof setTimeout>;
 let navigation = 0;
+let currentUser: { id: string; username: string } | null = null;
 
 function toast(text: string) {
   el('toast').textContent = text; el('toast').hidden = false;
@@ -39,13 +40,16 @@ function toast(text: string) {
 }
 function errorText(error: unknown) { return error instanceof Error ? error.message : 'Something went wrong'; }
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`/api${path}`, { ...init, headers: { 'Content-Type': 'application/json', ...init.headers } });
+  const response = await fetch(`/api${path}`, { ...init, credentials: 'include', headers: { 'Content-Type': 'application/json', ...init.headers } });
+  if (response.status === 401) {
+    window.location.href = '/login';
+    throw new Error('Session expired');
+  }
   const data = await response.json().catch(() => ({ detail: 'Server returned an unreadable response' }));
-  if (response.status === 401) { if (!dialog('login-dialog').open) dialog('login-dialog').showModal(); }
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `Request failed (${response.status})`);
   return data;
 }
-const send = <T>(path: string, method: string, body?: unknown) => api<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+const send = <T>(path: string, method: string, body?: unknown) => api<T>(path, { method, credentials: 'include', ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 function rememberChat() { try { activeId ? localStorage.setItem('leo-active-chat', activeId) : localStorage.removeItem('leo-active-chat'); } catch {} }
 function closeStream() { stream?.close(); stream = null; activeRun = null; draft = ''; clearInterval(liveClock); updateSend(); }
 function updateSend() {
@@ -506,6 +510,7 @@ field('allow-paid').addEventListener('change', syncPaidLimit);
 const numericFields = ['max_cost', 'max_calls', 'max_repairs', 'max_output_tokens', 'context_tokens', 'token_budget', 'timeout_seconds', 'max_run_seconds'] as const;
 async function loadSettings() {
   [connections, preferences, presets, skills] = await Promise.all([api<Provider[]>('/connections'), api<Preferences>('/settings'), api<Preset[]>('/presets'), api<Skill[]>('/skills')]);
+  await loadUser();
   select('provider-preset').replaceChildren(...presets.map(p => new Option(p.name, p.id)));
   renderProviders(); renderSkills();
   setRouting(preferences.routing); select('mode-select').value = preferences.mode; select('composer-mode').value = preferences.mode;
@@ -514,6 +519,25 @@ async function loadSettings() {
   select('web-search').value = preferences.web_search || 'auto'; field('search-url').value = preferences.search_url || ''; field('search-pages').value = String(preferences.search_pages ?? 3);
   field('allow-paid').checked = preferences.allow_paid; syncPaidLimit(); el<HTMLTextAreaElement>('system-prompt').value = preferences.system_prompt;
   for (const key of numericFields) field(key.replaceAll('_', '-')).value = String(preferences[key]);
+}
+
+async function loadUser() {
+  try {
+    const user = await api<{ id: string; username: string; created_at: number }>('/auth/me');
+    currentUser = user;
+    const badge = el('user-badge');
+    const name = el('user-badge-name');
+    if (badge && name) { badge.hidden = false; name.textContent = user.username; }
+  } catch {
+    currentUser = null;
+    const badge = el('user-badge');
+    if (badge) badge.hidden = true;
+  }
+}
+
+async function doLogout() {
+  try { await api('/auth/logout', { method: 'POST' }); } catch {}
+  window.location.href = '/login';
 }
 function applyPreset() {
   const preset = presets.find(p => p.id === select('provider-preset').value); if (!preset) return;
@@ -806,4 +830,6 @@ window.addEventListener('pointermove', event => {
 }, { passive: true });
 document.documentElement.addEventListener('pointerleave', () => ambient.style.setProperty('--pointer-active', '0'));
 try { if (localStorage.getItem('leo-usage-panel') === 'open') setUsagePanel(true); } catch {}
+el('sidebar-logout')?.addEventListener('click', doLogout);
+el('header-logout')?.addEventListener('click', doLogout);
 syncSidebar(); resizePrompt(); void initialize();

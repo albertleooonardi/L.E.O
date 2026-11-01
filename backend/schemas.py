@@ -80,6 +80,27 @@ class Preferences(StrictModel):
         return self
 
 
+class UserRegister(StrictModel):
+    username: str = Field(min_length=3, max_length=80)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class UserLogin(StrictModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class User(StrictModel):
+    id: str
+    username: str
+    created_at: float
+
+
+class Token(StrictModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
 class RunInput(StrictModel):
     prompt: str = Field(min_length=1, max_length=30000)
     conversation_id: str | None = None

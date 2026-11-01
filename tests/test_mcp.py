@@ -34,7 +34,7 @@ def test_protocol_handshake_and_errors(client):
 
 
 def test_leo_ask_returns_answer_routing_and_usage(client, store, monkeypatch):
-    store.save_connection(Connection(name='Web', base_url='http://web.test/v1', model='web-model', free=True, skills=['frontend']).model_dump())
+    store.save_connection(Connection(name='Web', base_url='http://web.test/v1', model='web-model', free=True, skills=['frontend']).model_dump(), user_id=store.user_id)
     transport = httpx.MockTransport(lambda r: sse_response('```html\n<h1>Coffee</h1>\n```'))
     # The MCP tool polls the API; run the queued job when it waits.
     monkeypatch.setattr(mcp_server.time, "sleep", lambda _: asyncio.run(process_one(store, 'mcp-test', transport)))
@@ -47,7 +47,9 @@ def test_leo_ask_returns_answer_routing_and_usage(client, store, monkeypatch):
 
 
 def test_stdio_server_against_live_api(store):
-    store.save_connection(Connection(name='Coder', base_url='http://coder.test/v1', model='coder', free=True, skills=['coding'], tier='standard').model_dump())
+    store.save_connection(Connection(name='Coder', base_url='http://coder.test/v1', model='coder', free=True, skills=['coding'], tier='standard').model_dump(), user_id=store.user_id)
+    # Set the legacy token so the MCP subprocess can authenticate via bearer token.
+    store.config.api_token = 'test-mcp-token'
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -56,7 +58,7 @@ def test_stdio_server_against_live_api(store):
     thread.start()
     while not server.started:
         time.sleep(0.05)
-    env = {**os.environ, "LEO_API_URL": f"http://127.0.0.1:{port}"}
+    env = {**os.environ, "LEO_API_URL": f"http://127.0.0.1:{port}", "LEO_API_TOKEN": "test-mcp-token"}
     process = subprocess.Popen([sys.executable, "-m", "backend.mcp_server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, env=env, cwd=os.path.dirname(os.path.dirname(__file__)))
     try:

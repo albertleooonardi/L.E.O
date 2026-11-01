@@ -15,27 +15,28 @@ async def process_one(store, owner, transport=None):
     run = store.claim(owner)
     if not run:
         return False
+    user_id = run.get("user_id")
     task = asyncio.create_task(Orchestrator(store, run, owner, transport).execute())
     try:
         while not task.done():
             done, _ = await asyncio.wait({task}, timeout=0.5)
             if done:
                 break
-            current = store.get_run(run["id"], True)
-            if not current or not store.heartbeat(run["id"], owner):
+            current = store.get_run(run["id"], user_id, True)
+            if not current or not store.heartbeat(run["id"], owner, user_id):
                 task.cancel()
                 break
             if current["cancel_requested"]:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 engine = Orchestrator(store, current, owner, transport)
-                store.finish(run["id"], owner, "cancelled", error="Stopped by user", usage=engine.usage())
+                store.finish(run["id"], owner, "cancelled", error="Stopped by user", usage=engine.usage(), user_id=user_id)
                 return True
             if time.time() - run["created_at"] > run["state"]["preferences"]["max_run_seconds"]:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 engine = Orchestrator(store, current, owner, transport)
-                store.finish(run["id"], owner, "failed", error="Run time limit reached", usage=engine.usage())
+                store.finish(run["id"], owner, "failed", error="Run time limit reached", usage=engine.usage(), user_id=user_id)
                 return True
         await asyncio.gather(task, return_exceptions=False)
     finally:

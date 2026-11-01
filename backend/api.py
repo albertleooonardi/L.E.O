@@ -3,7 +3,7 @@ import json
 import secrets
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -12,17 +12,28 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .auth import Auth, CurrentUser
 from .catalog import PRESETS
 from .config import Config
 from .providers import ProviderError, list_models
 from .router import choose_mode, classify, rank
+from .schemas import (AdoptModels, Connection, Preferences, RouteInput, RunInput, Skill,
+                      Token, UserLogin, UserRegister, User)
+from .store import Conflict, Store, TERMINAL
 from .tools import ToolError, web_search
 from .discovery import check_access, discover
-from .schemas import AdoptModels, Connection, Preferences, RouteInput, RunInput, Skill
-from .store import Conflict, Store, TERMINAL
 
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "testserver"}
+
+# Routes that do not require a user session (auth, health, docs).
+PUBLIC_API_PATHS = {
+    "/api/health",
+    "/api/auth/register",
+    "/api/auth/login",
+    "/api/auth/token",
+    "/api/session",
+}
 
 
 def create_app(config=None, store=None):
@@ -33,6 +44,7 @@ def create_app(config=None, store=None):
         raise RuntimeError(f"LEO_ALLOWED_HOSTS includes {', '.join(remote)}. Set LEO_API_TOKEN before serving a remote "
                            "hostname, and put HTTPS in front of L.E.O.")
     store = store or Store(config)
+    auth = Auth(store, config)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -41,6 +53,7 @@ def create_app(config=None, store=None):
 
     app = FastAPI(title="L.E.O.", version="0.1.0", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json")
     app.state.store = store
+    app.state.auth = auth
     app.add_middleware(CORSMiddleware, allow_origins=config.origins, allow_credentials=True,
                        allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "Authorization", "Last-Event-ID"])
 
@@ -50,11 +63,28 @@ def create_app(config=None, store=None):
             origin = request.headers.get("origin")
             if origin and origin not in config.origins:
                 return JSONResponse({"detail": "Origin is not allowed"}, status_code=403)
-            # Bind to loopback by default. For remote hosting, require a configured token.
-            if request.method != "OPTIONS" and request.url.path not in {"/api/health", "/api/session"} and config.api_token:
-                supplied = request.headers.get("authorization", "").removeprefix("Bearer ") or request.cookies.get("leo_session", "")
-                if not secrets.compare_digest(supplied, config.api_token):
-                    return JSONResponse({"detail": "Sign in with the server access token"}, status_code=401)
+
+            # Auth: session cookie or bearer token (LEO_API_TOKEN for admin/MCP).
+            is_public = request.url.path in PUBLIC_API_PATHS
+            session_token = request.cookies.get("leo_session", "")
+            bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
+
+            if not is_public:
+                user = None
+                if session_token:
+                    # Legacy single-token: the session cookie value itself may be the LEO_API_TOKEN.
+                    if config.api_token and secrets.compare_digest(session_token, config.api_token):
+                        user = CurrentUser(id="system", username="system", is_authenticated=True)
+                    else:
+                        user = auth.current_user(session_token)
+                if not user and bearer and config.api_token and secrets.compare_digest(bearer, config.api_token):
+                    # Legacy server-level bearer token: treated as admin access.
+                    user = CurrentUser(id="system", username="system", is_authenticated=True)
+                if not user:
+                    return JSONResponse({"detail": "Sign in"}, status_code=401)
+                # Attach user to request state for route handlers.
+                request.state.user = user
+
         response = await call_next(request)
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
@@ -62,11 +92,13 @@ def create_app(config=None, store=None):
         response.headers["Referrer-Policy"] = "same-origin"
         return response
 
+    def current_user(request: Request) -> CurrentUser:
+        return request.state.user
+
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.hosts)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
-        # Pydantic's default error payload includes submitted input (which may contain keys).
         detail = "; ".join(f"{'.'.join(str(p) for p in e['loc'][1:])}: {e['msg']}" for e in exc.errors())
         return JSONResponse({"detail": detail}, status_code=422)
 
@@ -86,11 +118,54 @@ def create_app(config=None, store=None):
     def health():
         return {"status": "ok", "version": "0.1.0", "authentication_required": bool(config.api_token)}
 
+    # ---------------- auth ----------------
+
+    @app.post("/api/auth/register", status_code=201, response_model=User)
+    def register(body: UserRegister):
+        if store.get_user_by_username(body.username):
+            raise HTTPException(400, "Username already taken")
+        user = store.create_user(body.username, Auth.hash_password(body.password))
+        return {"id": user["id"], "username": user["username"], "created_at": user["created_at"]}
+
+    class LoginResponse(BaseModel):
+        user: User
+        token: str
+
+    @app.post("/api/auth/login", response_model=LoginResponse)
+    def login(body: UserLogin, request: Request):
+        user = auth.authenticate_user(body.username, body.password)
+        if not user:
+            raise HTTPException(401, "Invalid username or password")
+        token = auth.create_session(user["id"])
+        response = JSONResponse({"user": {"id": user["id"], "username": user["username"], "created_at": user["created_at"]},
+                                 "token": token})
+        response.set_cookie("leo_session", token, httponly=True, samesite="strict",
+                            secure=request.url.scheme == "https", max_age=30 * 24 * 60 * 60)
+        return response
+
+    @app.post("/api/auth/logout")
+    def logout(request: Request, user: CurrentUser = Depends(current_user)):
+        token = request.cookies.get("leo_session", "")
+        auth.delete_session(token)
+        response = JSONResponse({"ok": True})
+        response.delete_cookie("leo_session")
+        return response
+
+    @app.get("/api/auth/me", response_model=User)
+    def me(user: CurrentUser = Depends(current_user)):
+        if user.id == "system":
+            raise HTTPException(403, "Use a user session")
+        db_user = store.get_user(user.id)
+        if not db_user:
+            raise HTTPException(401, "User not found")
+        return {"id": db_user["id"], "username": db_user["username"], "created_at": db_user["created_at"]}
+
+    # Legacy single-token session (kept for MCP/CLI compatibility).
     class Login(BaseModel):
         token: str = Field(max_length=4096, repr=False)
 
     @app.post("/api/session")
-    def login(body: Login, request: Request):
+    def legacy_login(body: Login, request: Request):
         if not config.api_token or not secrets.compare_digest(body.token, config.api_token):
             raise HTTPException(401, "Invalid access token")
         response = JSONResponse({"ok": True})
@@ -98,7 +173,7 @@ def create_app(config=None, store=None):
         return response
 
     @app.delete("/api/session")
-    def logout():
+    def legacy_logout():
         response = JSONResponse({"ok": True})
         response.delete_cookie("leo_session")
         return response
@@ -112,29 +187,33 @@ def create_app(config=None, store=None):
         return store.preferences()
 
     @app.put("/api/settings")
-    def write_settings(body: Preferences):
+    def write_settings(body: Preferences, user: CurrentUser = Depends(current_user)):
         return store.set_preferences(body.model_dump())
 
     @app.get("/api/connections")
-    def read_connections():
-        return store.with_usage(store.list_connections())
+    def read_connections(user: CurrentUser = Depends(current_user)):
+        return store.with_usage(store.list_connections(user.id if user.id != "system" else None))
 
     @app.post("/api/connections", status_code=201)
-    def create_connection(body: Connection):
-        return store.save_connection(body.model_dump())
+    def create_connection(body: Connection, user: CurrentUser = Depends(current_user)):
+        uid = user.id if user.id != "system" else None
+        return store.save_connection(body.model_dump(), user_id=uid)
 
     @app.put("/api/connections/{connection_id}")
-    def edit_connection(connection_id: str, body: Connection):
-        return store.save_connection(body.model_dump(), connection_id)
+    def edit_connection(connection_id: str, body: Connection, user: CurrentUser = Depends(current_user)):
+        uid = user.id if user.id != "system" else None
+        return store.save_connection(body.model_dump(), connection_id, user_id=uid)
 
     @app.delete("/api/connections/{connection_id}")
-    def delete_connection(connection_id: str):
-        store.delete_connection(connection_id)
+    def delete_connection(connection_id: str, user: CurrentUser = Depends(current_user)):
+        uid = user.id if user.id != "system" else None
+        store.delete_connection(connection_id, user_id=uid)
         return {"ok": True}
 
     @app.post("/api/connections/{connection_id}/test")
-    async def test_connection(connection_id: str):
-        provider = store.get_connection(connection_id, True)
+    async def test_connection(connection_id: str, user: CurrentUser = Depends(current_user)):
+        uid = user.id if user.id != "system" else None
+        provider = store.get_connection(connection_id, uid, True)
         if not provider:
             raise HTTPException(404, "Connection not found")
         try:
@@ -172,14 +251,15 @@ def create_app(config=None, store=None):
         return {"ok": True, "results": len(found), "titles": [r["title"] for r in found[:3]]}
 
     @app.post("/api/route")
-    def preview_route(body: RouteInput):
+    def preview_route(body: RouteInput, user: CurrentUser = Depends(current_user)):
         """What the routing head would decide for this prompt, without calling a model."""
         prefs = store.preferences()
         skills = [s for s in store.list_skills() if s.get("enabled", True)]
         route = classify(body.prompt, skills)
         mode = body.mode or prefs.get("mode", "auto")
         mode = choose_mode(route) if mode == "auto" else mode
-        eligible = store.with_usage([c for c in store.list_connections() if c["enabled"] and (c["free"] or prefs["allow_paid"])])
+        uid = user.id if user.id != "system" else None
+        eligible = store.with_usage([c for c in store.list_connections(uid) if c["enabled"] and (c["free"] or prefs["allow_paid"])])
         ordered, reason = rank(eligible, route["skill"], route["difficulty"], prefs) if prefs.get("smart_routing", True) else (eligible, "smart routing is off")
         return {**route, "mode": mode, "reason": reason,
                 "note": "Deep mode asks the planner to label each subtask; those subtasks are routed the same way." if mode == "deep" else "",
@@ -187,27 +267,29 @@ def create_app(config=None, store=None):
                                 "reasoning": c["reasoning"]} for c in ordered]}
 
     @app.post("/api/connections/{connection_id}/discover")
-    async def discover_models(connection_id: str):
+    async def discover_models(connection_id: str, user: CurrentUser = Depends(current_user)):
         """Every model this connection's key can use (OpenRouter: free only), with suggested routing profiles."""
-        source = store.get_connection(connection_id, True)
+        uid = user.id if user.id != "system" else None
+        source = store.get_connection(connection_id, uid, True)
         if not source:
             raise HTTPException(404, "Connection not found")
         try:
             found = await discover(source, store.decrypt(source))
         except ProviderError as exc:
             raise HTTPException(400, str(exc)) from exc
-        added = {c["model"] for c in store.list_connections() if c["base_url"] == source["base_url"]}
+        added = {c["model"] for c in store.list_connections(uid) if c["base_url"] == source["base_url"]}
         for model in found["models"]:
             model["added"] = model["model"] in added
         return found
 
     @app.post("/api/connections/{connection_id}/adopt", status_code=201)
-    async def adopt_models(connection_id: str, body: AdoptModels):
+    async def adopt_models(connection_id: str, body: AdoptModels, user: CurrentUser = Depends(current_user)):
         """Add discovered models as connections that reuse this connection's key; optionally check access first."""
-        source = store.get_connection(connection_id, True)
+        uid = user.id if user.id != "system" else None
+        source = store.get_connection(connection_id, uid, True)
         if not source:
             raise HTTPException(404, "Connection not found")
-        existing = {c["model"] for c in store.list_connections() if c["base_url"] == source["base_url"]}
+        existing = {c["model"] for c in store.list_connections(uid) if c["base_url"] == source["base_url"]}
         wanted = [m for m in body.models if m.model not in existing]
         problems = await check_access(source, store.decrypt(source), [m.model_dump() for m in wanted]) if body.check else {}
         known_skills = {s["id"] for s in store.list_skills()}
@@ -226,53 +308,63 @@ def create_app(config=None, store=None):
                 local=source["local"], priority=source["priority"], context_window=m.context_window, token_parameter=source["token_parameter"],
                 input_price=m.input_price if m.input_price is not None else source.get("input_price"),
                 output_price=m.output_price if m.output_price is not None else source.get("output_price"),
-                skills=[s for s in m.skills if s in known_skills], tier=m.tier, reasoning=m.reasoning).model_dump()))
+                skills=[s for s in m.skills if s in known_skills], tier=m.tier, reasoning=m.reasoning).model_dump(), user_id=uid))
         return {"created": created, "skipped": skipped}
 
     @app.get("/api/conversations")
-    def read_conversations():
-        return store.list_conversations()
+    def read_conversations(user: CurrentUser = Depends(current_user)):
+        uid = user.id if user.id != "system" else None
+        return store.list_conversations(uid)
 
     @app.get("/api/conversations/{conversation_id}")
-    def read_conversation(conversation_id: str):
-        value = store.conversation(conversation_id)
+    def read_conversation(conversation_id: str, user: CurrentUser = Depends(current_user)):
+        uid = user.id if user.id != "system" else None
+        value = store.conversation(conversation_id, uid)
         if value is None:
             raise HTTPException(404, "Conversation not found")
         return value
 
     @app.delete("/api/conversations/{conversation_id}")
-    def delete_conversation(conversation_id: str):
-        store.delete_conversation(conversation_id)
+    def delete_conversation(conversation_id: str, user: CurrentUser = Depends(current_user)):
+        uid = user.id if user.id != "system" else None
+        store.delete_conversation(conversation_id, user_id=uid)
         return {"ok": True}
 
     @app.get("/api/usage")
-    def read_usage(conversation_id: str | None = None):
-        return store.usage_report(conversation_id)
+    def read_usage(conversation_id: str | None = None, user: CurrentUser = Depends(current_user)):
+        uid = user.id if user.id != "system" else None
+        return store.usage_report(conversation_id, user_id=uid)
 
     @app.post("/api/runs", status_code=202)
-    def create_run(body: RunInput):
+    def create_run(body: RunInput, user: CurrentUser = Depends(current_user)):
         try:
-            return store.create_run(body)
+            uid = user.id if user.id != "system" else None
+            if not uid:
+                raise HTTPException(403, "User session required to create runs")
+            return store.create_run(body, uid)
         except IntegrityError as exc:
             raise HTTPException(409, "Message already submitted; reload the conversation") from exc
 
     @app.get("/api/runs/{run_id}")
-    def read_run(run_id: str):
-        value = store.get_run(run_id)
+    def read_run(run_id: str, user: CurrentUser = Depends(current_user)):
+        uid = user.id if user.id != "system" else None
+        value = store.get_run(run_id, uid)
         if not value:
             raise HTTPException(404, "Run not found")
-        return {**value, "calls": store.call_rows(run_id)}
+        return {**value, "calls": store.call_rows(run_id, uid)}
 
     @app.post("/api/runs/{run_id}/cancel")
-    def cancel_run(run_id: str):
-        if not store.get_run(run_id):
+    def cancel_run(run_id: str, user: CurrentUser = Depends(current_user)):
+        uid = user.id if user.id != "system" else None
+        if not store.get_run(run_id, uid):
             raise HTTPException(404, "Run not found")
-        store.cancel(run_id)
+        store.cancel(run_id, uid)
         return {"ok": True}
 
     @app.get("/api/runs/{run_id}/events")
-    async def stream_events(run_id: str, request: Request, after: int = 0):
-        if not store.get_run(run_id):
+    async def stream_events(run_id: str, request: Request, after: int = 0, user: CurrentUser = Depends(current_user)):
+        uid = user.id if user.id != "system" else None
+        if not store.get_run(run_id, uid):
             raise HTTPException(404, "Run not found")
         try:
             after = max(after, int(request.headers.get("last-event-id", "0")), 0)
@@ -287,7 +379,7 @@ def create_app(config=None, store=None):
                 for item in batch:
                     cursor = item["id"]
                     yield f"id: {cursor}\nevent: {item['kind']}\ndata: {json.dumps(item['data'])}\n\n"
-                current = store.get_run(run_id)
+                current = store.get_run(run_id, uid)
                 if not current or (current["status"] in TERMINAL and len(batch) < 200):
                     break
                 heartbeat += 1

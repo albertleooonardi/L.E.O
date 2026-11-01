@@ -1,0 +1,86 @@
+---
+import '@fontsource/ibm-plex-sans/latin-400.css';
+import '@fontsource/ibm-plex-sans/latin-500.css';
+import '@fontsource/ibm-plex-sans/latin-600.css';
+import Icon from '../components/Icon.astro';
+import '../styles/global.css';
+---
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Create an account — L.E.O — LLM Efficiency Orchestrator" />
+    <meta name="theme-color" content="#151515" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>Create account — L.E.O</title>
+    <script is:inline>
+      try { document.documentElement.dataset.theme = localStorage.getItem('leo-theme') === 'light' ? 'light' : 'dark'; } catch {}
+    </script>
+  </head>
+  <body>
+    <div class="ambient-background" aria-hidden="true"></div>
+    <main class="auth-page">
+      <div class="auth-card">
+        <div class="auth-brand">
+          <Icon name="brain" size={28} />
+          <span>L.E.O</span>
+        </div>
+        <h1>Create an account</h1>
+        <p class="auth-caption">Your models, keys, and chats belong to your account.</p>
+        <form id="register-form">
+          <label>
+            <span>Username</span>
+            <input id="username" type="text" required minlength="3" maxlength="80" autocomplete="username" />
+          </label>
+          <label>
+            <span>Password</span>
+            <input id="password" type="password" required minlength="8" autocomplete="new-password" />
+          </label>
+          <p id="register-feedback" class="auth-feedback" role="status"></p>
+          <button type="submit" class="auth-primary-button">Create account</button>
+        </form>
+        <p class="auth-divider"><span>Or</span></p>
+        <a href="/login" class="auth-secondary-button">Already have an account? Sign in</a>
+      </div>
+    </main>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <script>
+      const form = document.getElementById('register-form');
+      const feedback = document.getElementById('register-feedback');
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        feedback.textContent = '';
+        const username = document.getElementById('username').value;
+        const password = document.getElementById('password').value;
+        try {
+          const response = await fetch('/api/auth/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+          });
+          if (!response.ok) {
+            const data = await response.json().catch(() => ({ detail: 'Registration failed' }));
+            feedback.textContent = data.detail || 'Registration failed';
+            return;
+          }
+          const data = await response.json();
+          // Auto log in after registration
+          const loginResponse = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+            credentials: 'include',
+          });
+          if (loginResponse.ok) {
+            window.location.href = '/';
+          } else {
+            window.location.href = '/login';
+          }
+        } catch (err) {
+          feedback.textContent = 'Unable to reach the server. Is it running?';
+        }
+      });
+    </script>
+  </body>
+</html>

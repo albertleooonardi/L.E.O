@@ -86,7 +86,7 @@ async def test_check_access_drops_effort_a_model_rejects():
 
 def test_discover_and_adopt_api_reuses_key(client, store, monkeypatch):
     import backend.discovery as discovery
-    source = store.save_connection(Connection(name='OpenRouter · First', base_url='https://openrouter.ai/api/v1', model='first', api_key='or-key', free=True).model_dump())
+    source = store.save_connection(Connection(name='OpenRouter · First', base_url='https://openrouter.ai/api/v1', model='first', api_key='or-key', free=True).model_dump(), user_id=store.user_id)
     async def fake_discover(connection, key, transport=None):
         assert key == 'or-key'
         return {'provider': 'openrouter', 'skipped': [], 'models': [profile('first', free=True), profile('pool/laguna-xs:free', 'coding agent model', True, 262144, True)]}
@@ -100,7 +100,7 @@ def test_discover_and_adopt_api_reuses_key(client, store, monkeypatch):
     body = response.json()
     assert response.status_code == 201 and [c['model'] for c in body['created']] == ['pool/laguna-xs:free']
     assert body['skipped'] == [{'model': 'first', 'reason': 'already added'}]
-    added = store.get_connection(body['created'][0]['id'], True)
+    added = store.get_connection(body['created'][0]['id'], store.user_id, True)
     assert store.decrypt(added) == 'or-key' and added['skills'][0] == 'coding' and added['free'] is True
     assert 'or-key' not in response.text
 
