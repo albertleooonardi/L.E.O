@@ -48,6 +48,15 @@ async def test_files_round_trip_and_listing(box):
     assert owner["output"].strip() == "1000"
 
 
+async def test_rewritten_module_is_not_served_from_a_stale_pyc(box):
+    # Python reuses __pycache__ when the source's mtime and size match, so a same-length edit needs a fresh mtime.
+    sandbox, sid = box
+    await sandbox.write_file(sid, "mod.py", b"VALUE = 1\n")
+    assert (await run(box, "python -c 'import mod; print(mod.VALUE)'"))["output"].strip() == "1"
+    await sandbox.write_file(sid, "mod.py", b"VALUE = 2\n")
+    assert (await run(box, "python -c 'import mod; print(mod.VALUE)'"))["output"].strip() == "2"
+
+
 async def test_uploaded_zip_is_unpacked(box):
     sandbox, sid = box
     buffer = io.BytesIO()
@@ -60,9 +69,13 @@ async def test_uploaded_zip_is_unpacked(box):
 
 
 async def test_command_timeout_kills_the_process_group(box):
-    result = await run(box, "sleep 300 & sleep 300", timeout=3)
+    # `set -m` starts the second job in a process group of its own, out of timeout's reach.
+    result = await run(box, "sleep 300 & set -m; sleep 301 >/dev/null 2>&1 & set +m; sleep 302", timeout=3)
     assert result["timed_out"]
-    assert (await run(box, "ps -eo comm | grep -c sleep || true"))["output"].strip() == "0"
+    # Count by full command line: the container's own `sleep infinity` keep-alive must not count, and a reaped-late
+    # zombie shows as `[sleep] <defunct>`, which is not a running leak.
+    left = await run(box, "ps -eo args | grep -cxE 'sleep 30[012]' || true")
+    assert left["output"].strip() == "0"
 
 
 async def test_symlink_planted_by_the_agent_cannot_redirect_writes(box):

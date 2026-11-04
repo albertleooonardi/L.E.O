@@ -8,6 +8,7 @@ import io
 import posixpath
 import stat
 import tarfile
+import time
 import zipfile
 
 import httpx
@@ -46,12 +47,16 @@ def member_name(name):
 def _dir_info(name, mode=0o755):
     info = tarfile.TarInfo(name)
     info.type, info.mode, info.uid, info.gid, info.uname, info.gname = tarfile.DIRTYPE, mode, AGENT_UID, AGENT_UID, "agent", "agent"
+    info.mtime = time.time()
     return info
 
 
 def _file_info(name, size, mode=0o644):
     info = tarfile.TarInfo(name)
     info.size, info.mode, info.uid, info.gid, info.uname, info.gname = size, mode, AGENT_UID, AGENT_UID, "agent", "agent"
+    # TarInfo defaults to mtime 0. Python reuses __pycache__ when mtime and size match, so a same-length edit
+    # would keep running the old code; make and other build tools also compare mtimes.
+    info.mtime = time.time()
     return info
 
 

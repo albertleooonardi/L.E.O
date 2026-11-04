@@ -1,6 +1,7 @@
 import io
 import json
 import tarfile
+import time
 import zipfile
 
 import httpx
@@ -118,6 +119,12 @@ def test_zip_upload_strips_wrapper_folder_and_drops_unsafe_entries():
     assert all(m.uid == 1000 for m in found.values())
 
 
+def test_written_files_get_the_current_time():
+    # mtime 0 on every write lets Python reuse a stale __pycache__ after a same-length edit.
+    found = members(files_tar({'pkg/mod.py': b'VALUE = 1\n'}))
+    assert all(abs(m.mtime - time.time()) < 60 for m in found.values())
+
+
 def test_zip_without_wrapper_keeps_paths():
     assert set(members(zip_to_tar(make_zip({'a.py': '1', 'b/c.py': '2'})))) == {'a.py', 'b', 'b/c.py'}
 
@@ -157,6 +164,7 @@ def frame(stream_type, text):
 class FakeDocker:
     def __init__(self):
         self.calls, self.containers, self.archives = [], {}, []
+        self.exec_specs, self.exec_starts, self.exit_code = [], [], 0
 
     def __call__(self, request):
         path, method = request.url.path, request.method
@@ -175,11 +183,13 @@ class FakeDocker:
             return httpx.Response(204)
         if path.endswith('/exec'):
             self.exec_spec = json.loads(request.content)
+            self.exec_specs.append(self.exec_spec)
             return httpx.Response(201, json={'Id': 'e1'})
         if path == '/exec/e1/start':
+            self.exec_starts.append(json.loads(request.content))
             return httpx.Response(200, content=frame(1, 'hello ') + frame(2, 'warning\n'))
         if path == '/exec/e1/json':
-            return httpx.Response(200, json={'ExitCode': 0, 'Running': False})
+            return httpx.Response(200, json={'ExitCode': self.exit_code, 'Running': False})
         if path.endswith('/archive') and method == 'PUT':
             self.archives.append((request.url.params['path'], request.content))
             return httpx.Response(200)
@@ -212,7 +222,7 @@ def test_sandboxd_creates_locked_down_container(sandboxd):
     assert host['CapDrop'] == ['ALL'] and host['SecurityOpt'] == ['no-new-privileges']
     assert host['NetworkMode'] == 'leo-sandbox' and host['PidsLimit'] == 512 and host['Memory'] == 2 * 1024 ** 3
     assert docker.spec['User'] == '1000:1000'
-    assert 'HTTPS_PROXY=http://egress:3128' in docker.spec['Env']
+    assert 'HTTPS_PROXY=http://egress:3128' in docker.spec['Env'] and 'PYTHONDONTWRITEBYTECODE=1' in docker.spec['Env']
     client.put(f'/sessions/{SID}')
     assert docker.calls.count(('POST', '/containers/create')) == 1  # Idempotent.
 
@@ -223,6 +233,21 @@ def test_sandboxd_exec_demultiplexes_output_and_runs_unprivileged(sandboxd):
     assert result == {'exit_code': 0, 'output': 'hello warning\n', 'timed_out': False, 'truncated': False}
     assert docker.exec_spec['User'] == '1000:1000'
     assert docker.exec_spec['Cmd'][:4] == ['timeout', '--kill-after=5', '30', 'bash']
+    assert len(docker.exec_specs) == 1  # No cleanup when the command finished on its own.
+
+
+def test_sandboxd_timeout_kills_every_process_the_command_started(sandboxd):
+    client, docker = sandboxd
+    docker.exit_code = 124
+    result = client.post(f'/sessions/{SID}/exec', json={'command': 'sleep 300 &', 'timeout': 3}).json()
+    assert result['timed_out']
+    command, cleanup = docker.exec_specs
+    marker = next(e for e in command['Env'] if e.startswith('LEO_EXEC='))
+    # The cleanup finds processes by the marker in their environment (it survives setsid and job control),
+    # runs as the sandbox user, and finishes before exec returns.
+    assert marker.removeprefix('LEO_EXEC=') in cleanup['Cmd'] and cleanup['User'] == '1000:1000'
+    assert not any(e.startswith('LEO_EXEC=') for e in cleanup.get('Env') or [])
+    assert docker.exec_starts[-1]['Detach'] is False
 
 
 def test_sandboxd_imports_through_a_fresh_staging_folder(sandboxd):

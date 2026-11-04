@@ -89,12 +89,13 @@ class Docker:
 
     async def exec(self, name, command, timeout, cwd=WORKSPACE, env=None, max_output=30000, keep=4_000_000):
         """Run a command as the sandbox user; output is stdout and stderr in order, shortened in the middle if long."""
+        # Every process this command starts inherits the marker, so a timeout can find them all, even ones that left
+        # timeout's process group (setsid, `set -m` job control).
+        marker = secrets.token_hex(16)
         spec = {"AttachStdout": True, "AttachStderr": True, "Tty": False, "User": f"{AGENT_UID}:{AGENT_UID}", "WorkingDir": cwd,
-                "Env": [f"{k}={v}" for k, v in (env or {}).items()],
-                # timeout kills the command's whole process group, including what it started in the background.
-                # setsid gives this exec a private process group. GNU timeout stops the foreground shell;
-                # after it exits we explicitly kill the group so detached/background children cannot leak.
-                "Cmd": ["setsid", "--wait", "timeout", "--kill-after=5", str(int(timeout)), "bash", "-lc", command]}
+                "Env": [f"{k}={v}" for k, v in (env or {}).items()] + [f"LEO_EXEC={marker}"],
+                # timeout puts the command in its own process group and signals that whole group when time is up.
+                "Cmd": ["timeout", "--kill-after=5", str(int(timeout)), "bash", "-lc", command]}
         exec_id = (await self.request("POST", f"/containers/{name}/exec", json=spec)).json()["Id"]
         head, tail, dropped, buffer = bytearray(), bytearray(), 0, b""
         timed_out = False
@@ -125,11 +126,15 @@ class Docker:
         info = (await self.request("GET", f"/exec/{exec_id}/json")).json()
         code = info.get("ExitCode")
         timed_out = timed_out or code in (124, 137)
-        if timed_out and info.get("Pid"):
-            cleanup = {"AttachStdout": False, "AttachStderr": False, "Tty": False, "User": f"{AGENT_UID}:{AGENT_UID}",
-                       "Cmd": ["kill", "-KILL", f"-{info['Pid']}"]}
+        if timed_out:
+            # Exec inspect's Pid is a host PID, meaningless inside the container, so find the processes by marker instead.
+            # Several passes catch children forked while the previous pass ran. Attaching makes start block until it is done.
+            sweep = ('for i in 1 2 3; do for p in /proc/[0-9]*; do grep -qzx "LEO_EXEC=$1" "$p/environ" 2>/dev/null '
+                     '&& kill -KILL "${p#/proc/}" 2>/dev/null; done; done; true')
+            cleanup = {"AttachStdout": True, "AttachStderr": True, "Tty": False, "User": f"{AGENT_UID}:{AGENT_UID}",
+                       "Cmd": ["sh", "-c", sweep, "sh", marker]}
             cleanup_id = (await self.request("POST", f"/containers/{name}/exec", json=cleanup)).json()["Id"]
-            await self.request("POST", f"/exec/{cleanup_id}/start", json={"Detach": True, "Tty": False})
+            await self.request("POST", f"/exec/{cleanup_id}/start", json={"Detach": False, "Tty": False})
         text = (bytes(head) + (f"\n…[{dropped} bytes omitted]…\n".encode() if dropped else b"") + bytes(tail)).decode("utf-8", "replace")
         truncated = len(text) > max_output
         if truncated:
@@ -251,7 +256,10 @@ def create_app(settings=None, docker_transport=None):
                 spec = {"Image": settings.image, "Cmd": ["sleep", "infinity"], "User": f"{AGENT_UID}:{AGENT_UID}", "WorkingDir": WORKSPACE,
                         "Hostname": "sandbox", "Labels": {LABEL: sid}, "HostConfig": host_config,
                         "Env": [f"{k}={proxy}" for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")] +
-                               ["NO_PROXY=localhost,127.0.0.1", "no_proxy=localhost,127.0.0.1"]}
+                               ["NO_PROXY=localhost,127.0.0.1", "no_proxy=localhost,127.0.0.1",
+                                # .pyc freshness is checked by whole-second mtime and size, so an agent's quick
+                                # same-length edit would keep running the old code.
+                                "PYTHONDONTWRITEBYTECODE=1"]}
                 try:
                     await docker.request("POST", "/containers/create", params={"name": name}, json=spec)
                 except DockerError as exc:
