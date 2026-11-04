@@ -105,6 +105,20 @@ class User(StrictModel):
     id: str
     username: str
     created_at: float
+    email: str | None = None
+    display_name: str | None = None
+    avatar_url: str | None = None
+
+
+class Me(User):
+    identities: list[str]  # Linked OAuth providers: google, github, oidc.
+    has_password: bool
+
+
+class PasswordChange(StrictModel):
+    # Required when the account already has a password; OAuth-only accounts set their first one without it.
+    current_password: str | None = Field(default=None, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class RunInput(StrictModel):

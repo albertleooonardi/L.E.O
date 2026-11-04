@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import backend.api as api_module
 from backend.api import create_app
+from backend.auth import Auth
 from backend.ninerouter import CODEX_REDIRECT, NineRouter, RouterError, SignIns, serve_callback
 
 MODELS = {'object': 'list', 'data': [
@@ -17,25 +18,33 @@ MODELS = {'object': 'list', 'data': [
 
 
 class FakeRouter:
-    """Just enough of 9Router's dashboard API, recording each call."""
+    """Just enough of 9Router's dashboard API, recording each call. Every router address (one per user) keeps its
+    own signed-in accounts, and accepts the passwords sandboxd was given."""
 
     def __init__(self):
-        self.calls, self.accounts, self.logins, self.pending = [], [], 0, True
+        self.calls, self.by_host, self.logins, self.pending, self.passwords = [], {}, 0, True, {'secret'}
         self.transport = httpx.MockTransport(self.handle)
+
+    @property
+    def accounts(self):
+        return [a for found in self.by_host.values() for a in found]
 
     def handle(self, request):
         path, body = request.url.path, json.loads(request.content or b'{}')
+        accounts = self.by_host.setdefault(request.url.host, [])
         self.calls.append((request.method, path, body))
+        if path == '/api/health':
+            return httpx.Response(200, json={'ok': True})
         if path == '/api/auth/login':
             self.logins += 1
-            ok = body.get('password') == 'secret'
+            ok = body.get('password') in self.passwords
             return httpx.Response(200 if ok else 401, json={'success': ok}, headers={'set-cookie': 'auth_token=t; Path=/'} if ok else {})
         if 'auth_token=t' not in request.headers.get('cookie', '') and not path.startswith('/v1'):
             return httpx.Response(401, json={'error': 'Unauthorized'})
         if path == '/api/providers':
-            return httpx.Response(200, json={'connections': self.accounts})
+            return httpx.Response(200, json={'connections': accounts})
         if request.method == 'DELETE' and path.startswith('/api/providers/'):
-            self.accounts = [a for a in self.accounts if a['id'] != path.rsplit('/', 1)[1]]
+            accounts[:] = [a for a in accounts if a['id'] != path.rsplit('/', 1)[1]]
             return httpx.Response(200, json={'success': True})
         if path == '/api/keys':
             return httpx.Response(201, json={'key': 'sk-9r', 'name': 'L.E.O.', 'id': 'k1'})
@@ -44,14 +53,14 @@ class FakeRouter:
             return httpx.Response(200, json={'authUrl': 'https://auth.openai.com/oauth/authorize?x=1', 'state': 'st8', 'codeVerifier': 'ver', 'flowType': 'authorization_code_pkce'})
         if path == '/api/oauth/codex/exchange':
             assert body == {'code': 'c0de', 'redirectUri': CODEX_REDIRECT, 'codeVerifier': 'ver', 'state': 'st8'}
-            self.accounts.append({'id': 'a1', 'provider': 'codex', 'email': 'me@example.com'})
+            accounts.append({'id': 'a1', 'provider': 'codex', 'email': 'me@example.com'})
             return httpx.Response(200, json={'success': True, 'connection': {'id': 'a1', 'provider': 'codex', 'email': 'me@example.com'}})
         if path == '/api/oauth/github/device-code':
             return httpx.Response(200, json={'device_code': 'dev', 'user_code': 'AB-12', 'verification_uri': 'https://github.com/login/device', 'interval': 5, 'codeVerifier': 'v2'})
         if path == '/api/oauth/github/poll':
             if self.pending:
                 return httpx.Response(200, json={'success': False, 'error': 'authorization_pending', 'pending': True})
-            self.accounts.append({'id': 'a2', 'provider': 'github', 'displayName': 'octo'})
+            accounts.append({'id': 'a2', 'provider': 'github', 'displayName': 'octo'})
             return httpx.Response(200, json={'success': True, 'connection': {'id': 'a2', 'provider': 'github'}})
         if path == '/v1/models':
             assert request.headers['authorization'] == 'Bearer sk-9r'
@@ -69,19 +78,68 @@ def fake(monkeypatch):
     return value
 
 
+class FakeSandbox:
+    """sandboxd's router endpoints: records which users' routers were started and removed."""
+
+    def __init__(self, router):
+        self.router, self.ensured, self.deleted = router, [], []
+
+    async def ensure_router(self, user_id, password):
+        self.ensured.append((user_id, password))
+        self.router.passwords.add(password)
+        return f'http://leo-router-{user_id}:20128'
+
+    async def delete_router(self, user_id):
+        self.deleted.append(user_id)
+
+
 @pytest.fixture
-def router_client(store, fake):
-    store.config.router9_url, store.config.router9_password, store.config.router9_callback_port = 'http://9router:20128', 'secret', 0
-    with TestClient(create_app(store.config, store)) as value:
+def sandbox(fake):
+    return FakeSandbox(fake)
+
+
+@pytest.fixture
+def router_client(store, sandbox):
+    store.config.router9_callback_port = 0
+    with TestClient(create_app(store.config, store, sandbox=sandbox)) as value:
         value.cookies.set('leo_session', store.user_session_token)
         yield value
 
 
-def test_accounts_off_without_router(client):
+def test_accounts_off_without_sandbox(client):
     data = client.get('/api/accounts').json()
-    assert data['available'] is False and 'LEO_9ROUTER_URL' in data['error']
+    assert data['available'] is False and 'sandbox' in data['error']
     assert 'claude' not in {p['id'] for p in data['providers']}, 'Claude subscription sign-in is never offered'
-    assert client.post('/api/accounts/signin', json={'provider': 'github'}).status_code == 400
+    assert client.post('/api/accounts/signin', json={'provider': 'github'}).status_code == 503
+
+
+def test_each_user_signs_in_on_their_own_router(router_client, store, fake, sandbox):
+    assert router_client.get('/api/accounts').json()['accounts'] == [] and sandbox.ensured == [], 'no router until a sign-in'
+    started = router_client.post('/api/accounts/signin', json={'provider': 'github', 'accept_risk': True}).json()
+    fake.pending = False
+    assert router_client.get(f"/api/accounts/signin/{started['id']}").json()['status'] == 'done'
+    [(owner, password)] = sandbox.ensured
+    assert owner == store.user_id and len(password) >= 24 and store.get_router(store.user_id)['password'] == password
+    [model] = store.list_connections(store.user_id)
+    assert model['base_url'] == f'http://leo-router-{store.user_id}:20128/v1'
+    # Another user of the same server (same in-memory sign-ins) sees and controls none of it.
+    other = store.create_user('colleague', Auth.hash_password('colleague-pass'))
+    with TestClient(router_client.app) as other_client:
+        other_client.cookies.set('leo_session', Auth(store, store.config).create_session(other['id']))
+        assert other_client.get('/api/accounts').json()['accounts'] == []
+        assert other_client.delete('/api/accounts/a2').status_code == 404
+        assert other_client.get(f"/api/accounts/signin/{started['id']}").status_code == 404
+    assert [uid for uid, _ in sandbox.ensured] == [store.user_id]
+
+
+def test_disconnecting_the_last_account_stops_the_router_and_signing_in_again_reuses_it(router_client, store, fake, sandbox):
+    started = router_client.post('/api/accounts/signin', json={'provider': 'codex', 'accept_risk': True}).json()
+    asyncio.run(router_client.app.state.signins.callback({'code': 'c0de', 'state': 'st8'}))
+    assert router_client.get(f"/api/accounts/signin/{started['id']}").json()['status'] == 'done'
+    assert router_client.delete('/api/accounts/a1').status_code == 200
+    assert sandbox.deleted == [store.user_id]
+    router_client.post('/api/accounts/signin', json={'provider': 'codex', 'accept_risk': True})
+    assert len(sandbox.ensured) == 2 and sandbox.ensured[0] == sandbox.ensured[1], 'same router, same saved password'
 
 
 def test_risky_provider_needs_consent(router_client):
@@ -101,7 +159,7 @@ def test_device_sign_in_adds_models_with_one_key(router_client, store, fake):
     assert poll == {'deviceCode': 'dev', 'codeVerifier': 'v2', 'extraData': None}
     [model] = store.list_connections(store.user_id)
     assert model['model'] == 'gh/gpt-4.1' and model['name'] == 'GitHub Copilot · gpt-4.1' and model['has_key'] and model['free']
-    assert model['base_url'] == 'http://9router:20128/v1'
+    assert model['base_url'] == f'http://leo-router-{store.user_id}:20128/v1'
     accounts = router_client.get('/api/accounts').json()
     assert accounts['available'] and accounts['accounts'] == [{'id': 'a2', 'provider': 'github', 'name': 'GitHub Copilot', 'label': 'octo'}]
 
@@ -147,7 +205,7 @@ async def test_router_logs_in_again_when_its_session_lapses(fake):
     assert await router.accounts() == []
     router.cookies = httpx.Cookies({'auth_token': 'expired'})
     assert await router.accounts() == [] and fake.logins == 2
-    with pytest.raises(RouterError, match='LEO_9ROUTER_PASSWORD'):
+    with pytest.raises(RouterError, match='password'):
         await NineRouter('http://9router:20128', 'wrong', fake.transport).accounts()
 
 

@@ -1,12 +1,15 @@
 import asyncio
+import html
 import json
 import secrets
 from contextlib import asynccontextmanager
+from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+from cryptography.fernet import InvalidToken
+from fastapi import FastAPI, HTTPException, Query, Request, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
@@ -16,12 +19,13 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .auth import SYSTEM_USER, Auth, CurrentUser
 from .catalog import PRESETS
 from .config import Config
+from .oauth import OAuth, OAuthError, email_allowed, pkce_pair
 from .ninerouter import ACCOUNTS, RISK_NOTICE, NineRouter, RouterError, SignIns, serve_callback
 from .providers import ProviderError, list_models
 from .router import choose_mode, classify, rank
 from .sandbox import MAX_IMPORT_BYTES, Sandbox, SandboxError, tar_to_zip, workspace_path, zip_to_tar
-from .schemas import (AccountSignIn, AdoptModels, ApprovalInput, Connection, Preferences, RouteInput, RunInput, Skill, SteerInput,
-                      UserLogin, UserRegister, User, WorkspaceInput)
+from .schemas import (AccountSignIn, AdoptModels, ApprovalInput, Connection, Me, PasswordChange, Preferences, RouteInput, RunInput,
+                      Skill, SteerInput, UserLogin, UserRegister, User, WorkspaceInput)
 from .store import Conflict, Store, TERMINAL
 from .tools import ToolError, web_search
 from .discovery import check_access, discover
@@ -34,11 +38,14 @@ PUBLIC_API_PATHS = {
     "/api/health",
     "/api/auth/register",
     "/api/auth/login",
+    "/api/auth/providers",
     "/api/session",
 }
+# OAuth start and callback check the session themselves when linking.
+PUBLIC_API_PREFIXES = ("/api/auth/oauth/",)
 
 
-def create_app(config=None, store=None, sandbox=None):
+def create_app(config=None, store=None, sandbox=None, oauth=None):
     config = config or Config()
     remote = [h for h in config.hosts if h.strip() not in LOCAL_HOSTS]
     if remote and not config.api_token:
@@ -46,18 +53,34 @@ def create_app(config=None, store=None, sandbox=None):
         raise RuntimeError(f"LEO_ALLOWED_HOSTS includes {', '.join(remote)}. Set LEO_API_TOKEN before serving a remote "
                            "hostname, and put HTTPS in front of L.E.O.")
     store = store or Store(config)
+    oauth = oauth or OAuth(config)
     sandbox = sandbox or (Sandbox(config.sandbox_url, config.sandbox_token) if config.sandbox_url else None)
     auth = Auth(store, config)
-    router = NineRouter(config.router9_url, config.router9_password) if config.router9_url else None
-    router_models = f"{config.router9_url}/v1"
+    async def router_for(user_id, create=False):
+        """The user's own 9Router. `create` starts it (creating it on first use); otherwise None if they have none."""
+        saved = store.get_router(user_id)
+        if not saved and not create:
+            return None
+        if not saved:
+            saved = {"password": secrets.token_urlsafe(24)}
+            saved["url"] = await sandbox.ensure_router(user_id, saved["password"])
+            store.save_router(user_id, saved["url"], saved["password"])
+        elif create:  # Removed after its last account was disconnected; the volume kept everything else.
+            await sandbox.ensure_router(user_id, saved["password"])
+        router = NineRouter(saved["url"], saved["password"])
+        if create:
+            await router.wait_ready()
+        return router
 
     async def add_account_models(provider, user_id, account):
-        """After a sign-in: add the account's models, all using one 9Router key that L.E.O. creates once."""
+        """After a sign-in: add the account's models, all using one key on the user's router that L.E.O. creates once."""
         spec = ACCOUNTS[provider]
-        mine = [c for c in store.list_connections(user_id, True) if c["base_url"] == router_models]
+        router = await router_for(user_id)
+        models_url = f"{router.url}/v1"
+        mine = [c for c in store.list_connections(user_id, True) if c["base_url"] == models_url]
         keyed = next((c for c in mine if c.get("secret")), None)
         key = store.decrypt(keyed) if keyed else await router.create_key()
-        found = await discover({"base_url": router_models, "protocol": "openai", "free": True}, key)
+        found = await discover({"base_url": models_url, "protocol": "openai", "free": True}, key)
         existing, known_skills = {c["model"] for c in mine}, {s["id"] for s in store.list_skills()}
         created = []
         for m in found["models"]:
@@ -65,13 +88,14 @@ def create_app(config=None, store=None, sandbox=None):
                 continue
             source = keyed or (created[0] if created else None)
             created.append(store.save_connection(Connection(
-                name=f"{spec['name']} · {m['model'].split('/', 1)[1]}"[:80], base_url=router_models, model=m["model"],
+                name=f"{spec['name']} · {m['model'].split('/', 1)[1]}"[:80], base_url=models_url, model=m["model"],
                 api_key=None if source else key, key_from=source["id"] if source else None, free=True,
                 context_window=m["context_window"], skills=[s for s in m["skills"] if s in known_skills], tier=m["tier"],
                 reasoning=m["reasoning"]).model_dump(), user_id=user_id))
         return {"account": account.get("email") or account.get("displayName") or "", "added": len(created)}
 
-    signins = SignIns(router, add_account_models) if router else None
+    # Model-account sign-in needs sandboxd, which runs each user's router.
+    signins = SignIns(router_for, add_account_models) if sandbox else None
 
     @asynccontextmanager
     async def lifespan(app):
@@ -101,7 +125,8 @@ def create_app(config=None, store=None, sandbox=None):
                 return JSONResponse({"detail": "Origin is not allowed"}, status_code=403)
 
             # Auth: session cookie or bearer token (LEO_API_TOKEN for admin/MCP). CORS preflights carry no credentials.
-            if request.method != "OPTIONS" and request.url.path not in PUBLIC_API_PATHS:
+            public = request.url.path in PUBLIC_API_PATHS or request.url.path.startswith(PUBLIC_API_PREFIXES)
+            if request.method != "OPTIONS" and not public:
                 user = await run_in_threadpool(resolve_user, request)
                 if not user:
                     return JSONResponse({"detail": "Sign in"}, status_code=401)
@@ -162,7 +187,12 @@ def create_app(config=None, store=None, sandbox=None):
     # ---------------- auth ----------------
 
     def public_user(user):
-        return {"id": user["id"], "username": user["username"], "created_at": user["created_at"]}
+        return {key: user.get(key) for key in ("id", "username", "created_at", "email", "display_name", "avatar_url")}
+
+    def start_session(response, request, user_id):
+        response.set_cookie("leo_session", auth.create_session(user_id), httponly=True, samesite="strict",
+                            secure=request.url.scheme == "https", max_age=30 * 24 * 60 * 60)
+        return response
 
     @app.post("/api/auth/register", status_code=201, response_model=User)
     def register(body: UserRegister, request: Request):
@@ -192,11 +222,7 @@ def create_app(config=None, store=None, sandbox=None):
             auth.record_failure(throttle)
             raise HTTPException(401, "Invalid username or password")
         auth.clear_failures(throttle)
-        token = auth.create_session(user["id"])
-        response = JSONResponse({"user": public_user(user)})
-        response.set_cookie("leo_session", token, httponly=True, samesite="strict",
-                            secure=request.url.scheme == "https", max_age=30 * 24 * 60 * 60)
-        return response
+        return start_session(JSONResponse({"user": public_user(user)}), request, user["id"])
 
     @app.post("/api/auth/logout")
     def logout(request: Request, user: CurrentUser = Depends(current_user)):
@@ -206,14 +232,168 @@ def create_app(config=None, store=None, sandbox=None):
         response.delete_cookie("leo_session")
         return response
 
-    @app.get("/api/auth/me", response_model=User)
-    def me(user: CurrentUser = Depends(current_user)):
+    def account(user):
         if user.id == "system":
             raise HTTPException(403, "Use a user session")
         db_user = store.get_user(user.id)
         if not db_user:
             raise HTTPException(401, "User not found")
-        return public_user(db_user)
+        return db_user
+
+    @app.get("/api/auth/me", response_model=Me)
+    def me(user: CurrentUser = Depends(current_user)):
+        db_user = account(user)
+        return {**public_user(db_user), "identities": [i["provider"] for i in store.list_identities(user.id)],
+                "has_password": bool(db_user["password_hash"])}
+
+    @app.put("/api/auth/password")
+    def change_password(body: PasswordChange, user: CurrentUser = Depends(current_user)):
+        db_user = account(user)
+        if db_user["password_hash"]:
+            if not body.current_password:
+                raise HTTPException(400, "Enter your current password")
+            if not Auth.verify_password(body.current_password, db_user["password_hash"]):
+                raise HTTPException(403, "Your current password is not correct")
+        store.update_user(user.id, password_hash=Auth.hash_password(body.new_password))
+        return {"ok": True}
+
+    @app.delete("/api/auth/identities/{provider}")
+    def unlink_identity(provider: str, user: CurrentUser = Depends(current_user)):
+        db_user = account(user)
+        linked = [i["provider"] for i in store.list_identities(user.id)]
+        if provider not in linked:
+            raise HTTPException(404, "That sign-in method is not linked")
+        if not db_user["password_hash"] and len(linked) == 1:
+            raise HTTPException(409, "Set a password or link another account first, so you can still sign in")
+        store.unlink_identity(user.id, provider)
+        return {"ok": True}
+
+    # ---------------- OAuth sign-in ----------------
+
+    @app.get("/api/auth/providers")
+    def auth_providers():
+        """What the login page offers: the configured OAuth providers, and whether the password form can register."""
+        return {"providers": oauth.available(),
+                "password_registration": config.allow_registration or (not config.api_token and not store.has_users())}
+
+    def callback_url(request, provider):
+        return f"{config.public_url or str(request.base_url).rstrip('/')}/api/auth/oauth/{provider}/callback"
+
+    def safe_next(value):
+        # Paths on this site only: "//host" and "/\\host" would leave it.
+        return value if value.startswith("/") and not value.startswith(("//", "/\\")) else "/"
+
+    def navigate(target):
+        """Leave the callback through a page that navigates itself. After a cross-site redirect from the provider the
+        browser holds back SameSite=Strict cookies; a navigation our own page starts sends them."""
+        script = json.dumps(target).replace("<", "\\u003c")
+        response = HTMLResponse(f'<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url={html.escape(target)}">'
+                                f'<title>Signing in to L.E.O</title><script>location.replace({script})</script>',
+                                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        response.delete_cookie("leo_oauth", path="/api/auth/oauth")
+        return response
+
+    def fill_profile(user_id, identity):
+        """Fill in what the account is missing; the email only when no other account has it."""
+        user = store.get_user(user_id)
+        values = {key: value for key, value in (("display_name", identity.name), ("avatar_url", identity.avatar_url)) if value and not user[key]}
+        if identity.email and not user["email"] and not store.get_user_by_email(identity.email):
+            values["email"] = identity.email
+        if values:
+            store.update_user(user_id, **values)
+
+    def oauth_user(identity):
+        """The account this identity signs in to, linked by verified email or created. None: not invited."""
+        rules = config.allowed_emails
+        if rules and not email_allowed(identity.email, rules):
+            return None
+        linked = store.find_identity(identity.provider, identity.subject)
+        user = store.get_user(linked["user_id"]) if linked else None
+        if not user and identity.email:
+            user = store.get_user_by_email(identity.email)
+            if user:
+                store.link_identity(user["id"], identity.provider, identity.subject, identity.email)
+        if not user:
+            # Without a list, OAuth creates only the very first account, on the same terms as password registration.
+            if not rules and (store.has_users() or config.api_token):
+                return None
+            wanted = identity.login or (identity.email or "").split("@")[0] or identity.name
+            user = store.create_user(store.free_username(wanted), "", email=identity.email,
+                                     display_name=identity.name or None, avatar_url=identity.avatar_url or None)
+            store.link_identity(user["id"], identity.provider, identity.subject, identity.email)
+            if store.admin_user_id() == user["id"]:
+                store.adopt_orphans(user["id"])  # Connections and chats saved before accounts existed.
+        fill_profile(user["id"], identity)
+        return user
+
+    def require_provider(provider):
+        if provider not in oauth.providers:
+            raise HTTPException(404, "That sign-in provider is not configured")
+
+    @app.get("/api/auth/oauth/{provider}/start")
+    async def oauth_start(provider: str, request: Request, next_path: str = Query("", alias="next", max_length=500), link: bool = False):
+        require_provider(provider)
+        linking = None
+        if link:
+            user = await run_in_threadpool(resolve_user, request)
+            if not user or user.id == "system":
+                raise HTTPException(401, "Sign in first, then link another account")
+            linking = user.id
+        state, (verifier, challenge) = secrets.token_urlsafe(24), pkce_pair()
+        try:
+            url = await oauth.authorize_url(provider, callback_url(request, provider), state, challenge)
+        except OAuthError as exc:
+            return navigate(f"/login?{urlencode({'error': exc.code})}")
+        pending = {"provider": provider, "state": state, "verifier": verifier, "link": linking,
+                   "next": safe_next(next_path or ("/?settings=account" if linking else "/"))}
+        response = RedirectResponse(url, status_code=307)
+        # Encrypted with the store key: nothing to keep on the server, and nothing a script or another site can read or forge.
+        response.set_cookie("leo_oauth", store.cipher.encrypt(json.dumps(pending).encode()).decode(), max_age=600, httponly=True,
+                            samesite="lax", secure=request.url.scheme == "https", path="/api/auth/oauth")
+        return response
+
+    @app.get("/api/auth/oauth/{provider}/callback")
+    async def oauth_callback(provider: str, request: Request, code: str = Query("", max_length=4096),
+                             state: str = Query("", max_length=200), error: str = Query("", max_length=200)):
+        require_provider(provider)
+        try:
+            pending = json.loads(store.cipher.decrypt(request.cookies.get("leo_oauth", "").encode(), ttl=600))
+        except (InvalidToken, ValueError):
+            pending = None
+        if not pending or pending["provider"] != provider or not state or not secrets.compare_digest(pending["state"], state):
+            return navigate("/login?error=failed")
+        back = pending["next"] if pending["link"] else "/login"
+
+        def fail(reason, **extra):
+            return navigate(f"{back}{'&' if '?' in back else '?'}{urlencode({'error': reason, **extra})}")
+
+        if error or not code:
+            return fail("cancelled")
+        throttle = f"{request.client.host if request.client else ''}|oauth"
+        if auth.login_blocked(throttle):
+            return fail("failed")
+        try:
+            identity = await oauth.identity(provider, code, pending["verifier"], callback_url(request, provider))
+        except OAuthError as exc:
+            auth.record_failure(throttle)
+            return fail(exc.code)
+        if pending["link"]:
+            current = await run_in_threadpool(resolve_user, request)
+            if not current or current.id != pending["link"]:
+                return navigate("/login?error=failed")
+            owner = store.find_identity(provider, identity.subject)
+            if owner and owner["user_id"] != current.id:
+                return fail("linked_elsewhere")
+            if not owner:
+                store.link_identity(current.id, provider, identity.subject, identity.email)
+            fill_profile(current.id, identity)
+            return navigate(pending["next"])
+        user = await run_in_threadpool(oauth_user, identity)
+        if not user:
+            auth.record_failure(throttle)
+            return fail("not_invited", **({"email": identity.email} if identity.email else {}))
+        auth.clear_failures(throttle)
+        return start_session(navigate(pending["next"]), request, user["id"])
 
     # Legacy single-token session (kept for MCP/CLI compatibility).
     class Login(BaseModel):
@@ -235,71 +415,74 @@ def create_app(config=None, store=None, sandbox=None):
 
     @app.get("/api/presets")
     def presets():
-        # With 9Router managed by L.E.O., its preset points at the service address the containers use.
-        return [{**p, "base_url": router_models, "hint": "Prefer Sign in with an account; this form is for 9Router models added by hand."}
-                if p["id"] == "9router" and router else p for p in PRESETS]
-
-    # ---------------- account sign-in (9Router) ----------------
+        hint = "Prefer Sign in with an account (Settings → Account); this form is for a 9Router you run yourself."
+        return [{**p, "hint": hint} if p["id"] == "9router" and signins else p for p in PRESETS]
 
     def require_router():
         if not signins:
-            raise HTTPException(400, "Account sign-in is off; set LEO_9ROUTER_URL (docker compose sets it)")
+            raise HTTPException(503, "Model-account sign-in needs the sandbox service; start L.E.O. with docker compose")
         return signins
 
     @app.get("/api/accounts")
     async def read_accounts(user: CurrentUser = Depends(current_user)):
-        """Providers offered for sign-in and the accounts signed in through 9Router."""
+        """Providers offered for sign-in and the accounts this user signed in on their own router."""
         offered = [{"id": key, "name": v["name"], "flow": v["flow"], "risk": RISK_NOTICE if v["risk"] else None} for key, v in ACCOUNTS.items()]
-        if not router:
-            return {"available": False, "error": "Account sign-in is off; set LEO_9ROUTER_URL (docker compose sets it)", "providers": offered, "accounts": []}
+        if not signins:
+            return {"available": False, "error": "Model-account sign-in needs the sandbox service; start L.E.O. with docker compose",
+                    "providers": offered, "accounts": []}
         try:
-            return {"available": True, "error": None, "providers": offered, "accounts": await router.accounts()}
+            router = await router_for(account(user)["id"])
+            return {"available": True, "error": None, "providers": offered, "accounts": await router.accounts() if router else []}
         except RouterError as exc:
             return {"available": False, "error": str(exc), "providers": offered, "accounts": []}
 
     @app.post("/api/accounts/signin", status_code=201)
-    async def start_sign_in(body: AccountSignIn, user: CurrentUser = Depends(require_admin)):
+    async def start_sign_in(body: AccountSignIn, user: CurrentUser = Depends(current_user)):
         flows = require_router()
         if body.provider not in ACCOUNTS:
             raise HTTPException(400, "L.E.O. does not offer sign-in for that provider")
         if ACCOUNTS[body.provider]["risk"] and not body.accept_risk:
             raise HTTPException(400, RISK_NOTICE)
         try:
-            return await flows.start(body.provider, user.owner_id)
+            return await flows.start(body.provider, account(user)["id"])
         except RouterError as exc:
             raise HTTPException(502, str(exc)) from exc
 
     @app.get("/api/accounts/signin/{session_id}")
-    async def sign_in_status(session_id: str, user: CurrentUser = Depends(require_admin)):
+    async def sign_in_status(session_id: str, user: CurrentUser = Depends(current_user)):
         try:
-            return await require_router().status(session_id, user.owner_id)
+            return await require_router().status(session_id, user.id)
         except RouterError as exc:
             raise HTTPException(502, str(exc)) from exc
 
     @app.delete("/api/accounts/signin/{session_id}")
-    def cancel_sign_in(session_id: str, user: CurrentUser = Depends(require_admin)):
-        require_router().cancel(session_id, user.owner_id)
+    def cancel_sign_in(session_id: str, user: CurrentUser = Depends(current_user)):
+        require_router().cancel(session_id, user.id)
         return {"ok": True}
 
     @app.delete("/api/accounts/{account_id}")
-    async def disconnect_account(account_id: str, user: CurrentUser = Depends(require_admin)):
-        """Sign the account out of 9Router; its models leave L.E.O. once no account of that provider is left."""
+    async def disconnect_account(account_id: str, user: CurrentUser = Depends(current_user)):
+        """Sign the account out of the user's router; its models leave L.E.O. once no account of that provider is left,
+        and the router stops once no account at all is left."""
         require_router()
+        router = await router_for(account(user)["id"])
         try:
-            accounts = await router.accounts()
-            account = next((a for a in accounts if a["id"] == account_id), None)
-            if not account:
+            accounts = await router.accounts() if router else []
+            found = next((a for a in accounts if a["id"] == account_id), None)
+            if not found:
                 raise HTTPException(404, "Account not found")
             await router.remove(account_id)
         except RouterError as exc:
             raise HTTPException(502, str(exc)) from exc
         removed = 0
-        if not any(a["provider"] == account["provider"] and a["id"] != account_id for a in accounts):
-            prefix = ACCOUNTS[account["provider"]]["prefix"] + "/"
-            for c in store.list_connections(user.owner_id):
-                if c["base_url"] == router_models and c["model"].startswith(prefix):
-                    store.delete_connection(c["id"], user.owner_id)
+        if not any(a["provider"] == found["provider"] and a["id"] != account_id for a in accounts):
+            prefix = ACCOUNTS[found["provider"]]["prefix"] + "/"
+            for c in store.list_connections(user.id):
+                if c["base_url"] == f"{router.url}/v1" and c["model"].startswith(prefix):
+                    store.delete_connection(c["id"], user.id)
                     removed += 1
+        if len(accounts) == 1:
+            await sandbox.delete_router(user.id)
         return {"ok": True, "removed_models": removed}
 
     @app.get("/api/settings")

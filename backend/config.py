@@ -17,9 +17,19 @@ class Config:
     hosts: list[str] = field(default_factory=lambda: os.getenv(
         "LEO_ALLOWED_HOSTS", "127.0.0.1,localhost,testserver"
     ).split(","))
-    # 9Router dashboard for account sign-in (Settings → Add provider); empty turns the feature off.
-    router9_url: str = field(default_factory=lambda: os.getenv("LEO_9ROUTER_URL", "").rstrip("/"))
-    router9_password: str = field(default_factory=lambda: os.getenv("LEO_9ROUTER_PASSWORD", ""), repr=False)
+    # OAuth sign-in. Callback URLs are <public_url>/api/auth/oauth/<provider>/callback; empty uses the request's own URL.
+    public_url: str = field(default_factory=lambda: os.getenv("LEO_PUBLIC_URL", "").rstrip("/"))
+    # Who may sign in with OAuth: exact emails and @domain entries. Empty: existing accounts and the very first user only.
+    allowed_emails: list[str] = field(default_factory=lambda: [
+        e.strip().lower() for e in os.getenv("LEO_ALLOWED_EMAILS", "").split(",") if e.strip()])
+    google_client_id: str = field(default_factory=lambda: os.getenv("LEO_GOOGLE_CLIENT_ID", ""))
+    google_client_secret: str = field(default_factory=lambda: os.getenv("LEO_GOOGLE_CLIENT_SECRET", ""), repr=False)
+    github_client_id: str = field(default_factory=lambda: os.getenv("LEO_GITHUB_CLIENT_ID", ""))
+    github_client_secret: str = field(default_factory=lambda: os.getenv("LEO_GITHUB_CLIENT_SECRET", ""), repr=False)
+    oidc_issuer: str = field(default_factory=lambda: os.getenv("LEO_OIDC_ISSUER", "").rstrip("/"))
+    oidc_client_id: str = field(default_factory=lambda: os.getenv("LEO_OIDC_CLIENT_ID", ""))
+    oidc_client_secret: str = field(default_factory=lambda: os.getenv("LEO_OIDC_CLIENT_SECRET", ""), repr=False)
+    oidc_name: str = field(default_factory=lambda: os.getenv("LEO_OIDC_NAME", "") or "Single sign-on")
     # Where the API listens for the ChatGPT (Codex) sign-in redirect; OpenAI only accepts localhost:1455.
     router9_callback_port: int = field(default_factory=lambda: int(os.getenv("LEO_9ROUTER_CALLBACK_PORT", "1455")))
     # sandboxd, which runs agent-mode workspaces; empty turns agent mode off (docker compose sets both).

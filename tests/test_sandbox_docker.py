@@ -112,3 +112,20 @@ async def test_push_goes_through_a_bundle_and_keeps_the_token_out(box):
     hook = subprocess.run(["docker", "exec", container, "test", "-e", "/tmp/hook-ran"])
     assert hook.returncode != 0
     assert "secret-token" not in result["output"]
+
+
+async def test_a_users_router_starts_locked_down_and_keeps_its_volume():
+    sandbox, uid = Sandbox(URL, os.getenv("LEO_SANDBOX_TOKEN", "leo-local-development")), str(uuid.uuid4())
+    name = f"leo-router-{uid}"
+    try:
+        assert await sandbox.ensure_router(uid, "x" * 24) == f"http://{name}:20128"
+        state = subprocess.run(["docker", "container", "inspect", name, "--format",
+                                "{{.State.Running}} {{.HostConfig.CapAdd}} {{json .NetworkSettings.Ports}}"], capture_output=True, text=True)
+        # Running (its entrypoint drops to the node user with only these capabilities) and no host port.
+        assert state.stdout.split(" ", 1)[0] == "true" and "CHOWN SETUID SETGID" in state.stdout and "HostPort" not in state.stdout
+        await sandbox.delete_router(uid)
+        assert subprocess.run(["docker", "container", "inspect", name], capture_output=True).returncode != 0
+        assert subprocess.run(["docker", "volume", "inspect", name], capture_output=True).returncode == 0, "signed-in accounts stay"
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        subprocess.run(["docker", "volume", "rm", name], capture_output=True)

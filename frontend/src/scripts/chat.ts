@@ -679,19 +679,77 @@ async function loadSettings() {
   void loadAccounts();
 }
 
+type Me = { id: string; username: string; created_at: number; email: string | null; display_name: string | null; avatar_url: string | null; identities: string[]; has_password: boolean };
+let signInProviders: { id: string; name: string }[] = [];
 async function loadUser() {
   try {
-    const user = await api<{ id: string; username: string; created_at: number }>('/auth/me');
+    const [user, offered] = await Promise.all([api<Me>('/auth/me'), signInProviders.length ? null : api<{ providers: { id: string; name: string }[] }>('/auth/providers').catch(() => null)]);
+    if (offered) signInProviders = offered.providers;
     currentUser = user;
     const badge = el('user-badge');
     const name = el('user-badge-name');
     if (badge && name) { badge.hidden = false; name.textContent = user.username; el('user-badge-initial').textContent = user.username.slice(0, 1).toUpperCase(); }
+    renderProfile(user);
   } catch {
     currentUser = null;
     const badge = el('user-badge');
     if (badge) badge.hidden = true;
   }
 }
+// Settings → Account: who you are, how you sign in, and your password.
+function renderProfile(user: Me) {
+  el('profile-name').textContent = user.display_name || user.username;
+  el('profile-detail').textContent = [user.email, `@${user.username}`].filter(Boolean).join(' · ');
+  el('profile-initial').textContent = (user.display_name || user.username).slice(0, 1).toUpperCase();
+  const avatar = el<HTMLImageElement>('profile-avatar');
+  avatar.hidden = !user.avatar_url; el('profile-initial').hidden = Boolean(user.avatar_url);
+  if (user.avatar_url) avatar.src = user.avatar_url;
+  const ways = user.identities.length + (user.has_password ? 1 : 0);
+  const row = (title: string, detail: string, action: HTMLElement) => {
+    const item = document.createElement('div'); item.className = 'identity-row';
+    const text = document.createElement('span'); const words = document.createElement('div');
+    words.append(Object.assign(document.createElement('strong'), { textContent: title }), Object.assign(document.createElement('small'), { textContent: detail }));
+    text.append(words); item.append(text, action); return item;
+  };
+  const passwordButton = Object.assign(document.createElement('button'), { type: 'button', className: 'text-button', textContent: user.has_password ? 'Change' : 'Set a password' });
+  passwordButton.addEventListener('click', () => {
+    el('current-password-field').hidden = !user.has_password;
+    el('password-form').hidden = false; el('identity-feedback').textContent = '';
+    (user.has_password ? field('current-password') : field('new-password')).focus();
+  });
+  const rows = [row('Password', user.has_password ? `Sign in as ${user.username}` : 'Not set: you sign in with a provider below', passwordButton)];
+  const known = new Map(signInProviders.map(p => [p.id, p.name]));
+  for (const id of new Set([...signInProviders.map(p => p.id), ...user.identities])) {
+    const linked = user.identities.includes(id);
+    let action: HTMLElement;
+    if (linked) {
+      action = Object.assign(document.createElement('button'), { type: 'button', className: 'text-button danger', textContent: 'Unlink', disabled: ways <= 1,
+        title: ways <= 1 ? 'Set a password or link another account first, so you can still sign in' : '' });
+      action.addEventListener('click', () => void unlinkIdentity(id, known.get(id) || id));
+    } else {
+      action = Object.assign(document.createElement('a'), { className: 'text-button', textContent: 'Link',
+        href: `/api/auth/oauth/${encodeURIComponent(id)}/start?link=1&next=${encodeURIComponent('/?settings=account')}` });
+    }
+    rows.push(row(known.get(id) || id, linked ? 'Linked: you can sign in with it' : 'Not linked', action));
+  }
+  el('identity-list').replaceChildren(...rows);
+}
+async function unlinkIdentity(id: string, name: string) {
+  if (!window.confirm(`Unlink ${name}? You will no longer be able to sign in with it.`)) return;
+  try { await send(`/auth/identities/${encodeURIComponent(id)}`, 'DELETE'); toast(`${name} unlinked`); await loadUser(); }
+  catch (e) { el('identity-feedback').textContent = errorText(e); }
+}
+el('password-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const body = { current_password: el('current-password-field').hidden ? null : field('current-password').value, new_password: field('new-password').value };
+  if (body.new_password.length < 8) { el('identity-feedback').textContent = 'Use at least 8 characters.'; return; }
+  try {
+    await send('/auth/password', 'PUT', body);
+    field('current-password').value = ''; field('new-password').value = ''; el('password-form').hidden = true;
+    el('identity-feedback').textContent = ''; toast('Password saved'); await loadUser();
+  } catch (e) { el('identity-feedback').textContent = errorText(e); }
+});
+el('cancel-password').addEventListener('click', () => { field('current-password').value = ''; field('new-password').value = ''; el('password-form').hidden = true; });
 
 async function doLogout() {
   try { await api('/auth/logout', { method: 'POST' }); } catch {}
@@ -862,8 +920,9 @@ async function loadAccounts() {
 }
 function renderAccounts() {
   const accounts = accountInfo?.accounts || [];
-  el('account-list').hidden = !accounts.length;
-  el('account-list').replaceChildren(Object.assign(document.createElement('h3'), { textContent: 'Signed-in accounts' }), ...accounts.map(a => {
+  const empty = Object.assign(document.createElement('p'), { className: 'account-empty',
+    textContent: accountInfo && !accountInfo.available ? accountInfo.error || 'Model-account sign-in is unavailable' : 'No model accounts yet.' });
+  el('account-list').replaceChildren(...(accounts.length ? [] : [empty]), ...accounts.map(a => {
     const row = document.createElement('div'); row.className = 'account-row';
     const text = document.createElement('div');
     text.append(Object.assign(document.createElement('strong'), { textContent: a.name }), Object.assign(document.createElement('small'), { textContent: a.label || 'Signed in' }));
@@ -929,6 +988,7 @@ el('account-close').addEventListener('click', () => { stopSignIn(); el('account-
 el('account-cancel').addEventListener('click', stopSignIn);
 el('use-api-key').addEventListener('click', () => { stopSignIn(); el('account-chooser').hidden = true; editProvider(); });
 el('add-connection').addEventListener('click', showChooser);
+el('add-model-account').addEventListener('click', () => { showSettingsTab(settingsTabs.find(t => t.id === 'tab-models')!); showChooser(); });
 el('cancel-provider').addEventListener('click', () => { field('provider-key').value = ''; el('provider-form').hidden = true; });
 el('provider-form').addEventListener('submit', async event => {
   event.preventDefault();
@@ -1008,6 +1068,16 @@ function openSettings(tabId?: string) {
   requestAnimationFrame(() => requestAnimationFrame(() => marker.classList.add('animate')));
 }
 el('open-settings').addEventListener('click', () => openSettings());
+// Back from linking a sign-in provider: /?settings=account, with error= when it did not work.
+{
+  const params = new URLSearchParams(location.search);
+  if (params.get('settings') === 'account') {
+    const failed = params.get('error');
+    history.replaceState(null, '', location.pathname);
+    openSettings('tab-account');
+    if (failed) toast(failed === 'linked_elsewhere' ? 'That account is already linked to another L.E.O. user' : failed === 'cancelled' ? 'Linking was cancelled' : 'Linking did not complete; try again');
+  }
+}
 el('connect-models').addEventListener('click', () => { openSettings('tab-models'); editProvider(); });
 
 function setTheme(theme: string) {

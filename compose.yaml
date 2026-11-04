@@ -24,8 +24,16 @@ services:
       LEO_ALLOWED_ORIGINS: ${LEO_ALLOWED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
       LEO_ALLOW_REGISTRATION: ${LEO_ALLOW_REGISTRATION:-}
       LEO_ENCRYPTION_KEY: ${LEO_ENCRYPTION_KEY:-}
-      LEO_9ROUTER_URL: http://9router:20128
-      LEO_9ROUTER_PASSWORD: ${LEO_9ROUTER_PASSWORD:-leo-local-development}
+      LEO_PUBLIC_URL: ${LEO_PUBLIC_URL:-}
+      LEO_ALLOWED_EMAILS: ${LEO_ALLOWED_EMAILS:-}
+      LEO_GOOGLE_CLIENT_ID: ${LEO_GOOGLE_CLIENT_ID:-}
+      LEO_GOOGLE_CLIENT_SECRET: ${LEO_GOOGLE_CLIENT_SECRET:-}
+      LEO_GITHUB_CLIENT_ID: ${LEO_GITHUB_CLIENT_ID:-}
+      LEO_GITHUB_CLIENT_SECRET: ${LEO_GITHUB_CLIENT_SECRET:-}
+      LEO_OIDC_ISSUER: ${LEO_OIDC_ISSUER:-}
+      LEO_OIDC_CLIENT_ID: ${LEO_OIDC_CLIENT_ID:-}
+      LEO_OIDC_CLIENT_SECRET: ${LEO_OIDC_CLIENT_SECRET:-}
+      LEO_OIDC_NAME: ${LEO_OIDC_NAME:-}
       LEO_SANDBOX_URL: http://sandboxd:8100
       LEO_SANDBOX_TOKEN: ${LEO_SANDBOX_TOKEN:-leo-local-development}
     ports:
@@ -36,6 +44,8 @@ services:
       - leo-data:/app/.leo
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Each user's own 9Router joins `routers`; the API signs accounts in on it and the worker calls its models.
+    networks: [default, routers]
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,6 +65,7 @@ services:
       - leo-data:/app/.leo
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks: [default, routers]
     depends_on:
       api:
         condition: service_healthy
@@ -71,24 +82,10 @@ services:
     ports:
       - "127.0.0.1:8888:8080"
     restart: unless-stopped
-  # Account sign-in backend (ChatGPT/Codex, Copilot, Gemini CLI, …). L.E.O. drives it from Settings → Add provider.
-  # No host port: only L.E.O.'s containers reach it. Pinned because L.E.O. uses its dashboard API.
-  9router:
-    image: decolua/9router:0.5.112
-    environment:
-      DATA_DIR: /app/data
-      INITIAL_PASSWORD: ${LEO_9ROUTER_PASSWORD:-leo-local-development}
-    volumes:
-      - 9router-data:/app/data
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:20128/api/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    restart: unless-stopped
-  # Agent mode. sandboxd is the only service with the Docker socket: it starts one locked-down container per
-  # workspace (no capabilities, CPU/memory/process limits, non-root) on the internal `leo-sandbox` network,
-  # whose only way out is the egress proxy below. No host port: only the API and worker reach it.
+  # Agent mode and model accounts. sandboxd is the only service with the Docker socket: it starts one locked-down
+  # container per workspace (no capabilities, CPU/memory/process limits, non-root) on the internal `leo-sandbox`
+  # network, whose only way out is the egress proxy below, and one 9Router per user who signs in to a model account
+  # (ChatGPT/Codex, Copilot, ...) on the `leo-routers` network. No host ports: only the API and worker reach them.
   sandboxd:
     build:
       context: .
@@ -102,6 +99,7 @@ services:
       LEO_SANDBOX_CPUS: ${LEO_SANDBOX_CPUS:-2}
       # Set to runsc after installing gVisor for stronger isolation between sandboxes and the host.
       LEO_SANDBOX_RUNTIME: ${LEO_SANDBOX_RUNTIME:-}
+      LEO_ROUTER_NETWORK: leo-routers
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -134,7 +132,9 @@ networks:
   sandbox:
     name: leo-sandbox
     internal: true
+  # Users' 9Routers: reachable from the API and worker, with internet access for the providers they sign in to.
+  routers:
+    name: leo-routers
 volumes:
   postgres-data:
   leo-data:
-  9router-data:

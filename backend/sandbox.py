@@ -224,6 +224,13 @@ class Sandbox:
             raise SandboxError(str(detail or f"Sandbox service returned HTTP {response.status_code}"))
         return response
 
+    async def ensure_router(self, user_id, password):
+        """Start the user's own 9Router (creating it the first time) and return its address."""
+        return (await self._request("PUT", f"/routers/{user_id}", json={"password": password}, timeout=660)).json()["url"]
+
+    async def delete_router(self, user_id):
+        await self._request("DELETE", f"/routers/{user_id}")
+
     async def ensure(self, sid):
         return (await self._request("PUT", f"/sessions/{sid}", timeout=120)).json()
 

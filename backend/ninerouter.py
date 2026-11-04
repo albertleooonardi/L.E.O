@@ -1,6 +1,7 @@
 """Account sign-in through 9Router: L.E.O. is the screen, 9Router keeps and refreshes the account tokens.
 
-9Router runs as a compose service (pinned, no host port) and serves signed-in accounts' models on an OpenAI-compatible
+Every user has their own 9Router, which sandboxd starts on their first sign-in (pinned image, no host port), because a
+9Router key reaches every account signed in on that router. It serves those accounts' models on an OpenAI-compatible
 /v1 API. L.E.O. drives its dashboard API to start sign-ins and polls device-code logins. It also catches the ChatGPT
 (Codex) browser redirect itself: OpenAI only accepts http://localhost:1455/auth/callback, and the browser cannot reach
 9Router's container.
@@ -52,11 +53,11 @@ class NineRouter:
                     if attempt or not self.cookies:
                         login = await client.post("/api/auth/login", json={"password": self.password})
                         if login.status_code != 200 or not login.json().get("success"):
-                            raise RouterError("L.E.O. could not sign in to 9Router; LEO_9ROUTER_PASSWORD must match its password")
+                            raise RouterError("L.E.O. could not sign in to your model router; its saved password no longer matches")
                         self.cookies = httpx.Cookies(client.cookies)
                     response = await client.request(method, path, **kwargs)
             except httpx.HTTPError as exc:
-                raise RouterError("9Router is not reachable; start it with docker compose up -d") from exc
+                raise RouterError("Your model router is not reachable; check that the sandboxd service is running") from exc
             except ValueError as exc:
                 raise RouterError("9Router returned an unreadable response") from exc
             if response.status_code != 401:
@@ -71,6 +72,20 @@ class NineRouter:
             detail = data.get("error") if isinstance(data, dict) else None
             raise RouterError(f"9Router: {detail if isinstance(detail, str) else f'HTTP {response.status_code}'}"[:240])
         return data if isinstance(data, dict) else {}
+
+    async def wait_ready(self, seconds=60):
+        """Wait for a router that was just started to answer."""
+        deadline = time.monotonic() + seconds
+        async with httpx.AsyncClient(base_url=self.url, timeout=5, transport=self.transport, trust_env=False) as client:
+            while True:
+                try:
+                    if (await client.get("/api/health")).is_success:
+                        return
+                except httpx.HTTPError:
+                    pass
+                if time.monotonic() > deadline:
+                    raise RouterError("Your model router did not start in time; try again in a minute")
+                await asyncio.sleep(1)
 
     async def accounts(self):
         """Signed-in accounts of the providers L.E.O. offers."""
@@ -90,11 +105,11 @@ class NineRouter:
 
 
 class SignIns:
-    """Sign-ins in progress, held in memory by the API process. `on_connected(provider, user_id, account)` adds the
-    account's models to L.E.O. and returns a summary for the UI."""
+    """Sign-ins in progress, held in memory by the API process. `router_for(user_id, create=False)` returns that user's
+    NineRouter; `on_connected(provider, user_id, account)` adds the account's models to L.E.O. and returns a summary."""
 
-    def __init__(self, router, on_connected):
-        self.router, self.on_connected, self.sessions = router, on_connected, {}
+    def __init__(self, router_for, on_connected):
+        self.router_for, self.on_connected, self.sessions = router_for, on_connected, {}
 
     def public(self, session):
         return {key: session.get(key) for key in ("id", "provider", "status", "error", "url", "user_code", "result")}
@@ -102,15 +117,16 @@ class SignIns:
     async def start(self, provider, user_id):
         spec = ACCOUNTS[provider]
         self.sessions = {k: s for k, s in self.sessions.items() if time.time() - s["created"] < SIGN_IN_SECONDS}
+        router = await self.router_for(user_id, create=True)
         if spec["flow"] == "device":
-            data = await self.router.request("GET", f"/api/oauth/{provider}/device-code")
+            data = await router.request("GET", f"/api/oauth/{provider}/device-code")
             session = {"device_code": data.get("device_code"), "code_verifier": data.get("codeVerifier"), "user_code": data.get("user_code"),
                        "url": data.get("verification_uri_complete") or data.get("verification_uri"),
                        # Some providers (Kiro) hand back client details the poll must return.
                        "extra": {k: v for k, v in data.items() if k.startswith("_")} or None}
             complete = session["device_code"] and session["url"]
         else:
-            data = await self.router.request("GET", f"/api/oauth/{provider}/authorize", params={"redirect_uri": CODEX_REDIRECT})
+            data = await router.request("GET", f"/api/oauth/{provider}/authorize", params={"redirect_uri": CODEX_REDIRECT})
             session = {"state": data.get("state"), "code_verifier": data.get("codeVerifier"), "url": data.get("authUrl")}
             complete = session["state"] and session["code_verifier"] and session["url"]
         if not complete:
@@ -125,7 +141,8 @@ class SignIns:
         if not session or session["user_id"] != user_id:
             raise KeyError(sid)
         if session["status"] == "waiting" and session.get("device_code"):
-            data = await self.router.request("POST", f"/api/oauth/{session['provider']}/poll", json={
+            router = await self.router_for(user_id)
+            data = await router.request("POST", f"/api/oauth/{session['provider']}/poll", json={
                 "deviceCode": session["device_code"], "codeVerifier": session["code_verifier"], "extraData": session["extra"]})
             if data.get("success"):
                 await self.finish(session, data.get("connection") or {})
@@ -151,7 +168,8 @@ class SignIns:
             return False, session["error"]
         session["status"] = "finishing"  # A repeated redirect must not exchange the single-use code twice.
         try:
-            data = await self.router.request("POST", f"/api/oauth/{session['provider']}/exchange", json={
+            router = await self.router_for(session["user_id"])
+            data = await router.request("POST", f"/api/oauth/{session['provider']}/exchange", json={
                 "code": query["code"], "redirectUri": CODEX_REDIRECT, "codeVerifier": session["code_verifier"], "state": state})
         except RouterError as exc:
             session.update(status="error", error=str(exc))

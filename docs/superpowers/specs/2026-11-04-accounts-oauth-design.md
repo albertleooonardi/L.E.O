@@ -74,7 +74,9 @@ or fails with `linked_elsewhere` if another user already has it.
 - sandboxd gains `PUT /routers/{user_id}` and `DELETE /routers/{user_id}`. PUT creates or starts the container
   `leo-router-<user_id>` from `LEO_ROUTER_IMAGE` (default the pinned `decolua/9router:0.5.112`): its own volume,
   `INITIAL_PASSWORD` from the request, the `leo-routers` network, memory/CPU/process limits, `no-new-privileges`, no host
-  port, `restart: unless-stopped`, and a label so sandboxd manages only its own routers. DELETE removes the container
+  port, `restart: unless-stopped`, and a label so sandboxd manages only its own routers. All capabilities are dropped
+  except `CHOWN`, `SETUID` and `SETGID`: the image's entrypoint chowns the volume, then drops to the `node` user with
+  `su-exec`. sandboxd pulls the image the first time it is missing. DELETE removes the container
   and keeps the volume.
 - The API creates a user's router on their first model-account sign-in. It generates the password, stores it in
   `routers`, and waits (bounded) for `/api/health`.

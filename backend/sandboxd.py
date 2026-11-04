@@ -32,6 +32,9 @@ from .sandbox import AGENT_UID, MAX_IMPORT_BYTES, WORKSPACE, SandboxError, TarBu
 
 SESSION = re.compile(r"[a-f0-9-]{8,64}")
 LABEL = "leo.session"
+# Each user's own 9Router. A separate label, so the sandbox idle reaper never stops them.
+ROUTER_LABEL = "leo.router"
+ROUTER_PORT = 20128
 
 
 def _bytes(value):
@@ -54,6 +57,10 @@ class Settings:
         self.runtime = os.getenv("LEO_SANDBOX_RUNTIME", "")  # e.g. runsc (gVisor) for stronger isolation
         self.idle_seconds = int(os.getenv("LEO_SANDBOX_IDLE_SECONDS", "1800"))
         self.socket = os.getenv("LEO_DOCKER_SOCKET", "/var/run/docker.sock")
+        self.router_image = os.getenv("LEO_ROUTER_IMAGE", "decolua/9router:0.5.112")
+        # Reachable by the API and worker, with internet access for the providers the router signs in to.
+        self.router_network = os.getenv("LEO_ROUTER_NETWORK", "leo-routers")
+        self.router_memory = _bytes(os.getenv("LEO_ROUTER_MEMORY", "512m"))
 
 
 class DockerError(Exception):
@@ -141,6 +148,10 @@ class Docker:
             half = max_output // 2
             text = f"{text[:half]}\n…[{len(text) - max_output} characters omitted]…\n{text[-half:]}"
         return {"exit_code": code if code is not None else -1, "output": text, "timed_out": timed_out, "truncated": truncated}
+
+
+class RouterInput(BaseModel):
+    password: str = Field(min_length=16, max_length=200, repr=False)
 
 
 class ExecInput(BaseModel):
@@ -315,6 +326,56 @@ def create_app(settings=None, docker_transport=None):
         await docker.request("DELETE", f"/containers/{name}", ok=(404,), params={"force": "true"})
         await docker.request("DELETE", f"/volumes/leo-ws-{sid}", ok=(404,), params={"force": "true"})
         last_used.pop(sid, None)
+        return {"ok": True}
+
+    def router_name(uid):
+        if not SESSION.fullmatch(uid):
+            raise HTTPException(400, "Invalid user id")
+        return f"leo-router-{uid}"
+
+    async def pull(image):
+        """Fetch an image the host does not have yet; the progress stream ends when the pull does."""
+        repository, _, tag = image.rpartition(":") if ":" in image.rsplit("/", 1)[-1] else (image, "", "latest")
+        await docker.request("POST", "/images/create", params={"fromImage": repository, "tag": tag}, timeout=600)
+
+    @app.put("/routers/{uid}")
+    async def ensure_router(uid: str, body: RouterInput):
+        """Create or start the user's 9Router. Its volume keeps signed-in accounts; the password applies on first start."""
+        name = router_name(uid)
+        async with locks.setdefault(name, asyncio.Lock()):
+            info = await docker.inspect(name)
+            if info and (info.get("Config", {}).get("Labels") or {}).get(ROUTER_LABEL) != uid:
+                raise HTTPException(409, f"{name} exists but was not created by sandboxd")
+            if info is None:
+                await docker.request("POST", "/volumes/create", json={"Name": name, "Labels": {ROUTER_LABEL: uid}})
+                spec = {"Image": settings.router_image, "Hostname": "router", "Labels": {ROUTER_LABEL: uid},
+                        "Env": ["DATA_DIR=/app/data", f"INITIAL_PASSWORD={body.password}"],
+                        "HostConfig": {"Mounts": [{"Type": "volume", "Source": name, "Target": "/app/data"}],
+                                       "Memory": settings.router_memory, "MemorySwap": settings.router_memory, "NanoCpus": int(1e9),
+                                       # Its entrypoint chowns the volume and drops to the `node` user with su-exec; nothing else.
+                                       "PidsLimit": 256, "CapDrop": ["ALL"], "CapAdd": ["CHOWN", "SETUID", "SETGID"],
+                                       "SecurityOpt": ["no-new-privileges"],
+                                       "NetworkMode": settings.router_network, "Init": True,
+                                       # It refreshes account tokens in the background, so it keeps running.
+                                       "RestartPolicy": {"Name": "unless-stopped"}}}
+                for attempt in range(2):
+                    try:
+                        await docker.request("POST", "/containers/create", params={"name": name}, json=spec)
+                        break
+                    except DockerError as exc:
+                        if exc.status == 404 and not attempt:
+                            await pull(settings.router_image)
+                        elif exc.status != 409:  # 409: another request created it first.
+                            raise
+                info = await docker.inspect(name)
+            if not info["State"]["Running"]:
+                await docker.request("POST", f"/containers/{name}/start", ok=(304,))
+        return {"url": f"http://{name}:{ROUTER_PORT}", "status": "running"}
+
+    @app.delete("/routers/{uid}")
+    async def stop_router(uid: str):
+        """Remove the container; the volume (signed-in accounts) stays, so the next sign-in picks up where it left off."""
+        await docker.request("DELETE", f"/containers/{router_name(uid)}", ok=(404,), params={"force": "true"})
         return {"ok": True}
 
     @app.post("/sessions/{sid}/exec")

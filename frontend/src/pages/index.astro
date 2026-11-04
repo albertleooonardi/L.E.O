@@ -179,6 +179,7 @@ import '../styles/global.css';
           <button type="button" role="tab" id="tab-routing" aria-controls="panel-routing" aria-selected="false" tabindex="-1"><Icon name="compass" size={16} /><span>Routing</span></button>
           <button type="button" role="tab" id="tab-search" aria-controls="panel-search" aria-selected="false" tabindex="-1"><Icon name="globe" size={16} /><span>Web search</span></button>
           <button type="button" role="tab" id="tab-limits" aria-controls="panel-limits" aria-selected="false" tabindex="-1"><Icon name="gauge" size={16} /><span>Limits</span></button>
+          <button type="button" role="tab" id="tab-account" aria-controls="panel-account" aria-selected="false" tabindex="-1"><Icon name="user" size={16} /><span>Account</span></button>
           <button type="button" role="tab" id="tab-general" aria-controls="panel-general" aria-selected="false" tabindex="-1"><Icon name="settings" size={16} /><span>General</span></button>
         </div>
         <div class="settings-panels">
@@ -197,7 +198,6 @@ import '../styles/global.css';
               <div class="account-divider"><span>or</span></div>
               <button type="button" class="text-button" id="use-api-key">Use an API key instead ›</button>
             </section>
-            <div id="account-list" class="account-list" hidden></div>
             <form id="provider-form" class="provider-form" hidden>
               <input id="provider-id" type="hidden" />
               <div class="field-grid">
@@ -350,6 +350,24 @@ import '../styles/global.css';
               <button type="submit" class="primary-button">Save changes</button>
             </div>
           </form>
+          <section class="settings-panel" role="tabpanel" id="panel-account" aria-labelledby="tab-account" hidden>
+            <div class="panel-intro"><div><h3>Account</h3><p>How you sign in, and the model accounts that belong to you.</p></div></div>
+            <div class="profile-card">
+              <span class="profile-avatar" aria-hidden="true"><img id="profile-avatar" alt="" referrerpolicy="no-referrer" hidden /><span id="profile-initial"></span></span>
+              <div><strong id="profile-name"></strong><small id="profile-detail"></small></div>
+            </div>
+            <h4 class="settings-subheading">Sign-in methods</h4>
+            <div class="settings-card" id="identity-list"></div>
+            <form id="password-form" class="provider-form" hidden>
+              <label id="current-password-field">Current password<input id="current-password" type="password" autocomplete="current-password" maxlength="128" /></label>
+              <label>New password<input id="new-password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required /><small class="field-hint">At least 8 characters.</small></label>
+              <div class="form-actions start"><button type="submit" class="primary-button">Save password</button><button type="button" class="secondary-button" id="cancel-password">Cancel</button></div>
+            </form>
+            <p class="form-feedback" id="identity-feedback" role="status"></p>
+            <div class="section-heading"><h4 class="settings-subheading">Your model accounts</h4><button type="button" class="text-button" id="add-model-account">Sign in to one ›</button></div>
+            <p class="field-hint">Subscriptions you signed in to, such as ChatGPT or Copilot. They run on your own model router, so nobody else on this server can use them.</p>
+            <div id="account-list" class="account-list"></div>
+          </section>
           <section class="settings-panel" role="tabpanel" id="panel-general" aria-labelledby="tab-general" hidden>
             <div class="panel-intro"><div><h3>General</h3><p>Appearance, history, and shortcuts.</p></div></div>
             <div class="settings-card">

@@ -1,0 +1,85 @@
+---
+import '@fontsource/ibm-plex-sans/latin-400.css';
+import '@fontsource/ibm-plex-sans/latin-500.css';
+import '@fontsource/ibm-plex-sans/latin-600.css';
+import Icon from './Icon.astro';
+import '../styles/global.css';
+
+interface Props { mode: 'signin' | 'register'; }
+const { mode } = Astro.props;
+const title = mode === 'signin' ? 'Sign in' : 'Create account';
+---
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Sign in to L.E.O — LLM Efficiency Orchestrator" />
+    <meta name="theme-color" content="#151515" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>{title} — L.E.O</title>
+    <script is:inline>
+      try { document.documentElement.dataset.theme = localStorage.getItem('leo-theme') === 'light' ? 'light' : 'dark'; } catch {}
+    </script>
+  </head>
+  <body>
+    <main class="auth-split" data-mode={mode}>
+      <section class="auth-pitch" aria-label="About L.E.O">
+        <div>
+          <div class="auth-brand"><Icon name="spark" size={26} /><span>L.E.O</span></div>
+          <h2>Your models.<br />One thoughtful answer.</h2>
+          <p>Bring your own keys and subscriptions. L.E.O. routes every request to the best model you have, and keeps them with your account.</p>
+          <ul class="auth-products">
+            <li><Icon name="message" size={18} /><div><strong>L.E.O Chat</strong><span>Ask, compare and review answers in the browser.</span></div></li>
+            <li><Icon name="code" size={18} /><div><strong>L.E.O CLI <em>Soon</em></strong><span>An agent in your terminal, signed in with this account.</span></div></li>
+          </ul>
+        </div>
+        <p class="auth-pitch-foot">Self-hosted. Your API keys are stored encrypted on your server.</p>
+      </section>
+
+      <section class="auth-panel">
+        <div class="auth-form-wrap">
+          <div class="auth-brand auth-brand-compact"><Icon name="spark" size={24} /><span>L.E.O</span></div>
+          <div class="auth-tabs" role="tablist" aria-label="Sign in or create an account">
+            <button type="button" role="tab" id="tab-signin" aria-selected={mode === 'signin' ? 'true' : 'false'} aria-controls="auth-body" data-tab="signin">Sign in</button>
+            <button type="button" role="tab" id="tab-register" aria-selected={mode === 'register' ? 'true' : 'false'} aria-controls="auth-body" data-tab="register">Create account</button>
+          </div>
+
+          <div id="auth-body" role="tabpanel">
+            <h1 id="auth-title">{mode === 'signin' ? 'Welcome back' : 'Create your account'}</h1>
+            <p id="auth-caption" class="auth-caption">{mode === 'signin' ? 'Your models, chats and keys, on any device.' : 'Use your work account, or pick a username and password.'}</p>
+
+            <div id="auth-banner" class="auth-banner" role="alert" hidden></div>
+
+            <div id="auth-providers" class="auth-providers" hidden></div>
+            <p id="auth-divider" class="auth-divider" hidden><span>or with a username</span></p>
+
+            <form id="auth-form" novalidate>
+              <label class="auth-field">
+                <span>Username</span>
+                <input id="auth-username" name="username" type="text" required minlength="3" maxlength="80" autocomplete="username" autocapitalize="none" spellcheck="false" />
+              </label>
+              <label class="auth-field">
+                <span class="auth-field-head">Password <em id="auth-caps" hidden>Caps Lock is on</em></span>
+                <span class="auth-password">
+                  <input id="auth-password" name="password" type="password" required maxlength="128" autocomplete="current-password" />
+                  <button type="button" id="auth-reveal" class="auth-reveal" aria-pressed="false" aria-controls="auth-password">Show</button>
+                </span>
+              </label>
+              <ul id="auth-rules" class="auth-rules" aria-live="polite" hidden>
+                <li data-rule="username">Username of at least 3 characters</li>
+                <li data-rule="length">Password of at least 8 characters</li>
+              </ul>
+              <p id="auth-feedback" class="auth-feedback" role="status"></p>
+              <button type="submit" id="auth-submit" class="auth-primary-button">{mode === 'signin' ? 'Sign in' : 'Create account'}</button>
+            </form>
+            <p id="auth-closed" class="auth-closed" hidden></p>
+          </div>
+        </div>
+      </section>
+    </main>
+    <script>
+      import '../scripts/auth';
+    </script>
+  </body>
+</html>

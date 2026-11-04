@@ -243,9 +243,20 @@ When HEAD sees a page build, it takes the page's topic ("a landing page about **
 ## Reference
 
 <details>
+<summary><b>Accounts and sign-in</b></summary>
+
+The sign-in page offers **Continue with Google**, **GitHub**, or any OpenID Connect provider (Keycloak, Authentik, Microsoft Entra, Auth0, ...), plus username and password. A provider's button appears once its client ID and secret are in `.env` (see `.env.example`). Register this callback URL with each provider: `<LEO_PUBLIC_URL>/api/auth/oauth/<google|github|oidc>/callback`, for example `http://localhost:8000/api/auth/oauth/google/callback`.
+
+- **Who may join:** `LEO_ALLOWED_EMAILS` lists exact emails and `@domain` entries, and is checked on every OAuth sign-in. Left empty, OAuth signs in existing accounts and creates only the very first one.
+- **Same person, several providers:** signing in with GitHub using the same verified email as your Google sign-in lands on the same account. An email only counts when the provider says it is verified.
+- **Settings → Account:** link or unlink providers, set or change a password (OAuth-only accounts can add one), and manage your model accounts. You cannot unlink your last way to sign in.
+
+</details>
+
+<details>
 <summary><b>Connect models</b></summary>
 
-**Sign in with an account (Docker Compose).** **Settings → Add provider** first offers one-click sign-in: ChatGPT (Codex), GitHub Copilot, Kiro, Kimi, Kilo Code, Qoder, Grok CLI, and Z.ai GLM Coding. Device-code providers show a code to enter on their sign-in page; ChatGPT opens OpenAI's sign-in page and redirects back to `localhost:1455`, which the api container publishes on loopback for this. L.E.O. notices when you finish, adds the account's models, and lists the account under **Signed-in accounts** with **Disconnect**. Behind it, the `9router` service ([9Router](https://github.com/decolua/9router), pinned, no host port) keeps and refreshes the tokens and serves the models; L.E.O. signs in to it with `LEO_9ROUTER_PASSWORD` and creates its own 9Router API key. 9Router warns that ChatGPT (Codex), GitHub Copilot, and Kiro do not license subscription sign-in for router use and may restrict such accounts; L.E.O. asks you to accept that before starting. Claude subscription sign-in is not offered: Anthropic only allows those tokens in its own apps, so use a Claude API key.
+**Sign in with an account (Docker Compose).** **Settings → Add provider** first offers one-click sign-in: ChatGPT (Codex), GitHub Copilot, Kiro, Kimi, Kilo Code, Qoder, Grok CLI, and Z.ai GLM Coding. Device-code providers show a code to enter on their sign-in page; ChatGPT opens OpenAI's sign-in page and redirects back to `localhost:1455`, which the api container publishes on loopback for this. L.E.O. notices when you finish, adds the account's models, and lists the account under **Settings → Account → Your model accounts** with **Disconnect**. Behind it, each user gets their own [9Router](https://github.com/decolua/9router) container (pinned, no host port), which sandboxd starts on that user's first sign-in and removes when they disconnect their last account. It keeps and refreshes the tokens and serves the models. Routers are per user because a 9Router API key reaches every account signed in on that router; with one router each, nobody can use another user's subscription. L.E.O. generates each router's password and stores it encrypted, like API keys. 9Router warns that ChatGPT (Codex), GitHub Copilot, and Kiro do not license subscription sign-in for router use and may restrict such accounts; L.E.O. asks you to accept that before starting. Claude subscription sign-in is not offered: Anthropic only allows those tokens in its own apps, so use a Claude API key.
 
 **Or use an API key:**
 
@@ -260,7 +271,7 @@ When HEAD sees a page build, it takes the page's topic ("a landing page about **
 | --- | --- | --- |
 | Ollama | `http://localhost:11434/v1`, Chat Completions; pull a model yourself | General · light |
 | vLLM / LM Studio | Your server URL (LM Studio is usually port 1234); Chat Completions | General · standard |
-| 9Router | Managed by Compose (`http://9router:20128/v1`); prefer **Sign in with an account**. Outside Docker: `npm i -g 9router`, `9router --host 127.0.0.1`, then `http://localhost:20128/v1` with a key from its dashboard | Set per model (discovery reads its context and reasoning data) |
+| 9Router | Managed per user by Compose; prefer **Sign in with an account**. Outside Docker: `npm i -g 9router`, `9router --host 127.0.0.1`, then `http://localhost:20128/v1` with a key from its dashboard | Set per model (discovery reads its context and reasoning data) |
 | OpenRouter | `https://openrouter.ai/api/v1`; Chat Completions | Set per model |
 | OpenAI / GPT | `https://api.openai.com/v1`; Responses | Coding, Backend, Reasoning · strong |
 | Anthropic / Claude | `https://api.anthropic.com/v1`; Anthropic Messages | Coding, Backend, Frontend, Reasoning · strong |

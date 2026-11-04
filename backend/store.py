@@ -7,7 +7,7 @@ import uuid
 from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
-from sqlalchemy import (JSON, Boolean, Column, Float, Integer, MetaData, String, Table, Text,
+from sqlalchemy import (JSON, Boolean, Column, Float, Integer, MetaData, String, Table, Text, UniqueConstraint,
                         and_, create_engine, delete, event, func, insert, inspect, or_, select, text, update)
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 
@@ -53,7 +53,20 @@ skills = Table("skills", metadata,
     Column("id", String(40), primary_key=True), Column("config", JSON, nullable=False), Column("position", Integer, nullable=False))
 users = Table("users", metadata,
     Column("id", String(36), primary_key=True), Column("username", String(80), unique=True, nullable=False),
-    Column("password_hash", String(255), nullable=False), Column("created_at", Float, nullable=False))
+    # "" for accounts that only sign in with OAuth: bcrypt rejects it, so password sign-in fails for them.
+    Column("password_hash", String(255), nullable=False), Column("created_at", Float, nullable=False),
+    # Only ever set from a verified OAuth email, so it can link providers without taking over password accounts.
+    Column("email", String(255)), Column("display_name", String(120)), Column("avatar_url", Text))
+# OAuth sign-ins (Google, GitHub, OIDC) attached to a user: one row per provider account.
+identities = Table("identities", metadata,
+    Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True, nullable=False),
+    Column("provider", String(20), nullable=False), Column("subject", String(255), nullable=False),
+    Column("email", String(255)), Column("created_at", Float, nullable=False),
+    UniqueConstraint("provider", "subject", name="uq_identities_provider_subject"))
+# Each user's own 9Router (run by sandboxd); the password is encrypted like API keys.
+routers = Table("routers", metadata,
+    Column("user_id", String(36), primary_key=True), Column("url", String(255), nullable=False),
+    Column("secret", Text, nullable=False), Column("created_at", Float, nullable=False))
 # Agent-mode sandbox workspaces, one per conversation (same id). The git token is encrypted like API keys.
 workspaces = Table("workspaces", metadata,
     Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True),
@@ -133,6 +146,10 @@ class Store:
             db.execute(delete(user_sessions).where(func.length(user_sessions.c.token_hash) != 64))
         self._migrate(None, "CREATE UNIQUE INDEX IF NOT EXISTS ix_user_sessions_token_hash ON user_sessions (token_hash)")
         self._migrate(None, "CREATE INDEX IF NOT EXISTS ix_user_sessions_user_id ON user_sessions (user_id)")
+        for column, kind in (("email", "VARCHAR(255)"), ("display_name", "VARCHAR(120)"), ("avatar_url", "TEXT")):
+            self._migrate(lambda: column in {c["name"] for c in inspect(self.engine).get_columns("users")},
+                          f"ALTER TABLE users ADD COLUMN {column} {kind}")
+        self._migrate(None, "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users (email)")
 
     def _migrate(self, done, statement):
         """Apply one schema change unless `done()` says it is already there (None: the statement is idempotent)."""
@@ -168,12 +185,63 @@ class Store:
 
     # -- users ------------------------------------------------------------
 
-    def create_user(self, username: str, password_hash: str) -> dict:
+    def create_user(self, username: str, password_hash: str, email=None, display_name=None, avatar_url=None) -> dict:
         user_id = str(uuid.uuid4())
         with self.engine.begin() as db:
-            db.execute(insert(users).values(id=user_id, username=username, password_hash=password_hash,
-                                            created_at=time.time()))
+            db.execute(insert(users).values(id=user_id, username=username, password_hash=password_hash, created_at=time.time(),
+                                            email=email, display_name=display_name, avatar_url=avatar_url))
         return self.get_user(user_id)
+
+    def free_username(self, wanted: str) -> str:
+        """`wanted` reduced to safe characters, with a number added if another account has it."""
+        base = "-".join(re.findall(r"[a-z0-9_.]+", wanted.lower()))[:70].strip("-.") or "user"
+        base = base if len(base) >= 3 else f"{base}-user"
+        with self.engine.connect() as db:
+            taken = set(db.execute(select(users.c.username).where(users.c.username.like(f"{base}%"))).scalars())
+        return next(name for n in range(len(taken) + 2) if (name := f"{base}-{n}" if n else base) not in taken)
+
+    def get_user_by_email(self, email: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(users).where(users.c.email == email.lower())).mappings().first()
+        return dict(row) if row else None
+
+    def update_user(self, user_id: str, **values) -> None:
+        with self.engine.begin() as db:
+            db.execute(update(users).where(users.c.id == user_id).values(**values))
+
+    # -- OAuth identities -------------------------------------------------
+
+    def find_identity(self, provider: str, subject: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(identities).where(identities.c.provider == provider, identities.c.subject == subject)).mappings().first()
+        return dict(row) if row else None
+
+    def link_identity(self, user_id: str, provider: str, subject: str, email: str | None) -> None:
+        with self.engine.begin() as db:
+            db.execute(insert(identities).values(id=str(uuid.uuid4()), user_id=user_id, provider=provider, subject=subject,
+                                                 email=email, created_at=time.time()))
+
+    def list_identities(self, user_id: str) -> list[dict]:
+        with self.engine.connect() as db:
+            rows = db.execute(select(identities).where(identities.c.user_id == user_id).order_by(identities.c.created_at)).mappings().all()
+        return [dict(r) for r in rows]
+
+    def unlink_identity(self, user_id: str, provider: str) -> int:
+        with self.engine.begin() as db:
+            return db.execute(delete(identities).where(identities.c.user_id == user_id, identities.c.provider == provider)).rowcount
+
+    # -- per-user 9Router -------------------------------------------------
+
+    def get_router(self, user_id: str) -> dict | None:
+        """{url, password} of the user's own 9Router, or None before their first model-account sign-in."""
+        with self.engine.connect() as db:
+            row = db.execute(select(routers).where(routers.c.user_id == user_id)).mappings().first()
+        return {"url": row["url"], "password": self.cipher.decrypt(row["secret"].encode()).decode()} if row else None
+
+    def save_router(self, user_id: str, url: str, password: str) -> None:
+        with self.engine.begin() as db:
+            db.execute(insert(routers).values(user_id=user_id, url=url, secret=self.cipher.encrypt(password.encode()).decode(),
+                                              created_at=time.time()))
 
     def get_user(self, user_id: str) -> dict | None:
         with self.engine.connect() as db:

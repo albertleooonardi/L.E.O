@@ -165,6 +165,7 @@ class FakeDocker:
     def __init__(self):
         self.calls, self.containers, self.archives = [], {}, []
         self.exec_specs, self.exec_starts, self.exit_code = [], [], 0
+        self.images, self.pulls = {'decolua/9router:0.5.112', 'leo-sandbox:latest'}, []
 
     def __call__(self, request):
         path, method = request.url.path, request.method
@@ -176,8 +177,14 @@ class FakeDocker:
             return httpx.Response(201, json={})
         if path == '/containers/create':
             self.spec = json.loads(request.content)
-            self.containers[request.url.params['name']] = {'State': {'Running': False}}
+            if self.spec['Image'] not in self.images:
+                return httpx.Response(404, json={'message': f"No such image: {self.spec['Image']}"})
+            self.containers[request.url.params['name']] = {'State': {'Running': False}, 'Config': {'Labels': self.spec.get('Labels', {})}}
             return httpx.Response(201, json={'Id': 'abc'})
+        if path == '/images/create':
+            self.pulls.append(dict(request.url.params))
+            self.images.add(f"{request.url.params['fromImage']}:{request.url.params['tag']}")
+            return httpx.Response(200, content=b'{"status":"Downloaded"}')
         if path.endswith('/start') and path.startswith('/containers/'):
             self.containers[path.split('/')[2]]['State']['Running'] = True
             return httpx.Response(204)
@@ -248,6 +255,37 @@ def test_sandboxd_timeout_kills_every_process_the_command_started(sandboxd):
     assert marker.removeprefix('LEO_EXEC=') in cleanup['Cmd'] and cleanup['User'] == '1000:1000'
     assert not any(e.startswith('LEO_EXEC=') for e in cleanup.get('Env') or [])
     assert docker.exec_starts[-1]['Detach'] is False
+
+
+UID = '0b1c2d3e-0000-4000-8000-0000000000aa'
+
+
+def test_sandboxd_runs_one_locked_down_router_per_user(sandboxd):
+    client, docker = sandboxd
+    assert client.put(f'/routers/{UID}', json={'password': 'p' * 24}).json() == {'url': f'http://leo-router-{UID}:20128', 'status': 'running'}
+    spec, host = docker.spec, docker.spec['HostConfig']
+    assert spec['Image'] == 'decolua/9router:0.5.112' and 'INITIAL_PASSWORD=' + 'p' * 24 in spec['Env'] and spec['Labels'] == {'leo.router': UID}
+    assert host['NetworkMode'] == 'leo-routers' and host['CapDrop'] == ['ALL'] and host['SecurityOpt'] == ['no-new-privileges']
+    assert host['CapAdd'] == ['CHOWN', 'SETUID', 'SETGID'], 'only what its entrypoint needs to drop to the node user'
+    assert host['RestartPolicy'] == {'Name': 'unless-stopped'} and 'PortBindings' not in host and host['Memory'] == 512 * 1024 ** 2
+    assert host['Mounts'] == [{'Type': 'volume', 'Source': f'leo-router-{UID}', 'Target': '/app/data'}]
+    client.put(f'/routers/{UID}', json={'password': 'p' * 24})
+    assert docker.calls.count(('POST', '/containers/create')) == 1  # Idempotent.
+    assert client.put('/routers/not_valid!', json={'password': 'p' * 24}).status_code in (400, 404)
+    assert client.put(f'/routers/{UID}', json={'password': 'short'}).status_code == 422
+    assert client.delete(f'/routers/{UID}').json() == {'ok': True}
+    assert ('DELETE', f'/containers/leo-router-{UID}') in docker.calls
+    assert not any(path.startswith('/volumes/') and method == 'DELETE' for method, path in docker.calls), 'accounts stay in the volume'
+
+
+def test_sandboxd_pulls_the_router_image_once_and_leaves_foreign_containers_alone(sandboxd):
+    client, docker = sandboxd
+    docker.images.discard('decolua/9router:0.5.112')
+    assert client.put(f'/routers/{UID}', json={'password': 'p' * 24}).status_code == 200
+    assert docker.pulls == [{'fromImage': 'decolua/9router', 'tag': '0.5.112'}]
+    other = '0b1c2d3e-0000-4000-8000-0000000000bb'
+    docker.containers[f'leo-router-{other}'] = {'State': {'Running': True}, 'Config': {'Labels': {}}}
+    assert client.put(f'/routers/{other}', json={'password': 'p' * 24}).status_code == 409
 
 
 def test_sandboxd_imports_through_a_fresh_staging_folder(sandboxd):
