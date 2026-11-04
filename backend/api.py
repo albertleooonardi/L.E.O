@@ -19,12 +19,15 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .auth import SYSTEM_USER, Auth, CurrentUser
 from .catalog import PRESETS
 from .config import Config
+from . import mcp_auth
+from .connectors import Connectors, public as public_connector
+from .mcp_client import MCPClient, MCPError, NeedsAuth, check_url
 from .oauth import OAuth, OAuthError, email_allowed, pkce_pair
 from .ninerouter import ACCOUNTS, RISK_NOTICE, NineRouter, RouterError, SignIns, serve_callback
 from .providers import ProviderError, list_models
 from .router import choose_mode, classify, rank
 from .sandbox import MAX_IMPORT_BYTES, Sandbox, SandboxError, tar_to_zip, workspace_path, zip_to_tar
-from .schemas import (AccountSignIn, AdoptModels, ApprovalInput, Connection, Me, PasswordChange, Preferences, RouteInput, RunInput,
+from .schemas import (AccountSignIn, AdoptModels, ApprovalInput, Connection, ConnectorInput, ConnectorUpdate, Me, PasswordChange, Preferences, RouteInput, RunInput,
                       Skill, SteerInput, UserLogin, UserRegister, User, WorkspaceInput)
 from .store import Conflict, Store, TERMINAL
 from .tools import ToolError, web_search
@@ -40,12 +43,15 @@ PUBLIC_API_PATHS = {
     "/api/auth/login",
     "/api/auth/providers",
     "/api/session",
+    # Arrives from the connector's sign-in page, so the SameSite=Strict session cookie is not sent; the encrypted
+    # leo_mcp_oauth cookie says whose sign-in it is.
+    "/api/connectors/oauth/callback",
 }
 # OAuth start and callback check the session themselves when linking.
 PUBLIC_API_PREFIXES = ("/api/auth/oauth/",)
 
 
-def create_app(config=None, store=None, sandbox=None, oauth=None):
+def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=None):
     config = config or Config()
     remote = [h for h in config.hosts if h.strip() not in LOCAL_HOSTS]
     if remote and not config.api_token:
@@ -54,6 +60,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None):
                            "hostname, and put HTTPS in front of L.E.O.")
     store = store or Store(config)
     oauth = oauth or OAuth(config)
+    connectors = Connectors(store, mcp_transport)
     sandbox = sandbox or (Sandbox(config.sandbox_url, config.sandbox_token) if config.sandbox_url else None)
     auth = Auth(store, config)
     async def router_for(user_id, create=False):
@@ -182,7 +189,8 @@ def create_app(config=None, store=None, sandbox=None, oauth=None):
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "version": "0.1.0", "authentication_required": bool(config.api_token), "agent": sandbox is not None}
+        return {"status": "ok", "version": "0.1.0", "authentication_required": bool(config.api_token),
+                "agent": bool(config.server_agent and sandbox)}
 
     # ---------------- auth ----------------
 
@@ -283,14 +291,14 @@ def create_app(config=None, store=None, sandbox=None, oauth=None):
         # Paths on this site only: "//host" and "/\\host" would leave it.
         return value if value.startswith("/") and not value.startswith(("//", "/\\")) else "/"
 
-    def navigate(target):
+    def navigate(target, cookie=("leo_oauth", "/api/auth/oauth")):
         """Leave the callback through a page that navigates itself. After a cross-site redirect from the provider the
         browser holds back SameSite=Strict cookies; a navigation our own page starts sends them."""
         script = json.dumps(target).replace("<", "\\u003c")
         response = HTMLResponse(f'<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url={html.escape(target)}">'
                                 f'<title>Signing in to L.E.O</title><script>location.replace({script})</script>',
                                 headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
-        response.delete_cookie("leo_oauth", path="/api/auth/oauth")
+        response.delete_cookie(cookie[0], path=cookie[1])
         return response
 
     def fill_profile(user_id, identity):
@@ -642,7 +650,11 @@ def create_app(config=None, store=None, sandbox=None, oauth=None):
 
     # ---------------- agent workspaces ----------------
 
+    AGENT_MOVED = "Agent work is moving to L.E.O CLI; set LEO_SERVER_AGENT=1 to run it on this server"
+
     def require_sandbox():
+        if not config.server_agent:
+            raise HTTPException(403, AGENT_MOVED)
         if not sandbox:
             raise HTTPException(400, "Agent mode needs the sandbox service; start L.E.O. with docker compose (LEO_SANDBOX_URL is not set)")
         return sandbox
@@ -714,10 +726,138 @@ def create_app(config=None, store=None, sandbox=None, oauth=None):
         uid = user.owner_id
         return store.usage_report(conversation_id, user_id=uid)
 
+    # ---------------- connectors (remote MCP servers) ----------------
+
+    def own_connector(connector_id, user):
+        found = store.get_connector(connector_id, account(user)["id"])
+        if not found:
+            raise HTTPException(404, "Connector not found")
+        return found
+
+    @app.get("/api/connectors")
+    def list_connectors(user: CurrentUser = Depends(current_user)):
+        return [public_connector(c) for c in store.list_connectors(account(user)["id"])]
+
+    @app.post("/api/connectors", status_code=201)
+    async def add_connector(body: ConnectorInput, user: CurrentUser = Depends(current_user)):
+        url = body.url.strip()
+        try:
+            await check_url(url, config.mcp_allow_private)
+        except MCPError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        secret = {"token": body.token.strip()} if body.auth == "token" and body.token else {}
+        if body.auth == "oauth" and body.client_id:
+            secret["oauth"] = {"client": {"client_id": body.client_id.strip(), "client_secret": (body.client_secret or "").strip() or None}}
+        found = store.create_connector(account(user)["id"], {"name": body.name.strip(), "url": url, "auth": body.auth, "enabled": True,
+                                                            "status": "sign_in" if body.auth == "oauth" else "new", "error": None,
+                                                            "tools": [], "permissions": {}}, secret or None)
+        if body.auth != "oauth":
+            try:
+                found = await connectors.refresh_tools(found)
+            except MCPError:
+                found = store.get_connector(found["id"], found["user_id"])  # Saved with the error; fix it in Settings.
+        return public_connector(found)
+
+    @app.put("/api/connectors/{connector_id}")
+    def edit_connector(connector_id: str, body: ConnectorUpdate, user: CurrentUser = Depends(current_user)):
+        found = own_connector(connector_id, user)
+        values = {key: value for key, value in (("name", body.name and body.name.strip()), ("enabled", body.enabled)) if value is not None}
+        if body.permissions is not None:
+            known = {tool["name"] for tool in found.get("tools") or []}
+            if set(body.permissions) - known:
+                raise HTTPException(400, "Unknown tool: " + ", ".join(sorted(set(body.permissions) - known))[:200])
+            values["permissions"] = {**(found.get("permissions") or {}), **body.permissions}
+        secret = None
+        if body.token is not None and found.get("auth") == "token":
+            secret = {**found["secret"], "token": body.token.strip()}
+        if body.client_id is not None and found.get("auth") == "oauth":
+            secret = {**found["secret"], "oauth": {"client": {"client_id": body.client_id.strip(), "client_secret": (body.client_secret or "").strip() or None}}}
+            values.update(status="sign_in", needs_client=False)
+        return public_connector(store.update_connector(connector_id, found["user_id"], config=values, secret=secret))
+
+    @app.post("/api/connectors/{connector_id}/refresh")
+    async def refresh_connector(connector_id: str, user: CurrentUser = Depends(current_user)):
+        found = own_connector(connector_id, user)
+        try:
+            return public_connector(await connectors.refresh_tools(found))
+        except NeedsAuth as exc:
+            raise HTTPException(409, "Sign in to this connector again" if found.get("auth") == "oauth" else "The connector refused the token") from exc
+        except MCPError as exc:
+            raise HTTPException(502, str(exc)) from exc
+
+    @app.delete("/api/connectors/{connector_id}")
+    def remove_connector(connector_id: str, user: CurrentUser = Depends(current_user)):
+        found = own_connector(connector_id, user)
+        store.delete_connector(connector_id, found["user_id"])
+        return {"ok": True}
+
+    def connector_callback(request):
+        return f"{config.public_url or str(request.base_url).rstrip('/')}/api/connectors/oauth/callback"
+
+    MCP_COOKIE = ("leo_mcp_oauth", "/api/connectors")
+
+    @app.get("/api/connectors/{connector_id}/oauth/start")
+    async def connector_sign_in(connector_id: str, request: Request, user: CurrentUser = Depends(current_user)):
+        """Send the browser to the connector's sign-in page (registering L.E.O. there first if needed)."""
+        found = own_connector(connector_id, user)
+        if found.get("auth") != "oauth":
+            raise HTTPException(400, "This connector does not use a sign-in")
+        oauth_state = (found.get("secret") or {}).get("oauth") or {}
+        try:
+            await check_url(found["url"], config.mcp_allow_private)
+            challenge = ""
+            try:  # The connector's 401 names where its sign-in metadata lives.
+                async with MCPClient(found["url"], transport=mcp_transport).session():
+                    pass
+            except NeedsAuth as exc:
+                challenge = exc.challenge
+            except MCPError:
+                pass
+            meta = await mcp_auth.discover(found["url"], challenge, mcp_transport, config.mcp_allow_private)
+            client = oauth_state.get("client") or await mcp_auth.register(meta, connector_callback(request), mcp_transport)
+        except MCPError as exc:
+            needs_client = "paste a client ID" in str(exc)
+            store.update_connector(found["id"], found["user_id"], config={"status": "sign_in", "error": str(exc), "needs_client": needs_client})
+            return navigate(f"/?{urlencode({'settings': 'connectors', 'error': 'needs_client' if needs_client else 'failed'})}", MCP_COOKIE)
+        store.update_connector(found["id"], found["user_id"], secret={**found["secret"], "oauth": {**oauth_state, "meta": meta, "client": client}})
+        state, (verifier, code_challenge) = secrets.token_urlsafe(24), pkce_pair()
+        response = RedirectResponse(mcp_auth.authorize_url(meta, client, connector_callback(request), state, code_challenge), status_code=307)
+        pending = {"state": state, "verifier": verifier, "connector": found["id"], "user": found["user_id"]}
+        response.set_cookie(MCP_COOKIE[0], store.cipher.encrypt(json.dumps(pending).encode()).decode(), max_age=600, httponly=True,
+                            samesite="lax", secure=request.url.scheme == "https", path=MCP_COOKIE[1])
+        return response
+
+    @app.get("/api/connectors/oauth/callback")
+    async def connector_signed_in(request: Request, code: str = Query("", max_length=4096), state: str = Query("", max_length=200),
+                                  error: str = Query("", max_length=200)):
+        try:
+            pending = json.loads(store.cipher.decrypt(request.cookies.get(MCP_COOKIE[0], "").encode(), ttl=600))
+        except (InvalidToken, ValueError):
+            pending = None
+        found = store.get_connector(pending["connector"], pending["user"]) if pending else None
+        if not found or not state or not secrets.compare_digest(pending["state"], state):
+            return navigate("/?settings=connectors&error=failed", MCP_COOKIE)
+        if error or not code:
+            return navigate("/?settings=connectors&error=cancelled", MCP_COOKIE)
+        oauth_state = found["secret"].get("oauth") or {}
+        try:
+            tokens = await mcp_auth.exchange(oauth_state["meta"], oauth_state["client"], code, pending["verifier"], connector_callback(request), mcp_transport)
+            found = store.update_connector(found["id"], found["user_id"], secret={**found["secret"], "oauth": {**oauth_state, "tokens": tokens}},
+                                           config={"status": "connected", "error": None})
+            await connectors.refresh_tools(found)
+        except (MCPError, KeyError) as exc:
+            store.update_connector(found["id"], found["user_id"], config={"status": "sign_in", "error": str(exc)[:300]})
+            return navigate("/?settings=connectors&error=failed", MCP_COOKIE)
+        return navigate(f"/?{urlencode({'settings': 'connectors', 'connected': found['id']})}", MCP_COOKIE)
+
     @app.post("/api/runs", status_code=202)
     def create_run(body: RunInput, user: CurrentUser = Depends(current_user)):
         if body.mode == "agent":
             require_sandbox()
+        elif body.conversation_id and not config.server_agent and store.get_workspace(body.conversation_id, user.owner_id):
+            raise HTTPException(409, f"This is an agent chat. {AGENT_MOVED}, or start a new chat.")
+        if body.connectors and any(not store.get_connector(c, user.id) for c in body.connectors):
+            raise HTTPException(400, "Unknown connector")
         try:
             return store.create_run(body, user.owner_id)
         except IntegrityError as exc:
@@ -741,8 +881,15 @@ def create_app(config=None, store=None, sandbox=None, oauth=None):
 
     @app.post("/api/runs/{run_id}/approve")
     def approve_run(run_id: str, body: ApprovalInput, user: CurrentUser = Depends(current_user)):
-        """Answer the agent's pending approval (a git push, or more budget); the run then resumes."""
+        """Answer a run's pending approval (a connector tool call, a git push, or more budget); the run then resumes."""
+        run = store.get_run(run_id, user.owner_id, private=True)
+        pending = ((run or {}).get("state") or {}).get("pending_approval") or {}
         store.resolve_approval(run_id, body.approval_id, body.approved, user.owner_id)
+        detail = pending.get("detail") or {}
+        if body.remember and body.approved and pending.get("id") == body.approval_id and pending.get("kind") == "mcp_tool":
+            found = store.get_connector(detail.get("connector_id", ""), run["user_id"])
+            if found:  # Always allow: this tool runs without asking from now on.
+                store.update_connector(found["id"], found["user_id"], config={"permissions": {**(found.get("permissions") or {}), detail["tool"]: "allow"}})
         return {"ok": True}
 
     @app.post("/api/runs/{run_id}/steer")

@@ -6,7 +6,7 @@ type Mode = 'auto' | 'quick' | 'reviewed' | 'deep' | 'agent';
 type Provider = { id: string; name: string; protocol: string; base_url: string; model: string; local: boolean; free: boolean; enabled: boolean; has_key: boolean; priority: number; context_window: number; input_price: number | null; output_price: number | null; token_parameter: string; skills: string[]; tier: string; reasoning: boolean; tools?: boolean | null; calls?: number; avg_input_tokens?: number | null; avg_output_tokens?: number | null };
 type Skill = { id: string; name: string; description: string; keywords: string[]; instructions: string; enabled: boolean };
 type Preset = { id: string; name: string; protocol: string; base_url: string; local?: boolean; free?: boolean; hint: string; skills?: string[]; tier?: string; reasoning?: boolean };
-type Preferences = { generator_id: string | null; planner_id: string | null; reviewer_id: string | null; mode: Mode; routing: string; allow_paid: boolean; max_cost: number; max_calls: number; max_repairs: number; max_output_tokens: number; context_tokens: number; token_budget: number; timeout_seconds: number; max_run_seconds: number; system_prompt: string; smart_routing?: boolean; web_search?: string; search_url?: string; search_pages?: number; page_photos?: boolean;
+type Preferences = { generator_id: string | null; planner_id: string | null; reviewer_id: string | null; mode: Mode; routing: string; allow_paid: boolean; max_cost: number; max_calls: number; max_repairs: number; max_tool_calls: number; max_output_tokens: number; context_tokens: number; token_budget: number; timeout_seconds: number; max_run_seconds: number; system_prompt: string; smart_routing?: boolean; web_search?: string; search_url?: string; search_pages?: number; page_photos?: boolean;
   agent_max_steps: number; agent_max_calls: number; agent_token_budget: number; agent_max_cost: number; agent_max_run_seconds: number; agent_parallel: number; agent_command_timeout: number };
 type Usage = { route?: RouteInfo; calls?: number; input_tokens?: number; output_tokens?: number; estimated_cost?: number; estimated?: boolean; uncertain_calls?: number; context_messages_omitted?: number; review_passed?: boolean | null };
 type Run = { id: string; conversation_id: string; status: string; phase: string; output: string; error?: string; usage: Usage; mode: Mode; created_at?: number };
@@ -242,11 +242,11 @@ async function openChat(id: string) {
   closeStream();
   const data = await api<FullConversation>(`/conversations/${id}`);
   if (nav !== navigation) return;
-  activeId = id; current = data; rememberChat(); renderConversation(); closeSidebar(); dialog('search-dialog').close();
+  activeId = id; current = data; rememberChat(); renderConversation(); renderConnectorMenu(); closeSidebar(); dialog('search-dialog').close();
   if (data.active_run) watchRun(data.active_run);
 }
 function newChat() {
-  navigation++; canvas.hide(); closeStream(); activeId = null; current = null; rememberChat(); renderConversation(); closeSidebar(); prompt.value = ''; resizePrompt(); prompt.focus(); window.scrollTo({ top: 0 });
+  navigation++; canvas.hide(); closeStream(); activeId = null; current = null; rememberChat(); renderConversation(); renderConnectorMenu(); closeSidebar(); prompt.value = ''; resizePrompt(); prompt.focus(); window.scrollTo({ top: 0 });
 }
 // Live run view: the orchestration stages light up as the worker reports them.
 const STAGES: Record<Mode, [string, string][]> = {
@@ -429,20 +429,44 @@ function listenAgent(listen: (kind: string, handler: (data: any) => void) => voi
     if (['write_file', 'edit_file', 'bash'].includes(data.name) && !el('workspace-panel').hidden) { clearTimeout(filesTimer); filesTimer = setTimeout(() => void loadFiles(), 1200); }
   });
   listen('todos', data => renderTodos(data.items || []));
+  listen('connector_tool', data => {
+    // A tool call in a connected app: one row in the timeline, with its arguments and result one click away.
+    if (!document.querySelector('#run-live .agent-feed')) el('run-live').append(node('ol', '', 'agent-feed'));
+    const label = `${data.connector || 'Connector'} · ${data.tool} · ${({ done: 'done', denied: 'denied', failed: 'failed' } as Record<string, string>)[data.status] || data.status}`;
+    const item = feed('call', label);
+    if (item) {
+      item.dataset.ok = String(data.status === 'done');
+      const detail = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Details';
+      detail.append(summary, node('pre', `Arguments:\n${JSON.stringify(data.arguments ?? {}, null, 2)}\n\nResult:\n${data.result}`)); item.append(detail);
+    }
+    logActivity(label);
+    setActivity(data.status === 'done' ? `Used ${data.connector} · ${data.tool}` : `${data.connector} · ${data.tool}: ${data.status}`);
+  });
   listen('subagent', data => feed('sub', data.status === 'started' ? `${agentName(data.agent)} (${data.skill}) started: ${data.task}` : `${agentName(data.agent)} finished: ${data.report}`));
   listen('compacted', data => feed('note', `${agentName(data.agent)}: older steps summarized to free up context`));
   listen('steer', data => { if (!document.querySelector('#run-live .feed-you:last-child')) feed('you', data.message); });
   listen('approval', data => {
     setActivity('Waiting for your approval'); el('status-dot').dataset.status = 'waiting';
     const card = node('div', '', 'approval-card'); card.id = `approval-${data.id}`;
-    card.append(node('strong', data.kind === 'git_push' ? 'Push to the repository?' : data.kind === 'budget' ? 'Allow more budget?' : 'Keep going?'), node('p', data.message));
+    const tool = data.kind === 'mcp_tool';
+    card.append(node('strong', tool ? `${data.detail.connector} wants to run ${data.detail.tool}` : data.kind === 'git_push' ? 'Push to the repository?' : data.kind === 'budget' ? 'Allow more budget?' : 'Keep going?'),
+                node('p', tool ? (data.detail.read_only ? 'This tool only reads data.' : 'This tool may change data in the connected app.') : data.message));
     if (data.detail?.message) card.append(node('small', `Commit message: ${data.detail.message}`));
+    if (tool) {
+      const args = JSON.stringify(data.detail.arguments ?? {}, null, 2);
+      const detail = document.createElement('details'); detail.open = args.length < 400;
+      const summary = document.createElement('summary'); summary.textContent = 'Arguments';
+      detail.append(summary, node('pre', args)); card.append(detail);
+    }
     const actions = node('div', '', 'form-actions start');
-    for (const [label, approved, style] of [['Approve', true, 'primary-button'], ['Decline', false, 'secondary-button']] as const) {
+    const choices = tool
+      ? [['Allow once', true, false, 'primary-button'], ['Always allow', true, true, 'secondary-button'], ['Deny', false, false, 'secondary-button']] as const
+      : [['Approve', true, false, 'primary-button'], ['Decline', false, false, 'secondary-button']] as const;
+    for (const [label, approved, remember, style] of choices) {
       const button = document.createElement('button'); button.type = 'button'; button.className = style; button.textContent = label;
       button.addEventListener('click', async () => {
         actions.querySelectorAll('button').forEach(b => (b as HTMLButtonElement).disabled = true);
-        try { await send(`/runs/${runId}/approve`, 'POST', { approval_id: data.id, approved }); }
+        try { await send(`/runs/${runId}/approve`, 'POST', { approval_id: data.id, approved, remember }); }
         catch (e) { toast(errorText(e)); actions.querySelectorAll('button').forEach(b => (b as HTMLButtonElement).disabled = false); }
       });
       actions.append(button);
@@ -451,13 +475,14 @@ function listenAgent(listen: (kind: string, handler: (data: any) => void) => voi
   });
   listen('approval_resolved', data => {
     document.getElementById(`approval-${data.id}`)?.remove();
-    feed('note', data.approved ? 'Approved; the agent continues' : 'Declined; the agent was told');
+    feed('note', data.kind === 'mcp_tool' ? (data.approved ? 'Allowed; continuing' : 'Denied; the model was told') : data.approved ? 'Approved; the agent continues' : 'Declined; the agent was told');
     setActivity(data.approved ? 'Continuing' : 'Continuing without it');
   });
 }
 // The Files panel: browse, upload to, and download the chat's sandbox workspace.
 function syncWorkspace() {
-  const workspace = current?.workspace;
+  // Agent work moved to L.E.O CLI; its controls appear only when this server still runs agents (LEO_SERVER_AGENT).
+  const workspace = agentOn ? current?.workspace : null;
   el('toggle-workspace').hidden = !workspace;
   if (workspace) select('composer-mode').value = 'agent';
   if (!workspace) setWorkspacePanel(false, false);
@@ -552,7 +577,9 @@ el('chat-form').addEventListener('submit', async event => {
   submitting = true; updateSend();
   try {
     const search = el('search-toggle').getAttribute('aria-pressed') === 'true' ? true : null;
-    const run = await send<Run>('/runs', 'POST', { prompt: text, conversation_id: activeId, mode: select('composer-mode').value, search, request_id: crypto.randomUUID() });
+    const run = await send<Run>('/runs', 'POST', { prompt: text, conversation_id: activeId, mode: select('composer-mode').value, search,
+      connectors: chatConnectors(), request_id: crypto.randomUUID() });
+    if (!activeId) rememberConnectors(run.conversation_id);
     el('search-toggle').setAttribute('aria-pressed', 'false');
     prompt.value = ''; resizePrompt(); await refreshHistory(); await openChat(run.conversation_id);
   } catch (e) { toast(errorText(e)); }
@@ -663,7 +690,7 @@ function routingChoice() { return routingInputs().find(i => i.checked)?.value ||
 // The cost limit only matters when paid models are allowed.
 function syncPaidLimit() { el('paid-limit').classList.toggle('open', field('allow-paid').checked); }
 field('allow-paid').addEventListener('change', syncPaidLimit);
-const numericFields = ['max_cost', 'max_calls', 'max_repairs', 'max_output_tokens', 'context_tokens', 'token_budget', 'timeout_seconds', 'max_run_seconds',
+const numericFields = ['max_cost', 'max_calls', 'max_repairs', 'max_tool_calls', 'max_output_tokens', 'context_tokens', 'token_budget', 'timeout_seconds', 'max_run_seconds',
   'agent_max_steps', 'agent_max_calls', 'agent_token_budget', 'agent_max_cost', 'agent_max_run_seconds', 'agent_parallel', 'agent_command_timeout'] as const;
 async function loadSettings() {
   [connections, preferences, presets, skills] = await Promise.all([api<Provider[]>('/connections'), api<Preferences>('/settings'), api<Preset[]>('/presets'), api<Skill[]>('/skills')]);
@@ -676,8 +703,147 @@ async function loadSettings() {
   select('web-search').value = preferences.web_search || 'auto'; field('search-url').value = preferences.search_url || ''; field('search-pages').value = String(preferences.search_pages ?? 3);
   field('allow-paid').checked = preferences.allow_paid; syncPaidLimit(); el<HTMLTextAreaElement>('system-prompt').value = preferences.system_prompt;
   for (const key of numericFields) field(key.replaceAll('_', '-')).value = String(preferences[key]);
-  void loadAccounts();
+  void loadAccounts(); void loadConnectors();
 }
+
+// Connectors: the user's remote MCP servers. Settings manages them; the composer picks which ones a chat may use.
+type ConnectorTool = { name: string; description: string; read_only: boolean };
+type Connector = { id: string; name: string; url: string; enabled: boolean; auth: 'none' | 'token' | 'oauth'; status: string; error: string | null;
+  tools: ConnectorTool[]; permissions: Record<string, 'ask' | 'allow' | 'deny'>; signed_in: boolean; needs_client: boolean };
+let connectorList: Connector[] = [];
+let agentOn = false;
+const chatChoices = new Map<string, string[]>();  // Conversation id → connectors switched on for that chat.
+const usable = () => connectorList.filter(c => c.enabled && c.tools.length);
+function chatConnectors() {
+  const known = new Set(usable().map(c => c.id));
+  return (chatChoices.get(activeId || 'new') ?? [...known]).filter(id => known.has(id));
+}
+function rememberConnectors(conversationId: string) { chatChoices.set(conversationId, chatConnectors()); chatChoices.delete('new'); }
+async function loadConnectors() {
+  try { connectorList = await api<Connector[]>('/connectors'); } catch { connectorList = []; }
+  renderConnectors(); renderConnectorMenu();
+}
+function renderConnectorMenu() {
+  const on = new Set(chatConnectors());
+  const count = el('connector-count'); count.textContent = String(on.size); count.hidden = !on.size;
+  const rows = usable().map(c => {
+    const row = node('label', '', 'connector-menu-row');
+    const box = Object.assign(document.createElement('input'), { type: 'checkbox', checked: on.has(c.id) });
+    box.addEventListener('change', () => {
+      const chosen = new Set(chatConnectors()); box.checked ? chosen.add(c.id) : chosen.delete(c.id);
+      chatChoices.set(activeId || 'new', [...chosen]); renderConnectorMenu();
+    });
+    row.append(box, node('span', c.name), node('small', `${c.tools.length} tool${c.tools.length === 1 ? '' : 's'}`));
+    return row;
+  });
+  el('connector-menu-list').replaceChildren(...(rows.length ? rows : [node('p', 'No connectors yet. Add your MCP servers in Settings.', 'connector-menu-empty')]));
+}
+function setConnectorMenu(open: boolean) {
+  el('connector-menu').hidden = !open; el('connector-toggle').setAttribute('aria-expanded', String(open));
+  if (open) renderConnectorMenu();
+}
+el('connector-toggle').addEventListener('click', () => setConnectorMenu(el('connector-menu').hidden));
+document.addEventListener('click', event => { if (!(event.target as HTMLElement).closest('.connector-picker')) setConnectorMenu(false); });
+el('manage-connectors').addEventListener('click', () => { setConnectorMenu(false); openSettings('tab-connectors'); });
+const STATUS_TEXT: Record<string, string> = { connected: 'Connected', sign_in: 'Sign in needed', error: 'Error', new: 'Not checked yet' };
+function renderConnectors() {
+  el('connector-list').replaceChildren(...(connectorList.length ? connectorList.map(connectorCard) : [node('p', 'No connectors yet. Add an MCP server by its URL, such as Linear, Notion, or your own.', 'account-empty')]));
+}
+function connectorCard(c: Connector) {
+  const card = node('section', '', 'connector-card'); card.dataset.status = c.status;
+  const head = node('div', '', 'connector-head');
+  const title = node('div', '');
+  title.append(node('strong', c.name), node('small', c.url));
+  const status = node('span', STATUS_TEXT[c.status] || c.status, 'connector-status');
+  const toggle = node('label', '', 'connector-switch');
+  const box = Object.assign(document.createElement('input'), { type: 'checkbox', checked: c.enabled, title: 'Use this connector in chats' });
+  box.addEventListener('change', () => void editConnector(c, { enabled: box.checked }));
+  toggle.append(box, node('span', 'On'));
+  head.append(title, status, toggle);
+  card.append(head);
+  if (c.error) card.append(node('p', c.error, 'form-feedback'));
+  if (c.auth === 'oauth' && c.needs_client) {
+    const form = node('form', '', 'connector-client');
+    const id = Object.assign(document.createElement('input'), { placeholder: 'Client ID', required: true, maxLength: 500 });
+    const secret = Object.assign(document.createElement('input'), { placeholder: 'Client secret (if any)', type: 'password', autocomplete: 'off' });
+    const save = Object.assign(document.createElement('button'), { type: 'submit', className: 'secondary-button', textContent: 'Save client' });
+    form.append(node('p', 'This service does not register apps automatically. Create an OAuth app there with this callback URL, then paste its client ID:', 'field-hint'),
+      node('code', `${location.origin}/api/connectors/oauth/callback`, 'account-code'), id, secret, save);
+    form.addEventListener('submit', event => { event.preventDefault(); void editConnector(c, { client_id: id.value.trim(), client_secret: secret.value || null }); });
+    card.append(form);
+  }
+  const actions = node('div', '', 'form-actions start');
+  const button = (label: string, handler: () => void, style = 'secondary-button') => {
+    const b = Object.assign(document.createElement('button'), { type: 'button', className: style, textContent: label }); b.addEventListener('click', handler); actions.append(b); return b;
+  };
+  if (c.auth === 'oauth') {
+    const link = Object.assign(document.createElement('a'), { className: c.signed_in ? 'secondary-button' : 'primary-button', textContent: c.signed_in ? 'Sign in again' : 'Sign in',
+      href: `/api/connectors/${encodeURIComponent(c.id)}/oauth/start` });
+    actions.append(link);
+  }
+  button('Refresh tools', () => void refreshConnector(c));
+  const readOnly = c.tools.filter(t => t.read_only && c.permissions[t.name] !== 'allow');
+  if (readOnly.length) button(`Allow all read-only (${readOnly.length})`, () => void editConnector(c, { permissions: Object.fromEntries(readOnly.map(t => [t.name, 'allow'])) }));
+  button('Remove', () => void removeConnector(c), 'text-button danger');
+  card.append(actions);
+  if (c.tools.length) {
+    const tools = document.createElement('details'); tools.className = 'connector-tools';
+    const summary = document.createElement('summary'); summary.textContent = `${c.tools.length} tool${c.tools.length === 1 ? '' : 's'}`;
+    tools.append(summary, ...c.tools.map(t => {
+      const row = node('div', '', 'connector-tool');
+      const text = node('div', '');
+      const name = node('strong', t.name); if (t.read_only) name.append(node('em', 'read-only'));
+      text.append(name, node('small', t.description));
+      const choice = document.createElement('select'); choice.setAttribute('aria-label', `Permission for ${t.name}`);
+      for (const [value, label] of [['ask', 'Ask'], ['allow', 'Allow'], ['deny', 'Deny']]) choice.append(new Option(label, value, false, (c.permissions[t.name] || 'ask') === value));
+      choice.addEventListener('change', () => void editConnector(c, { permissions: { [t.name]: choice.value } }));
+      row.append(text, choice); return row;
+    }));
+    card.append(tools);
+  }
+  return card;
+}
+async function editConnector(c: Connector, body: Record<string, unknown>) {
+  try { await send(`/connectors/${c.id}`, 'PUT', body); } catch (e) { toast(errorText(e)); }
+  await loadConnectors();
+}
+async function refreshConnector(c: Connector) {
+  try { await send(`/connectors/${c.id}/refresh`, 'POST'); toast(`${c.name}: tools refreshed`); } catch (e) { toast(errorText(e)); }
+  await loadConnectors();
+}
+async function removeConnector(c: Connector) {
+  if (!window.confirm(`Remove ${c.name}? Chats can no longer use its tools.`)) return;
+  try { await send(`/connectors/${c.id}`, 'DELETE'); toast(`${c.name} removed`); } catch (e) { toast(errorText(e)); }
+  await loadConnectors();
+}
+function syncConnectorForm() {
+  const auth = select('connector-auth').value;
+  el('connector-token-field').hidden = auth !== 'token';
+  el('connector-client').hidden = auth !== 'oauth';
+  el('save-connector').textContent = auth === 'oauth' ? 'Add and sign in' : 'Add connector';
+}
+select('connector-auth').addEventListener('change', syncConnectorForm);
+el('add-connector').addEventListener('click', () => {
+  el<HTMLFormElement>('connector-form').reset(); el('connector-feedback').textContent = ''; syncConnectorForm();
+  el('connector-form').hidden = false; field('connector-name').focus();
+});
+el('cancel-connector').addEventListener('click', () => { field('connector-token').value = ''; field('connector-client-secret').value = ''; el('connector-form').hidden = true; });
+el('connector-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const auth = select('connector-auth').value;
+  el('connector-feedback').textContent = auth === 'oauth' ? 'Adding…' : 'Connecting and reading its tools…';
+  try {
+    const made = await send<Connector>('/connectors', 'POST', { name: field('connector-name').value.trim(), url: field('connector-url').value.trim(), auth,
+      token: auth === 'token' ? field('connector-token').value.trim() || null : null,
+      client_id: auth === 'oauth' ? field('connector-client-id').value.trim() || null : null,
+      client_secret: auth === 'oauth' ? field('connector-client-secret').value || null : null });
+    field('connector-token').value = ''; field('connector-client-secret').value = '';
+    if (auth === 'oauth') { location.href = `/api/connectors/${encodeURIComponent(made.id)}/oauth/start`; return; }
+    el('connector-form').hidden = true; el('connector-feedback').textContent = '';
+    toast(made.status === 'connected' ? `${made.name} connected: ${made.tools.length} tools` : `${made.name} saved, but: ${made.error || 'it could not be reached'}`);
+    await loadConnectors();
+  } catch (e) { el('connector-feedback').textContent = errorText(e); }
+});
 
 type Me = { id: string; username: string; created_at: number; email: string | null; display_name: string | null; avatar_url: string | null; identities: string[]; has_password: boolean };
 let signInProviders: { id: string; name: string }[] = [];
@@ -1068,9 +1234,17 @@ function openSettings(tabId?: string) {
   requestAnimationFrame(() => requestAnimationFrame(() => marker.classList.add('animate')));
 }
 el('open-settings').addEventListener('click', () => openSettings());
-// Back from linking a sign-in provider: /?settings=account, with error= when it did not work.
+// Back from linking a sign-in provider (/?settings=account) or signing in to a connector (/?settings=connectors),
+// with error= when it did not work.
 {
   const params = new URLSearchParams(location.search);
+  if (params.get('settings') === 'connectors') {
+    const failed = params.get('error');
+    history.replaceState(null, '', location.pathname);
+    openSettings('tab-connectors');
+    if (failed) toast(failed === 'needs_client' ? 'This service needs a client ID: see the connector below' : failed === 'cancelled' ? 'Sign-in was cancelled' : 'Sign-in did not complete; see the connector below');
+    else if (params.get('connected')) toast('Connector signed in');
+  }
   if (params.get('settings') === 'account') {
     const failed = params.get('error');
     history.replaceState(null, '', location.pathname);
@@ -1123,6 +1297,10 @@ el('login-form').addEventListener('submit', async event => {
 });
 async function initialize() {
   try {
+    const health = await api<{ agent: boolean }>('/health').catch(() => ({ agent: false }));
+    agentOn = health.agent;
+    el('new-workspace').hidden = !agentOn;
+    if (agentOn && !select('composer-mode').querySelector('option[value=agent]')) select('composer-mode').append(new Option('Agent · works in a sandbox', 'agent'));
     await loadSettings(); await refreshHistory(); ready = true; refreshConnectionStatus();
     let saved: string | null = null; try { saved = localStorage.getItem('leo-active-chat'); } catch {}
     if (saved && conversations.some(c => c.id === saved)) await openChat(saved);

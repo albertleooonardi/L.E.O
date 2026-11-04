@@ -32,7 +32,13 @@ class Config:
     oidc_name: str = field(default_factory=lambda: os.getenv("LEO_OIDC_NAME", "") or "Single sign-on")
     # Where the API listens for the ChatGPT (Codex) sign-in redirect; OpenAI only accepts localhost:1455.
     router9_callback_port: int = field(default_factory=lambda: int(os.getenv("LEO_9ROUTER_CALLBACK_PORT", "1455")))
-    # sandboxd, which runs agent-mode workspaces; empty turns agent mode off (docker compose sets both).
+    # Connectors (remote MCP servers) must be HTTPS on public addresses; this allows http:// and private networks too,
+    # for self-hosted MCP servers.
+    mcp_allow_private: bool = field(default_factory=lambda: os.getenv("LEO_MCP_ALLOW_PRIVATE", "").lower() in {"1", "true", "yes"})
+    # Agent work (sandbox workspaces, file and command tools, git push) belongs to L.E.O CLI. The web chat refuses it
+    # unless this turns server-side agent runs back on.
+    server_agent: bool = field(default_factory=lambda: os.getenv("LEO_SERVER_AGENT", "").lower() in {"1", "true", "yes"})
+    # sandboxd, which runs each user's model router and (with server_agent) agent workspaces; docker compose sets both.
     sandbox_url: str = field(default_factory=lambda: os.getenv("LEO_SANDBOX_URL", "").rstrip("/"))
     sandbox_token: str = field(default_factory=lambda: os.getenv("LEO_SANDBOX_TOKEN", ""), repr=False)
     frontend_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[1] / "frontend/dist")

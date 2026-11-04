@@ -63,6 +63,11 @@ identities = Table("identities", metadata,
     Column("provider", String(20), nullable=False), Column("subject", String(255), nullable=False),
     Column("email", String(255)), Column("created_at", Float, nullable=False),
     UniqueConstraint("provider", "subject", name="uq_identities_provider_subject"))
+# Each user's remote MCP servers. `config` holds the name, URL, cached tools and per-tool permissions; `secret` the
+# encrypted token or OAuth state.
+connectors = Table("connectors", metadata,
+    Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True, nullable=False),
+    Column("config", JSON, nullable=False), Column("secret", Text), Column("created_at", Float, nullable=False))
 # Each user's own 9Router (run by sandboxd); the password is encrypted like API keys.
 routers = Table("routers", metadata,
     Column("user_id", String(36), primary_key=True), Column("url", String(255), nullable=False),
@@ -229,6 +234,49 @@ class Store:
     def unlink_identity(self, user_id: str, provider: str) -> int:
         with self.engine.begin() as db:
             return db.execute(delete(identities).where(identities.c.user_id == user_id, identities.c.provider == provider)).rowcount
+
+    # -- connectors (remote MCP servers) ------------------------------------
+
+    def list_connectors(self, user_id: str) -> list[dict]:
+        with self.engine.connect() as db:
+            rows = db.execute(select(connectors).where(connectors.c.user_id == user_id).order_by(connectors.c.created_at)).mappings().all()
+        return [self._connector(r) for r in rows]
+
+    def get_connector(self, connector_id: str, user_id: str) -> dict | None:
+        with self.engine.connect() as db:
+            row = db.execute(select(connectors).where(connectors.c.id == connector_id, connectors.c.user_id == user_id)).mappings().first()
+        return self._connector(row) if row else None
+
+    def _connector(self, row):
+        secret = json.loads(self.cipher.decrypt(row["secret"].encode()).decode()) if row["secret"] else {}
+        return {"id": row["id"], "user_id": row["user_id"], "created_at": row["created_at"], **row["config"], "secret": secret}
+
+    def create_connector(self, user_id: str, config: dict, secret: dict | None = None) -> dict:
+        connector_id = str(uuid.uuid4())
+        with self.engine.begin() as db:
+            db.execute(insert(connectors).values(id=connector_id, user_id=user_id, config=config, created_at=time.time(),
+                                                 secret=self.cipher.encrypt(json.dumps(secret).encode()).decode() if secret else None))
+        return self.get_connector(connector_id, user_id)
+
+    def update_connector(self, connector_id: str, user_id: str, config: dict | None = None, secret: dict | None = None) -> dict:
+        """Merge `config` into the stored settings; `secret` replaces the stored secret ({} clears it)."""
+        with self.engine.begin() as db:
+            row = db.execute(select(connectors).where(connectors.c.id == connector_id, connectors.c.user_id == user_id)).mappings().first()
+            if not row:
+                raise KeyError(connector_id)
+            values = {}
+            if config is not None:
+                values["config"] = {**row["config"], **config}
+            if secret is not None:
+                values["secret"] = self.cipher.encrypt(json.dumps(secret).encode()).decode() if secret else None
+            if values:
+                db.execute(update(connectors).where(connectors.c.id == connector_id).values(**values))
+        return self.get_connector(connector_id, user_id)
+
+    def delete_connector(self, connector_id: str, user_id: str) -> None:
+        with self.engine.begin() as db:
+            if not db.execute(delete(connectors).where(connectors.c.id == connector_id, connectors.c.user_id == user_id)).rowcount:
+                raise KeyError(connector_id)
 
     # -- per-user 9Router -------------------------------------------------
 
@@ -522,7 +570,7 @@ class Store:
                        status="queued", phase="queued", mode=mode, prompt=request.prompt, created_at=now,
                        updated_at=now, lease_until=0, cancel_requested=False,
                        state={"preferences": prefs, "providers": providers, "skills": self.list_skills(), "history": history, "completed": {}, "repair": 0,
-                              "search": request.search},
+                              "search": request.search, "connectors": list(dict.fromkeys(request.connectors))},
                        output="", error=None, usage={})
             db.execute(insert(runs).values(**row))
             db.execute(insert(events).values(run_id=run_id, kind="status", data={"phase": "queued", "message": "Waiting for worker"}, created_at=now))

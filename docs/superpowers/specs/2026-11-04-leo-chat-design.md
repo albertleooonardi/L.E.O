@@ -104,7 +104,7 @@ the connector, the tool, and the arguments.
 - **Deny:** the model receives "The user declined this call".
 - A connector deleted while a run waits resolves its pending call as Deny.
 
-**Events:** `tool` events (connector, tool, status `done`, `denied` or `failed`, and a short result) appear in the
+**Events:** `connector_tool` events (connector, tool, status `done`, `denied` or `failed`, and a short result) appear in the
 timeline.
 
 ## 5. Interface

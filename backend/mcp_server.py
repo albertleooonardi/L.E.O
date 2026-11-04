@@ -17,7 +17,8 @@ import httpx
 
 VERSION = "0.3.0"
 TERMINAL = {"completed", "failed", "cancelled", "waiting"}
-MODES = ["auto", "quick", "reviewed", "deep", "agent"]
+# Agent work belongs to L.E.O CLI; it is offered only when the server runs agents too (LEO_SERVER_AGENT=1).
+MODES = ["auto", "quick", "reviewed", "deep"] + (["agent"] if os.getenv("LEO_SERVER_AGENT", "").lower() in {"1", "true", "yes"} else [])
 
 TOOLS = [
     {"name": "leo_ask",
@@ -25,7 +26,7 @@ TOOLS = [
                     "for each task, then returns the answer with the routing and token usage. Pass conversation_id to continue a chat.",
      "inputSchema": {"type": "object", "required": ["prompt"], "properties": {
          "prompt": {"type": "string", "description": "The request, as you would type it in the L.E.O. chat."},
-         "mode": {"type": "string", "enum": MODES, "description": "auto (default) lets L.E.O. choose; agent works autonomously in a sandbox workspace with coding tools and sub-agents."},
+         "mode": {"type": "string", "enum": MODES, "description": "auto (default) lets L.E.O. choose" + ("; agent works autonomously in a sandbox workspace with coding tools and sub-agents" if "agent" in MODES else "") + "."},
          "conversation_id": {"type": "string", "description": "Continue an existing L.E.O. conversation."},
          "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 7200, "description": "Stop waiting after this long (the run keeps going in L.E.O.)."}}}},
     {"name": "leo_route",

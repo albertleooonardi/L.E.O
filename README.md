@@ -141,10 +141,34 @@ flowchart LR
 
 `POST /api/route` (and the MCP tool `leo_route`) previews the decision for any prompt without calling a model.
 
-## Agent mode: multi-agent work in a sandbox
+## L.E.O Chat and L.E.O CLI
 
-Pick **Agent** in the composer (or **New agent workspace** in the sidebar) and L.E.O. works like a coding agent: it gets a
-Linux sandbox for the chat, plans with a todo list, edits files, runs commands and tests, and keeps going until the
+L.E.O. is becoming two products on one account:
+
+- **L.E.O Chat** (this web app): the LLM Efficiency Orchestrator. HEAD routes every request across all your models.
+  Deep mode plans tasks for sub-agents, and Reviewed and Deep check the answer. It can search the web and use the
+  tools of your own **connectors**, which are remote MCP servers such as Linear or Notion, or your own.
+- **L.E.O CLI** (in development): the multi-agent orchestrator, a terminal agent working on your machine and signed in
+  with the same account.
+
+### Connectors
+
+1. **Add a server:** in **Settings → Connectors**, add an MCP server by its URL (Streamable HTTP). Sign in to the
+   service (OAuth, including automatic app registration) or paste a token.
+2. **Pick per chat:** the composer's **Connectors** menu chooses which connectors a chat may use.
+3. **Who uses the tools:** the sub-agent writing the answer can use their tools. In Deep mode, only the tasks the
+   planner assigns a connector to can use it. The planner and reviewer never call tools, and the reviewer sees what
+   the tools returned.
+4. **Permissions:** every tool starts at **Ask**. The chat pauses with **Allow once**, **Always allow**, or **Deny**.
+   Set tools to Allow or Deny ahead of time in Settings, or allow every read-only tool at once.
+5. **Safety:** connectors are per user and their tokens are stored encrypted. Addresses must be public HTTPS unless
+   `LEO_MCP_ALLOW_PRIVATE=1`. A resumed run never calls a tool twice.
+
+## Agent mode: multi-agent work in a sandbox (moving to L.E.O CLI)
+
+Agent work is moving to L.E.O CLI, so the web app hides it unless the server sets `LEO_SERVER_AGENT=1`. With that set,
+pick **Agent** in the composer (or **New agent workspace** in the sidebar) and L.E.O. works like a coding agent: it gets
+a Linux sandbox for the chat, plans with a todo list, edits files, runs commands and tests, and keeps going until the
 task is done, for many steps.
 
 ```mermaid

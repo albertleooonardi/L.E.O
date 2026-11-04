@@ -61,6 +61,8 @@ class Preferences(StrictModel):
     max_cost: float = Field(default=0.10, gt=0, le=100, allow_inf_nan=False)
     max_calls: int = Field(default=8, ge=1, le=20)
     max_repairs: int = Field(default=1, ge=0, le=3)
+    # Tool rounds a sub-agent may take with the user's connectors before it must answer.
+    max_tool_calls: int = Field(default=8, ge=1, le=20)
     max_output_tokens: int = Field(default=8192, ge=128, le=65536)
     context_tokens: int = Field(default=64000, ge=1024, le=1000000)
     token_budget: int = Field(default=200000, ge=2048, le=2000000)
@@ -128,6 +130,8 @@ class RunInput(StrictModel):
     mode: Literal["auto", "quick", "reviewed", "deep", "agent"] | None = None
     # Per-message override of web search: True forces it, False skips it, None lets HEAD decide.
     search: bool | None = None
+    # The user's connectors (remote MCP servers) switched on for this chat; their tools go to the sub-agents.
+    connectors: list[str] = Field(default_factory=list, max_length=20)
     request_id: str = Field(min_length=8, max_length=100)
 
     @field_validator("prompt")
@@ -214,8 +218,29 @@ class WorkspaceInput(StrictModel):
 
 
 class ApprovalInput(StrictModel):
-    approval_id: str = Field(min_length=1, max_length=64)
+    approval_id: str = Field(min_length=1, max_length=200)
     approved: bool
+    # For a connector tool: Always allow, so the tool runs without asking from now on.
+    remember: bool = False
+
+
+class ConnectorInput(StrictModel):
+    name: str = Field(min_length=1, max_length=60)
+    url: str = Field(min_length=8, max_length=500)
+    auth: Literal["none", "token", "oauth"] = "none"
+    token: str | None = Field(default=None, max_length=8192, repr=False)
+    # For sign-in services that do not register apps automatically.
+    client_id: str | None = Field(default=None, max_length=500)
+    client_secret: str | None = Field(default=None, max_length=2000, repr=False)
+
+
+class ConnectorUpdate(StrictModel):
+    name: str | None = Field(default=None, min_length=1, max_length=60)
+    enabled: bool | None = None
+    permissions: dict[str, Literal["ask", "allow", "deny"]] | None = None
+    token: str | None = Field(default=None, max_length=8192, repr=False)
+    client_id: str | None = Field(default=None, max_length=500)
+    client_secret: str | None = Field(default=None, max_length=2000, repr=False)
 
 
 class SteerInput(StrictModel):

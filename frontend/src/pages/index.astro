@@ -36,7 +36,7 @@ import '../styles/global.css';
         <button class="icon-button" id="collapse-sidebar" title="Hide chats" aria-label="Hide chats"><Icon name="panel" size={17} /></button>
       </div>
       <button class="new-chat-button" id="new-chat"><Icon name="plus" size={15} /><span>New chat</span><kbd class="shortcut" data-key="K"></kbd></button>
-      <button class="sidebar-search" id="new-workspace"><Icon name="layers" size={15} /><span>New agent workspace</span></button>
+      <button class="sidebar-search" id="new-workspace" hidden><Icon name="layers" size={15} /><span>New agent workspace</span></button>
       <button class="sidebar-search" id="search-chats"><Icon name="search" size={15} /><span>Search chats</span><kbd class="shortcut" data-key="/"></kbd></button>
       <section class="history-section" aria-label="Recent chats">
         <div id="history-list" class="history-list"></div>
@@ -87,8 +87,16 @@ import '../styles/global.css';
             <textarea id="prompt" name="prompt" placeholder="Message L.E.O…" rows="1" maxlength="12000"></textarea>
             <div class="composer-row">
               <label for="composer-mode" class="sr-only">Orchestration mode</label>
-              <select id="composer-mode" title="Orchestration mode"><option value="auto">Auto · L.E.O. decides</option><option value="quick">Quick · one answer</option><option value="reviewed">Reviewed · generate + review</option><option value="deep">Deep · plan + review</option><option value="agent">Agent · works in a sandbox</option></select>
+              <select id="composer-mode" title="Orchestration mode"><option value="auto">Auto · L.E.O. decides</option><option value="quick">Quick · one answer</option><option value="reviewed">Reviewed · generate + review</option><option value="deep">Deep · plan + review</option></select>
               <button type="button" id="search-toggle" class="search-toggle" aria-pressed="false" title="Search the web for this message (otherwise L.E.O. decides)"><Icon name="globe" size={15} /><span>Search</span></button>
+              <div class="connector-picker">
+                <button type="button" id="connector-toggle" class="search-toggle" aria-haspopup="true" aria-expanded="false" aria-controls="connector-menu" title="Connectors for this chat"><Icon name="plug" size={15} /><span>Connectors</span><b id="connector-count" class="connector-count" hidden></b></button>
+                <div id="connector-menu" class="connector-menu" hidden>
+                  <p class="connector-menu-title">Connectors for this chat</p>
+                  <div id="connector-menu-list" class="connector-menu-list"></div>
+                  <button type="button" class="text-button" id="manage-connectors">Manage connectors ›</button>
+                </div>
+              </div>
               <button type="button" id="context-meter" class="context-meter" title="Context used by the latest call in this conversation" aria-controls="usage-panel" hidden><span class="meter"><span></span></span><span id="context-text"></span></button>
               <button class="send-button" id="send-button" type="submit" aria-label="Send message" title="Send message" disabled><Icon name="arrow" size={18} /><span class="stop-square" hidden></span></button>
             </div>
@@ -179,6 +187,7 @@ import '../styles/global.css';
           <button type="button" role="tab" id="tab-routing" aria-controls="panel-routing" aria-selected="false" tabindex="-1"><Icon name="compass" size={16} /><span>Routing</span></button>
           <button type="button" role="tab" id="tab-search" aria-controls="panel-search" aria-selected="false" tabindex="-1"><Icon name="globe" size={16} /><span>Web search</span></button>
           <button type="button" role="tab" id="tab-limits" aria-controls="panel-limits" aria-selected="false" tabindex="-1"><Icon name="gauge" size={16} /><span>Limits</span></button>
+          <button type="button" role="tab" id="tab-connectors" aria-controls="panel-connectors" aria-selected="false" tabindex="-1"><Icon name="plug" size={16} /><span>Connectors</span></button>
           <button type="button" role="tab" id="tab-account" aria-controls="panel-account" aria-selected="false" tabindex="-1"><Icon name="user" size={16} /><span>Account</span></button>
           <button type="button" role="tab" id="tab-general" aria-controls="panel-general" aria-selected="false" tabindex="-1"><Icon name="settings" size={16} /><span>General</span></button>
         </div>
@@ -328,6 +337,7 @@ import '../styles/global.css';
               <div class="field-grid settings-card">
                 <label>Model calls per run<input id="max-calls" type="number" min="1" max="20" required /></label>
                 <label>Repair rounds<input id="max-repairs" type="number" min="0" max="3" required /></label>
+                <label>Connector tool rounds per step<input id="max-tool-calls" type="number" min="1" max="20" required /></label>
                 <label>Output tokens per call<input id="max-output-tokens" type="number" min="128" max="65536" required /></label>
                 <label>Context tokens per call<input id="context-tokens" type="number" min="1024" max="1000000" required /></label>
                 <label>Tokens per run<input id="token-budget" type="number" min="2048" max="2000000" required /></label>
@@ -350,6 +360,24 @@ import '../styles/global.css';
               <button type="submit" class="primary-button">Save changes</button>
             </div>
           </form>
+          <section class="settings-panel" role="tabpanel" id="panel-connectors" aria-labelledby="tab-connectors" hidden>
+            <div class="panel-intro"><div><h3>Connectors</h3><p>Your remote MCP servers. Models can use their tools in your chats, and ask you first unless you allow a tool.</p></div><button class="primary-button" id="add-connector"><Icon name="plus" size={14} />Add connector</button></div>
+            <form id="connector-form" class="provider-form" hidden>
+              <div class="field-grid">
+                <label>Name<input id="connector-name" maxlength="60" required placeholder="Linear" /></label>
+                <label>Server URL<input id="connector-url" type="url" required placeholder="https://mcp.example.com/mcp" /></label>
+                <label>Sign-in<select id="connector-auth"><option value="oauth">Sign in with the service</option><option value="token">Token</option><option value="none">None</option></select></label>
+                <label id="connector-token-field" hidden>Token<input id="connector-token" type="password" autocomplete="off" /></label>
+              </div>
+              <details id="connector-client"><summary>Client ID and secret (only if the service asks for them)</summary>
+                <div class="field-grid"><label>Client ID<input id="connector-client-id" maxlength="500" autocomplete="off" /></label><label>Client secret<input id="connector-client-secret" type="password" autocomplete="off" /></label></div>
+              </details>
+              <p class="field-hint">Remote MCP servers over HTTPS (Streamable HTTP). Tokens are stored encrypted, and only you can use your connectors.</p>
+              <p class="form-feedback" id="connector-feedback" role="status"></p>
+              <div class="form-actions"><button type="button" class="secondary-button" id="cancel-connector">Cancel</button><button type="submit" class="primary-button" id="save-connector">Add connector</button></div>
+            </form>
+            <div id="connector-list" class="connector-list"></div>
+          </section>
           <section class="settings-panel" role="tabpanel" id="panel-account" aria-labelledby="tab-account" hidden>
             <div class="panel-intro"><div><h3>Account</h3><p>How you sign in, and the model accounts that belong to you.</p></div></div>
             <div class="profile-card">

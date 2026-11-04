@@ -120,7 +120,9 @@ def parse_plan(text, skill_ids=()):
                            "skill": skill if skill in skill_ids else None,
                            "difficulty": difficulty if difficulty in {"light", "standard", "strong"} else None,
                            "tool": tool if (tool and (queries or urls or tool == "web_search")) else None,
-                           "queries": queries, "urls": urls})
+                           "queries": queries, "urls": urls,
+                           # Connector ids (slugs) whose tools this task's sub-agent may use; checked against the run's.
+                           "connectors": [c for c in task.get("connectors") or [] if isinstance(c, str) and c][:5]})
         return result
     except (ValueError, TypeError, KeyError):
         return []
