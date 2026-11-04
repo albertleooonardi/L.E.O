@@ -844,6 +844,14 @@ h1 { font-size: clamp(26px, 2.5vw, 32px); font-weight: 400; letter-spacing: -.65
   .auth-panel { align-items: flex-start; padding: 40px 16px; }
 }
 @media (prefers-reduced-motion: reduce) { .auth-provider.is-loading::after { animation: none; } }
+/* `leo login` approval: one centered panel. */
+.cli-approve { grid-template-columns: 1fr; }
+.cli-approve .auth-brand { margin-bottom: 28px; }
+.cli-code { font-family: var(--mono); font-size: 26px; letter-spacing: .14em; padding: 12px 16px; margin: 0 0 18px; border: 1px dashed var(--border); border-radius: 10px; text-align: center; user-select: all; }
+.cli-card p { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 0 0 18px; }
+.cli-card strong { color: var(--text); font-weight: 500; }
+.cli-actions { display: grid; gap: 8px; }
+.cli-actions .secondary-button { width: 100%; padding: 10px 14px; border: 1px solid var(--border); border-radius: 9px; }
 
 /* Agent mode: live timeline, todo list, approval card, and the workspace Files panel. */
 .status-dot[data-status='waiting'] { background: #d6b77a; }

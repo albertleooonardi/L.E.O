@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -68,6 +69,22 @@ identities = Table("identities", metadata,
 connectors = Table("connectors", metadata,
     Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True, nullable=False),
     Column("config", JSON, nullable=False), Column("secret", Text), Column("created_at", Float, nullable=False))
+# L.E.O CLI sign-in: a pending device login (device code digest → the user code shown in the browser), the signed-in
+# devices (token digests, revocable), and the usage totals devices report back (no prompts or code).
+cli_logins = Table("cli_logins", metadata,
+    Column("id", String(64), primary_key=True), Column("user_code", String(16), unique=True, nullable=False),
+    Column("device_name", String(80), nullable=False), Column("status", String(10), nullable=False), Column("user_id", String(36)),
+    Column("token", Text), Column("created_at", Float, nullable=False), Column("expires_at", Float, nullable=False))
+cli_devices = Table("cli_devices", metadata,
+    Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True, nullable=False),
+    Column("name", String(80), nullable=False), Column("token_hash", String(64), unique=True, nullable=False),
+    Column("created_at", Float, nullable=False), Column("last_used_at", Float), Column("revoked_at", Float))
+cli_usage = Table("cli_usage", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True), Column("user_id", String(36), index=True, nullable=False),
+    Column("device_id", String(36), nullable=False), Column("session", String(64), nullable=False), Column("model", String(160), nullable=False),
+    Column("connection", String(120), nullable=False), Column("calls", Integer, nullable=False), Column("input_tokens", Integer, nullable=False),
+    Column("output_tokens", Integer, nullable=False), Column("cost", Float, nullable=False), Column("estimated", Boolean, nullable=False),
+    Column("at", Float, nullable=False))
 # Each user's own 9Router (run by sandboxd); the password is encrypted like API keys.
 routers = Table("routers", metadata,
     Column("user_id", String(36), primary_key=True), Column("url", String(255), nullable=False),
@@ -94,7 +111,7 @@ class LostLease(Exception):
 
 
 class Store:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, encryption_key: str | None = None):
         self.config = config
         args = {"check_same_thread": False, "timeout": 30} if config.database_url.startswith("sqlite") else {}
         self.engine = create_engine(config.database_url, connect_args=args, pool_pre_ping=True)
@@ -108,7 +125,7 @@ class Store:
         seed_skills = not inspect(self.engine).has_table("skills")
         metadata.create_all(self.engine)
         self._add_user_id_columns()
-        key = os.getenv("LEO_ENCRYPTION_KEY")
+        key = encryption_key or os.getenv("LEO_ENCRYPTION_KEY")  # L.E.O CLI passes the key from the OS keychain.
         if not key:
             path = config.data_dir / "secret.key"
             if not path.exists():
@@ -278,6 +295,80 @@ class Store:
             if not db.execute(delete(connectors).where(connectors.c.id == connector_id, connectors.c.user_id == user_id)).rowcount:
                 raise KeyError(connector_id)
 
+    # -- L.E.O CLI devices ------------------------------------------------
+
+    def create_cli_login(self, device_hash: str, user_code: str, device_name: str, expires_at: float) -> None:
+        with self.engine.begin() as db:
+            db.execute(delete(cli_logins).where(cli_logins.c.expires_at < time.time() - 3600))
+            db.execute(insert(cli_logins).values(id=device_hash, user_code=user_code, device_name=device_name, status="pending",
+                                                 created_at=time.time(), expires_at=expires_at))
+
+    def cli_login(self, user_code: str | None = None, device_hash: str | None = None) -> dict | None:
+        where = cli_logins.c.user_code == user_code if user_code else cli_logins.c.id == device_hash
+        with self.engine.connect() as db:
+            row = db.execute(select(cli_logins).where(where)).mappings().first()
+        return dict(row) if row else None
+
+    def answer_cli_login(self, user_code: str, user_id: str, approved: bool, token: str | None = None) -> dict | None:
+        """Allow (registering the device under `token`) or deny a pending login; None if it is gone, expired, or answered."""
+        with self.engine.begin() as db:
+            row = db.execute(select(cli_logins).where(cli_logins.c.user_code == user_code)).mappings().first()
+            if not row or row["status"] != "pending" or row["expires_at"] < time.time():
+                return None
+            values = {"status": "approved" if approved else "denied", "user_id": user_id}
+            if approved:
+                device_id = str(uuid.uuid4())
+                db.execute(insert(cli_devices).values(id=device_id, user_id=user_id, name=row["device_name"], created_at=time.time(),
+                                                      token_hash=hashlib.sha256(token.encode()).hexdigest()))
+                values["token"] = self.cipher.encrypt(token.encode()).decode()  # Handed to the device once, then deleted.
+            db.execute(update(cli_logins).where(cli_logins.c.id == row["id"]).values(**values))
+        return {**dict(row), **values}
+
+    def take_cli_token(self, device_hash: str) -> str | None:
+        """The approved login's token, exactly once."""
+        with self.engine.begin() as db:
+            row = db.execute(select(cli_logins).where(cli_logins.c.id == device_hash, cli_logins.c.status == "approved")).mappings().first()
+            if not row or not row["token"]:
+                return None
+            db.execute(delete(cli_logins).where(cli_logins.c.id == device_hash))
+        return self.cipher.decrypt(row["token"].encode()).decode()
+
+    def cli_device(self, token: str) -> dict | None:
+        """The signed-in, unrevoked device for this token; records that it was used."""
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        with self.engine.begin() as db:
+            row = db.execute(select(cli_devices).where(cli_devices.c.token_hash == digest, cli_devices.c.revoked_at.is_(None))).mappings().first()
+            if row:
+                db.execute(update(cli_devices).where(cli_devices.c.id == row["id"]).values(last_used_at=time.time()))
+        return dict(row) if row else None
+
+    def list_cli_devices(self, user_id: str) -> list[dict]:
+        with self.engine.connect() as db:
+            rows = db.execute(select(cli_devices).where(cli_devices.c.user_id == user_id, cli_devices.c.revoked_at.is_(None))
+                              .order_by(cli_devices.c.created_at)).mappings().all()
+        return [{key: r[key] for key in ("id", "name", "created_at", "last_used_at")} for r in rows]
+
+    def revoke_cli_device(self, device_id: str, user_id: str) -> None:
+        with self.engine.begin() as db:
+            if not db.execute(update(cli_devices).where(cli_devices.c.id == device_id, cli_devices.c.user_id == user_id,
+                                                        cli_devices.c.revoked_at.is_(None)).values(revoked_at=time.time())).rowcount:
+                raise KeyError(device_id)
+
+    def add_cli_usage(self, user_id: str, device_id: str, entries: list[dict]) -> None:
+        with self.engine.begin() as db:
+            for entry in entries:
+                db.execute(insert(cli_usage).values(user_id=user_id, device_id=device_id, **entry))
+
+    def cli_usage_report(self, user_id: str) -> dict:
+        """L.E.O CLI's reported usage: totals and per model."""
+        query = select(cli_usage.c.model, func.sum(cli_usage.c.calls), func.sum(cli_usage.c.input_tokens), func.sum(cli_usage.c.output_tokens),
+                       func.sum(cli_usage.c.cost), func.max(cli_usage.c.estimated.cast(Integer))).where(cli_usage.c.user_id == user_id).group_by(cli_usage.c.model)
+        with self.engine.connect() as db:
+            models = [{"model": m, "calls": int(c or 0), "input_tokens": int(i or 0), "output_tokens": int(o or 0), "cost": float(cost or 0),
+                       "estimated": bool(e)} for m, c, i, o, cost, e in db.execute(query)]
+        totals = {key: sum(m[key] for m in models) for key in ("calls", "input_tokens", "output_tokens", "cost")}
+        return {"totals": totals, "models": sorted(models, key=lambda m: -m["calls"])}
+
     # -- per-user 9Router -------------------------------------------------
 
     def get_router(self, user_id: str) -> dict | None:
@@ -338,6 +429,13 @@ class Store:
     def purge_expired_sessions(self) -> None:
         with self.engine.begin() as db:
             db.execute(delete(user_sessions).where(user_sessions.c.expires_at <= time.time()))
+
+    def replace_skills(self, items):
+        """Use exactly this skill catalog (L.E.O CLI takes the server's)."""
+        with self.engine.begin() as db:
+            db.execute(delete(skills))
+            for position, skill in enumerate(items):
+                db.execute(insert(skills).values(id=skill["id"], position=position, config={k: v for k, v in skill.items() if k != "id"}))
 
     def list_skills(self):
         with self.engine.connect() as db:
@@ -588,11 +686,14 @@ class Store:
     def public_run(row):
         return {k: v for k, v in row.items() if k not in {"state", "lease_owner", "lease_until", "request_id"}}
 
-    def claim(self, owner, user_id: str | None = None):
+    def claim(self, owner, user_id: str | None = None, run_id: str | None = None):
+        """The oldest run ready for a worker (or exactly `run_id`: L.E.O CLI runs each session's own runs)."""
         now = time.time()
         ready = and_(runs.c.status.in_(["queued", "running"]), runs.c.lease_until < now)
         if user_id:
             ready = and_(ready, runs.c.user_id == user_id)
+        if run_id:
+            ready = and_(ready, runs.c.id == run_id)
         with self.engine.begin() as db:
             candidate = db.execute(select(runs.c.id, runs.c.status).where(ready).order_by(runs.c.created_at).limit(1)).first()
             if not candidate:

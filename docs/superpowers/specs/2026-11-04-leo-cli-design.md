@@ -94,7 +94,7 @@ but keys already on that laptop stay usable until `leo logout`, so rotate keys f
 - `skills`: agent skills offered through `use_skill` and `install_skill` (none on the server).
 
 **`LocalWorkspace`** implements the six operations agent mode uses:
-- `ensure`, `exec` (`bash -lc` in the root, with a timeout killing the process group, output limits), `read_file`,
+- `ensure`, `exec` (`bash -c` in the root, inheriting the environment `leo` started with, with a timeout killing the process group, output limits), `read_file`,
   `write_file`, `list_files` (confined to the root after resolving symlinks; skipping `.git`, `node_modules`, and
   virtual environments), and `push` (the user's own git and credentials).
 

@@ -1,0 +1,73 @@
+---
+import '@fontsource/ibm-plex-sans/latin-400.css';
+import '@fontsource/ibm-plex-sans/latin-500.css';
+import '@fontsource/ibm-plex-sans/latin-600.css';
+import Icon from '../components/Icon.astro';
+import '../styles/global.css';
+---
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#151515" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>Sign in L.E.O CLI — L.E.O</title>
+    <script is:inline>
+      try { document.documentElement.dataset.theme = localStorage.getItem('leo-theme') === 'light' ? 'light' : 'dark'; } catch {}
+    </script>
+  </head>
+  <body>
+    <main class="auth-split cli-approve">
+      <section class="auth-panel">
+        <div class="auth-form-wrap">
+          <div class="auth-brand"><Icon name="spark" size={24} /><span>L.E.O</span></div>
+          <h1 id="cli-title">Sign in L.E.O CLI</h1>
+          <p class="auth-caption" id="cli-caption">Checking the code…</p>
+          <div id="cli-code" class="cli-code" hidden></div>
+          <div id="cli-card" class="cli-card" hidden>
+            <p>The device will download your <strong>model connections and their API keys</strong>, so it can call your models directly.
+              It reports token and cost totals back, never your prompts or code. You can revoke it any time in Settings → Account.</p>
+            <div class="cli-actions">
+              <button type="button" class="auth-primary-button" id="cli-allow">Allow</button>
+              <button type="button" class="secondary-button" id="cli-deny">Deny</button>
+            </div>
+          </div>
+          <p id="cli-feedback" class="auth-feedback" role="status"></p>
+        </div>
+      </section>
+    </main>
+    <script>
+      // Approve or deny a `leo login`: the code in the address must match the one the terminal shows.
+      const el = (id: string) => document.getElementById(id) as HTMLElement;
+      const code = new URLSearchParams(location.search).get('code') || '';
+      const done = (title: string, caption: string) => { el('cli-title').textContent = title; el('cli-caption').textContent = caption; el('cli-card').hidden = true; };
+      async function load() {
+        if (!/^[A-Z2-9]{4}-[A-Z2-9]{4}$/i.test(code)) return done('No sign-in code', 'Run leo login in your terminal and open the link it shows.');
+        const response = await fetch(`/api/cli/device/${encodeURIComponent(code)}`, { credentials: 'include' });
+        if (response.status === 401) { location.href = `/login?next=${encodeURIComponent(location.pathname + location.search)}`; return; }
+        if (!response.ok) return done('This code has expired', 'Run leo login again for a new one.');
+        const login: { device_name: string; status: string } = await response.json();
+        if (login.status !== 'pending') return done('Already answered', 'This sign-in was already allowed or denied.');
+        el('cli-title').textContent = `Allow L.E.O CLI on ${login.device_name}?`;
+        el('cli-caption').textContent = 'Check that this code matches the one in your terminal:';
+        el('cli-code').textContent = code.toUpperCase(); el('cli-code').hidden = false; el('cli-card').hidden = false;
+      }
+      async function answer(approve: boolean) {
+        for (const id of ['cli-allow', 'cli-deny']) (el(id) as HTMLButtonElement).disabled = true;
+        const response = await fetch(`/api/cli/device/${encodeURIComponent(code)}`, { method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approve }) });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          el('cli-feedback').textContent = typeof data.detail === 'string' ? data.detail : 'That did not work; run leo login again.';
+          return;
+        }
+        el('cli-code').hidden = true;
+        approve ? done('L.E.O CLI is signed in', 'You can close this tab and go back to your terminal.') : done('Sign-in denied', 'The device did not get access.');
+      }
+      el('cli-allow').addEventListener('click', () => void answer(true));
+      el('cli-deny').addEventListener('click', () => void answer(false));
+      void load().catch(() => done('Cannot reach L.E.O', 'Check that the server is running, then reload.'));
+    </script>
+  </body>
+</html>

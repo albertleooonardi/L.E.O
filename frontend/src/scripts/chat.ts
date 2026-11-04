@@ -899,6 +899,23 @@ function renderProfile(user: Me) {
     rows.push(row(known.get(id) || id, linked ? 'Linked: you can sign in with it' : 'Not linked', action));
   }
   el('identity-list').replaceChildren(...rows);
+  void loadDevices();
+}
+async function loadDevices() {
+  let devices: { id: string; name: string; created_at: number; last_used_at: number | null }[] = [];
+  try { devices = await api('/cli/devices'); } catch { /* Shown as none. */ }
+  const day = (t: number | null) => t ? new Date(t * 1000).toLocaleDateString() : 'never';
+  el('cli-device-list').replaceChildren(...(devices.length ? devices.map(d => {
+    const item = node('div', '', 'account-row'); const text = node('div', '');
+    text.append(node('strong', d.name), node('small', `Added ${day(d.created_at)} · last synced ${day(d.last_used_at)}`));
+    const revoke = Object.assign(document.createElement('button'), { type: 'button', className: 'text-button danger', textContent: 'Revoke' });
+    revoke.addEventListener('click', async () => {
+      if (!window.confirm(`Revoke ${d.name}? It can no longer sync. Rotate your provider keys if the device is lost.`)) return;
+      try { await send(`/cli/devices/${d.id}`, 'DELETE'); toast(`${d.name} revoked`); } catch (e) { toast(errorText(e)); }
+      void loadDevices();
+    });
+    item.append(text, revoke); return item;
+  }) : [node('p', 'No devices yet. Install L.E.O CLI and run leo login.', 'account-empty')]));
 }
 async function unlinkIdentity(id: string, name: string) {
   if (!window.confirm(`Unlink ${name}? You will no longer be able to sign in with it.`)) return;

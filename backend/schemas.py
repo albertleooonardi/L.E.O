@@ -245,3 +245,31 @@ class ConnectorUpdate(StrictModel):
 
 class SteerInput(StrictModel):
     message: str = Field(min_length=1, max_length=8000)
+
+
+class CliDeviceStart(StrictModel):
+    device_name: str = Field(min_length=1, max_length=80)
+
+
+class CliTokenInput(StrictModel):
+    device_code: str = Field(min_length=10, max_length=100)
+
+
+class CliAnswer(StrictModel):
+    approve: bool
+
+
+class CliUsageEntry(StrictModel):
+    session: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=160)
+    connection: str = Field(min_length=1, max_length=120)
+    calls: int = Field(ge=0, le=100000)
+    input_tokens: int = Field(ge=0, le=10**10)
+    output_tokens: int = Field(ge=0, le=10**10)
+    cost: float = Field(ge=0, le=100000, allow_inf_nan=False)
+    estimated: bool = False
+    at: float
+
+
+class CliUsageInput(StrictModel):
+    entries: list[CliUsageEntry] = Field(max_length=500)

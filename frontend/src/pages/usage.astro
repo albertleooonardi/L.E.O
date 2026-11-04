@@ -50,6 +50,14 @@ import '../styles/global.css';
         </table></div>
       </section>
 
+      <section class="usage-section" aria-labelledby="cli-heading" id="cli-section" hidden>
+        <h2 id="cli-heading">L.E.O CLI <small>totals your devices reported; prompts and code stay on them</small></h2>
+        <div class="table-wrap"><table class="usage-table">
+          <thead><tr><th>Model</th><th class="num">Calls</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cost</th></tr></thead>
+          <tbody id="cli-body"></tbody>
+        </table></div>
+      </section>
+
       <section class="usage-section" aria-labelledby="context-heading">
         <h2 id="context-heading">Context by conversation</h2>
         <p class="field-hint">Each chat's level comes from its latest completed call (input + output) against the context allowance: the lower of the model window and Settings → Context tokens. Comfortable is under 50%, Moderate 50–69%, High 70–89%, Near limit 90% and above, where older turns are trimmed.</p>

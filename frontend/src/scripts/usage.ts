@@ -63,6 +63,12 @@ function renderModels(report: Report) {
     m.completed ? seconds(Math.round(m.elapsed_ms / m.completed)) : '—', money(m.cost),
   ], [3, 4, 5, 6, 7])));
 }
+type CliModel = { model: string; calls: number; input_tokens: number; output_tokens: number; cost: number; estimated: boolean };
+function renderCli(report: Report & { cli?: { models: CliModel[] } }) {
+  const models = report.cli?.models || [];
+  el('cli-section').hidden = !models.length;
+  el('cli-body').replaceChildren(...models.map(m => row([m.model, String(m.calls), tokens(m.input_tokens, m.estimated), tokens(m.output_tokens, m.estimated), money(m.cost)], [1, 2, 3, 4])));
+}
 function renderContext(report: Report) {
   const list = el('context-list');
   if (!report.conversations.length) { list.replaceChildren(node('p', 'No conversations with model calls yet.', 'field-hint')); return; }
@@ -95,7 +101,7 @@ async function load() {
     if (response.status === 401) throw new Error('Sign in from the chat page to view usage');
     if (!response.ok) throw new Error(`Usage request failed (${response.status})`);
     const report: Report = await response.json();
-    renderTiles(report); renderOverview(report); renderModels(report); renderContext(report); renderCalls(report);
+    renderTiles(report); renderOverview(report); renderModels(report); renderCli(report); renderContext(report); renderCalls(report);
     el('usage-updated').textContent = `Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
     el('toast').hidden = true;
   } catch (error) {

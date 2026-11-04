@@ -3,21 +3,41 @@ name = "leo-orchestrator"
 version = "0.1.0"
 description = "A local-first, configurable multi-model orchestrator"
 requires-python = ">=3.11"
+# The engine (routing, orchestration, agents, store) that the server and L.E.O CLI share.
 dependencies = [
-  "fastapi>=0.115,<1",
-  "uvicorn>=0.34,<1",
   "httpx>=0.28,<1",
   "sqlalchemy>=2.0,<3",
   "cryptography>=44,<47",
+  "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+# The web API, worker, and sandboxd; the Dockerfile installs this.
+server = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
   "psycopg[binary]>=3.2,<4",
   "bcrypt>=4.2,<5",
 ]
 
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
 [dependency-groups]
-dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2"]
+dev = ["leo-orchestrator[server]", "leo-cli", "pytest>=8,<10", "pytest-asyncio>=0.25,<2"]
+
+[tool.uv.workspace]
+members = ["leo-cli"]
+
+[tool.uv.sources]
+leo-cli = { workspace = true }
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "leo-cli/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["."]

@@ -12,8 +12,8 @@ from .store import Store
 logger = logging.getLogger("leo.worker")
 
 
-async def process_one(store, owner, transport=None, sandbox=None):
-    run = store.claim(owner)
+async def process_one(store, owner, transport=None, sandbox=None, run_id=None):
+    run = store.claim(owner, run_id=run_id)
     if not run:
         return False
     user_id = run.get("user_id")

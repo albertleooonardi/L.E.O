@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import html
 import json
 import secrets
+import time
 from contextlib import asynccontextmanager
 from urllib.parse import urlencode
 
@@ -27,7 +29,7 @@ from .ninerouter import ACCOUNTS, RISK_NOTICE, NineRouter, RouterError, SignIns,
 from .providers import ProviderError, list_models
 from .router import choose_mode, classify, rank
 from .sandbox import MAX_IMPORT_BYTES, Sandbox, SandboxError, tar_to_zip, workspace_path, zip_to_tar
-from .schemas import (AccountSignIn, AdoptModels, ApprovalInput, Connection, ConnectorInput, ConnectorUpdate, Me, PasswordChange, Preferences, RouteInput, RunInput,
+from .schemas import (AccountSignIn, AdoptModels, ApprovalInput, CliAnswer, CliDeviceStart, CliTokenInput, CliUsageInput, Connection, ConnectorInput, ConnectorUpdate, Me, PasswordChange, Preferences, RouteInput, RunInput,
                       Skill, SteerInput, UserLogin, UserRegister, User, WorkspaceInput)
 from .store import Conflict, Store, TERMINAL
 from .tools import ToolError, web_search
@@ -46,7 +48,12 @@ PUBLIC_API_PATHS = {
     # Arrives from the connector's sign-in page, so the SameSite=Strict session cookie is not sent; the encrypted
     # leo_mcp_oauth cookie says whose sign-in it is.
     "/api/connectors/oauth/callback",
+    # L.E.O CLI device login: the CLI asks for a code, then polls for its token.
+    "/api/cli/device",
+    "/api/cli/token",
 }
+# Only these accept a L.E.O CLI device token (Authorization: Bearer), and nothing else does.
+CLI_DEVICE_PATHS = {"/api/cli/sync", "/api/cli/usage", "/api/cli/logout"}
 # OAuth start and callback check the session themselves when linking.
 PUBLIC_API_PREFIXES = ("/api/auth/oauth/",)
 
@@ -133,7 +140,14 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
 
             # Auth: session cookie or bearer token (LEO_API_TOKEN for admin/MCP). CORS preflights carry no credentials.
             public = request.url.path in PUBLIC_API_PATHS or request.url.path.startswith(PUBLIC_API_PREFIXES)
-            if request.method != "OPTIONS" and not public:
+            if request.url.path in CLI_DEVICE_PATHS and request.method != "OPTIONS":
+                device = await run_in_threadpool(store.cli_device, request.headers.get("authorization", "").removeprefix("Bearer ").strip())
+                owner = device and await run_in_threadpool(store.get_user, device["user_id"])
+                if not owner:
+                    return JSONResponse({"detail": "This device was signed out; run leo login"}, status_code=401)
+                request.state.device = device
+                request.state.user = CurrentUser(id=owner["id"], username=owner["username"], is_admin=owner["id"] == store.admin_user_id())
+            elif request.method != "OPTIONS" and not public:
                 user = await run_in_threadpool(resolve_user, request)
                 if not user:
                     return JSONResponse({"detail": "Sign in"}, status_code=401)
@@ -724,7 +738,100 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
     @app.get("/api/usage")
     def read_usage(conversation_id: str | None = None, user: CurrentUser = Depends(current_user)):
         uid = user.owner_id
-        return store.usage_report(conversation_id, user_id=uid)
+        report = store.usage_report(conversation_id, user_id=uid)
+        if uid and not conversation_id:
+            report["cli"] = store.cli_usage_report(uid)  # What L.E.O CLI devices reported: totals only, no prompts or code.
+        return report
+
+    # ---------------- L.E.O CLI: device login, sync, usage ----------------
+
+    USER_CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # No 0/O or 1/I to misread.
+
+    def code_digest(code):
+        return hashlib.sha256(code.encode()).hexdigest()
+
+    @app.post("/api/cli/device")
+    def cli_device_start(body: CliDeviceStart, request: Request):
+        """A CLI starts signing in: it shows the user code and polls with the device code."""
+        throttle = f"{request.client.host if request.client else ''}|cli-device"
+        if auth.login_blocked(throttle):
+            raise HTTPException(429, "Too many sign-in attempts; try again in a few minutes")
+        auth.record_failure(throttle)  # Counts every attempt, so codes cannot be requested in bulk.
+        device_code = secrets.token_urlsafe(32)
+        letters = "".join(secrets.choice(USER_CODE_LETTERS) for _ in range(8))
+        user_code = f"{letters[:4]}-{letters[4:]}"
+        store.create_cli_login(code_digest(device_code), user_code, body.device_name.strip(), time.time() + 600)
+        base = config.public_url or str(request.base_url).rstrip("/")
+        return {"device_code": device_code, "user_code": user_code, "verification_url": f"{base}/cli?{urlencode({'code': user_code})}",
+                "interval": 3, "expires_in": 600}
+
+    def pending_login(user_code):
+        login = store.cli_login(user_code=user_code.strip().upper())
+        if not login or login["expires_at"] < time.time():
+            raise HTTPException(404, "This code has expired or does not exist; run leo login again")
+        return login
+
+    @app.get("/api/cli/device/{user_code}")
+    def cli_device_read(user_code: str, user: CurrentUser = Depends(current_user)):
+        account(user)
+        login = pending_login(user_code)
+        return {"device_name": login["device_name"], "status": login["status"], "expires_at": login["expires_at"]}
+
+    @app.post("/api/cli/device/{user_code}")
+    def cli_device_answer(user_code: str, body: CliAnswer, user: CurrentUser = Depends(current_user)):
+        """The signed-in user allows or denies the device; allowing registers it and readies its token."""
+        uid = account(user)["id"]
+        login = pending_login(user_code)
+        if not store.answer_cli_login(login["user_code"], uid, body.approve, secrets.token_urlsafe(32) if body.approve else None):
+            raise HTTPException(409, "This code was already answered")
+        return {"ok": True, "device_name": login["device_name"]}
+
+    @app.post("/api/cli/token")
+    def cli_token(body: CliTokenInput):
+        login = store.cli_login(device_hash=code_digest(body.device_code))
+        if not login:
+            return {"status": "expired"}
+        if login["status"] == "denied":
+            return {"status": "denied"}
+        if login["status"] == "pending":
+            return {"status": "expired" if login["expires_at"] < time.time() else "pending"}
+        token = store.take_cli_token(login["id"])
+        return {"status": "approved", "token": token} if token else {"status": "expired"}
+
+    @app.get("/api/cli/sync")
+    def cli_sync(request: Request):
+        """Everything the CLI needs to route on the laptop: models with their keys, preferences, and the skill catalog."""
+        user, device = request.state.user, request.state.device
+        router = store.get_router(user.id)
+        models, chat_only = [], []
+        for c in store.list_connections(user.id, private=True):
+            if not c["enabled"]:
+                continue
+            if router and c["base_url"].startswith(router["url"]):
+                chat_only.append({"name": c["name"], "model": c["model"]})  # Per-user 9Router: reachable from the server only.
+                continue
+            models.append({**{k: v for k, v in c.items() if k not in ("secret", "has_key", "cooldown_until")}, "api_key": store.decrypt(c) or None})
+        return {"device": {"id": device["id"], "name": device["name"]}, "user": {"username": user.username},
+                "connections": models, "chat_only": chat_only, "preferences": store.preferences(), "skills": store.list_skills()}
+
+    @app.post("/api/cli/usage")
+    def cli_usage(body: CliUsageInput, request: Request):
+        store.add_cli_usage(request.state.user.id, request.state.device["id"], [e.model_dump() for e in body.entries])
+        return {"ok": True, "received": len(body.entries)}
+
+    @app.post("/api/cli/logout")
+    def cli_logout(request: Request):
+        store.revoke_cli_device(request.state.device["id"], request.state.user.id)
+        return {"ok": True}
+
+    @app.get("/api/cli/devices")
+    def cli_devices(user: CurrentUser = Depends(current_user)):
+        return store.list_cli_devices(account(user)["id"])
+
+    @app.delete("/api/cli/devices/{device_id}")
+    def cli_revoke(device_id: str, user: CurrentUser = Depends(current_user)):
+        store.revoke_cli_device(device_id, account(user)["id"])
+        return {"ok": True}
 
     # ---------------- connectors (remote MCP servers) ----------------
 
