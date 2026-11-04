@@ -1,0 +1,7 @@
+# Test-only override: publishes sandboxd on loopback so tests/test_sandbox_docker.py can drive it from the host.
+#   docker compose -f compose.yaml -f tests/compose.sandbox-test.yaml up -d --build sandboxd
+#   LEO_TEST_SANDBOX_URL=http://127.0.0.1:8100 uv run --frozen python -m pytest tests/test_sandbox_docker.py
+services:
+  sandboxd:
+    ports:
+      - "127.0.0.1:8100:8100"

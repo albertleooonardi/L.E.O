@@ -141,6 +141,51 @@ flowchart LR
 
 `POST /api/route` (and the MCP tool `leo_route`) previews the decision for any prompt without calling a model.
 
+## Agent mode: multi-agent work in a sandbox
+
+Pick **Agent** in the composer (or **New agent workspace** in the sidebar) and L.E.O. works like a coding agent: it gets a
+Linux sandbox for the chat, plans with a todo list, edits files, runs commands and tests, and keeps going until the
+task is done, for many steps.
+
+```mermaid
+flowchart LR
+    U[You] -->|task, steering messages, approvals| L[Lead agent<br/>strongest tool-calling model]
+    L -->|delegate, in parallel| S1[Sub-agent · coding]
+    L -->|delegate| S2[Sub-agent · research]
+    L & S1 & S2 -->|bash · read/write/edit · list| X[(Sandbox container<br/>/workspace)]
+    L & S1 & S2 -->|web_search · read_url| W[Web, through L.E.O.]
+    X -->|pip / npm only| E[Egress proxy<br/>package registries]
+    L -->|git_push, after you approve| G[Your repository]
+```
+
+- **A lead agent and sub-agents.** The lead agent runs on the strongest model that supports tool calling. It can hand a
+  focused subtask to a sub-agent with `delegate`; your **Skills** are the sub-agent types, so a coding task goes to a
+  coding model and research to a cheap generalist. Delegations made in the same turn run in parallel (up to
+  *Sub-agents at once*), each with its own context; the lead agent only reads their reports.
+- **Every step is routed and counted.** Each step goes through the same routing, fallback, rate-limit handling, and
+  budget as chat runs. Agent runs have their own, larger allowance (Settings → Limits → Agent mode). When a limit is
+  reached the agent asks whether to continue instead of failing.
+- **Long runs.** Each step is checkpointed: if the worker restarts, the run resumes from the saved transcripts. Older
+  steps are summarized when the context fills up. While the agent works, typing a message in the composer steers it.
+- **Workspaces.** Start empty, upload a `.zip`, or clone a git repository (a token for private repositories stays on
+  your server and is never visible inside the sandbox). Browse files in the **Files** panel and download a `.zip` at
+  any time. The agent can push a branch with `git_push`, and only after you approve that push.
+- **Tool calling only where it works.** A model is used as an agent only if it supports native tool calling. Discovery
+  and the first agent call learn this (Settings → Models shows "calls tools"); you can also set it per model.
+
+**Sandboxes.** `sandboxd` is the only service with the Docker socket. It starts one container per workspace from the
+`leo-sandbox` image (Python, Node.js, git, ripgrep) as a non-root user, with every Linux capability dropped,
+`no-new-privileges`, and CPU, memory, and process limits. Containers sit on an internal network whose only exit is an
+egress proxy that allows package registries (npm, PyPI, crates.io, the Go proxy, RubyGems, Maven Central); add hosts
+with `LEO_EGRESS_ALLOW_EXTRA`. Idle sandboxes stop after 30 minutes and restart on the next message; deleting the chat
+deletes the sandbox and its volume. For stronger isolation, install gVisor and set `LEO_SANDBOX_RUNTIME=runsc`.
+
+**Benchmark.** `benchmarks/agent.py` runs three tasks end to end and checks each with hidden tests inside the agent's
+own sandbox: build a todo app from scratch, fix a project's failing tests, and add authentication to an API (a long
+run that must use a research and a testing sub-agent, take 50+ steps, and survive a worker restart with
+`--restart-worker-after`). Results include steps, sub-agents, calls, tokens, cost, and time; give another agent the
+same prompts to compare.
+
 ## Features
 
 - **Routing head:** skills you can edit, strength tiers, thinking-effort control, Auto/Quick/Reviewed/Deep modes, per-subtask routing, and a preview of every decision.
@@ -200,7 +245,11 @@ When HEAD sees a page build, it takes the page's topic ("a landing page about **
 <details>
 <summary><b>Connect models</b></summary>
 
-1. Open **Settings → Add provider** and choose a provider preset.
+**Sign in with an account (Docker Compose).** **Settings → Add provider** first offers one-click sign-in: ChatGPT (Codex), GitHub Copilot, Kiro, Kimi, Kilo Code, Qoder, Grok CLI, and Z.ai GLM Coding. Device-code providers show a code to enter on their sign-in page; ChatGPT opens OpenAI's sign-in page and redirects back to `localhost:1455`, which the api container publishes on loopback for this. L.E.O. notices when you finish, adds the account's models, and lists the account under **Signed-in accounts** with **Disconnect**. Behind it, the `9router` service ([9Router](https://github.com/decolua/9router), pinned, no host port) keeps and refreshes the tokens and serves the models; L.E.O. signs in to it with `LEO_9ROUTER_PASSWORD` and creates its own 9Router API key. 9Router warns that ChatGPT (Codex), GitHub Copilot, and Kiro do not license subscription sign-in for router use and may restrict such accounts; L.E.O. asks you to accept that before starting. Claude subscription sign-in is not offered: Anthropic only allows those tokens in its own apps, so use a Claude API key.
+
+**Or use an API key:**
+
+1. Open **Settings → Add provider → Use an API key instead** and choose a provider preset.
 2. Set the API base URL and exact model ID. Enter an API key if the endpoint requires one; keys are encrypted on the server and never shown again.
 3. Set the **routing profile**: skills, strength (light, standard, strong), and **Reasoning model** if it spends hidden thinking tokens. Presets suggest one.
 4. **Save**, then **Check** to test the model catalog. This does not send a generation request; manual model IDs work when a provider has no compatible catalog.
@@ -211,6 +260,7 @@ When HEAD sees a page build, it takes the page's topic ("a landing page about **
 | --- | --- | --- |
 | Ollama | `http://localhost:11434/v1`, Chat Completions; pull a model yourself | General · light |
 | vLLM / LM Studio | Your server URL (LM Studio is usually port 1234); Chat Completions | General · standard |
+| 9Router | Managed by Compose (`http://9router:20128/v1`); prefer **Sign in with an account**. Outside Docker: `npm i -g 9router`, `9router --host 127.0.0.1`, then `http://localhost:20128/v1` with a key from its dashboard | Set per model (discovery reads its context and reasoning data) |
 | OpenRouter | `https://openrouter.ai/api/v1`; Chat Completions | Set per model |
 | OpenAI / GPT | `https://api.openai.com/v1`; Responses | Coding, Backend, Reasoning · strong |
 | Anthropic / Claude | `https://api.anthropic.com/v1`; Anthropic Messages | Coding, Backend, Frontend, Reasoning · strong |
@@ -352,7 +402,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Compose runs the API, the worker, and PostgreSQL, with port 8000 bound to the host's loopback interface. **This setup has not been run yet** (no Docker host was available); expect to smoke-test it. Inside containers, reach host Ollama at `http://host.docker.internal:11434/v1`. `.env` is read by Compose only; export variables in your shell for local Python commands. Settings are documented in `.env.example`.
+Compose runs the API, the worker, PostgreSQL, and SearXNG, with ports 8000 (L.E.O.) and 8888 (SearXNG) bound to the host's loopback interface. Smoke-tested on Docker Desktop for Windows: health, UI, sign-up and sign-in, PostgreSQL storage, the worker, and search from the API container (no model run yet). In **Settings → Web search** use `http://searxng:8080`. Inside containers, reach host Ollama at `http://host.docker.internal:11434/v1`. `.env` is read by Compose only; export variables in your shell for local Python commands. Settings are documented in `.env.example`.
 
 </details>
 
@@ -362,7 +412,8 @@ Compose runs the API, the worker, and PostgreSQL, with port 8000 bound to the ho
 - **Single-owner workspace.** The dev launcher binds to loopback. The API refuses to start when `LEO_ALLOWED_HOSTS` names a non-loopback host and `LEO_API_TOKEN` is empty. For remote access, set `LEO_API_TOKEN`, exact `LEO_ALLOWED_ORIGINS` and `LEO_ALLOWED_HOSTS`, and put HTTPS in front. The token grants the whole workspace; there are no per-user accounts.
 - **Keys.** Provider API keys are encrypted at rest (Fernet) and never returned by the API. Browser storage holds only the theme, panel state, and the selected conversation ID.
 - **Origins.** Unexpected browser origins and hostnames are rejected. Arbitrary provider URLs, including local and private addresses, are an owner-only setting by design.
-- **Generated code.** The server only parses Python and JSON for syntax; it never runs generated code, edits your files, runs shell commands, or deploys anything. The only thing that runs is a generated web page, in the browser canvas sandbox. Chat messages render model output as text, never as HTML in the app.
+- **Generated code.** In chat modes the server only parses Python and JSON for syntax and never runs generated code. A generated web page runs only in the browser canvas sandbox, and chat messages render model output as text, never as HTML in the app.
+- **Agent mode.** Commands run only inside per-workspace sandbox containers (see [Agent mode](#agent-mode-multi-agent-work-in-a-sandbox)): non-root, no capabilities, resource limits, and network access only to package registries. Files reach a sandbox through archives that are checked and unpacked by the sandbox user, so a link planted by the agent cannot redirect a write. Git tokens stay with L.E.O. and `sandboxd`: clone and push run outside the sandbox, and a push reads the workspace history through a `git bundle`, so the sandbox's own git configuration and hooks never run. Nothing is pushed without your approval.
 
 ## Development
 

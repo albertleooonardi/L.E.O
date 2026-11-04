@@ -1,0 +1,9 @@
+[user]
+	name = L.E.O. agent
+	email = agent@leo.local
+[init]
+	defaultBranch = main
+[safe]
+	directory = *
+[advice]
+	detachedHead = false

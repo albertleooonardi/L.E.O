@@ -36,6 +36,7 @@ import '../styles/global.css';
         <button class="icon-button" id="collapse-sidebar" title="Hide chats" aria-label="Hide chats"><Icon name="panel" size={17} /></button>
       </div>
       <button class="new-chat-button" id="new-chat"><Icon name="plus" size={15} /><span>New chat</span><kbd class="shortcut" data-key="K"></kbd></button>
+      <button class="sidebar-search" id="new-workspace"><Icon name="layers" size={15} /><span>New agent workspace</span></button>
       <button class="sidebar-search" id="search-chats"><Icon name="search" size={15} /><span>Search chats</span><kbd class="shortcut" data-key="/"></kbd></button>
       <section class="history-section" aria-label="Recent chats">
         <div id="history-list" class="history-list"></div>
@@ -53,17 +54,19 @@ import '../styles/global.css';
       <header class="topbar">
         <div class="header-left">
           <button id="open-sidebar" class="icon-button" title="Conversations" aria-label="Open conversations" aria-expanded="false" aria-controls="sidebar"><Icon name="panel" size={18} /></button>
-          <a class="brand" href="/" aria-label="L.E.O home">L.E.O</a>
+          <a class="brand" href="/" aria-label="L.E.O home"><span class="brand-mark" aria-hidden="true"><Icon name="spark" size={12} /></span>L.E.O</a>
           <span id="conversation-title" class="conversation-title"></span>
         </div>
         <div class="header-actions">
+          <button class="icon-button" id="header-new-chat" title="New chat" aria-label="New chat"><Icon name="plus" size={18} /></button>
+          <button class="settings-button" id="toggle-workspace" title="Files in this chat's agent workspace" aria-controls="workspace-panel" aria-expanded="false" hidden><Icon name="layers" size={16} /><span>Files</span></button>
+          <button class="settings-button" id="toggle-usage" title="Token and context usage for this chat" aria-controls="usage-panel" aria-expanded="false"><Icon name="chart" size={16} /><span>Usage</span></button>
+          <button class="settings-button" id="open-settings" aria-haspopup="dialog"><Icon name="settings" size={16} /><span>Settings</span></button>
           <div id="user-badge" class="user-badge" hidden>
-            <span id="user-badge-name"></span>
-            <button class="icon-button" id="header-logout" title="Sign out" aria-label="Sign out"><Icon name="logout" size={17} /></button>
+            <span class="avatar" id="user-badge-initial" aria-hidden="true"></span>
+            <span id="user-badge-name" class="user-name"></span>
+            <button class="icon-button" id="header-logout" title="Sign out" aria-label="Sign out"><Icon name="logout" size={16} /></button>
           </div>
-          <button class="icon-button" id="header-new-chat" title="New chat" aria-label="New chat"><Icon name="plus" size={19} /></button>
-          <button class="settings-button" id="toggle-usage" title="Token and context usage for this chat" aria-controls="usage-panel" aria-expanded="false"><Icon name="chart" size={17} /><span>Usage</span></button>
-          <button class="settings-button" id="open-settings" aria-haspopup="dialog"><Icon name="settings" size={17} /><span>Settings</span></button>
         </div>
       </header>
       <main id="main">
@@ -84,7 +87,7 @@ import '../styles/global.css';
             <textarea id="prompt" name="prompt" placeholder="Message L.E.O…" rows="1" maxlength="12000"></textarea>
             <div class="composer-row">
               <label for="composer-mode" class="sr-only">Orchestration mode</label>
-              <select id="composer-mode" title="Orchestration mode"><option value="auto">Auto · L.E.O. decides</option><option value="quick">Quick · one answer</option><option value="reviewed">Reviewed · generate + review</option><option value="deep">Deep · plan + review</option></select>
+              <select id="composer-mode" title="Orchestration mode"><option value="auto">Auto · L.E.O. decides</option><option value="quick">Quick · one answer</option><option value="reviewed">Reviewed · generate + review</option><option value="deep">Deep · plan + review</option><option value="agent">Agent · works in a sandbox</option></select>
               <button type="button" id="search-toggle" class="search-toggle" aria-pressed="false" title="Search the web for this message (otherwise L.E.O. decides)"><Icon name="globe" size={15} /><span>Search</span></button>
               <button type="button" id="context-meter" class="context-meter" title="Context used by the latest call in this conversation" aria-controls="usage-panel" hidden><span class="meter"><span></span></span><span id="context-text"></span></button>
               <button class="send-button" id="send-button" type="submit" aria-label="Send message" title="Send message" disabled><Icon name="arrow" size={18} /><span class="stop-square" hidden></span></button>
@@ -102,6 +105,23 @@ import '../styles/global.css';
       <p class="field-hint" id="usage-panel-empty">Start or open a conversation to see its token and context usage.</p>
       <div id="usage-panel-body" class="panel-body" hidden></div>
       <a class="setup-link panel-link" href="/usage/">Usage across all chats</a>
+    </aside>
+    <aside class="usage-panel workspace-panel" id="workspace-panel" aria-labelledby="workspace-heading" hidden>
+      <div class="sidebar-heading">
+        <h2 id="workspace-heading">Workspace</h2>
+        <button class="icon-button" id="close-workspace" title="Close files" aria-label="Close files"><Icon name="close" size={18} /></button>
+      </div>
+      <p class="field-hint" id="workspace-meta"></p>
+      <div class="workspace-actions">
+        <button type="button" class="secondary-button" id="workspace-refresh"><Icon name="refresh" size={14} />Refresh</button>
+        <label class="secondary-button file-button"><Icon name="plus" size={14} />Upload .zip<input id="workspace-upload" type="file" accept=".zip,application/zip" /></label>
+        <a class="secondary-button" id="workspace-download"><Icon name="down" size={14} />Download</a>
+      </div>
+      <ul id="workspace-files" class="workspace-files" aria-label="Files"></ul>
+      <div id="workspace-viewer" class="workspace-viewer" hidden>
+        <div class="viewer-bar"><strong id="workspace-file-name"></strong><button type="button" class="text-button" id="workspace-file-close">Back to files</button></div>
+        <pre><code id="workspace-file-content"></code></pre>
+      </div>
     </aside>
     <aside class="canvas-panel" id="canvas-panel" aria-labelledby="canvas-title" hidden>
       <div class="canvas-bar">
@@ -127,21 +147,57 @@ import '../styles/global.css';
       <label class="search-field"><Icon name="search" size={17} /><input id="search-input" type="search" aria-label="Search conversations" placeholder="Search…" autocomplete="off" /></label>
       <div id="search-results" class="search-results"></div>
     </dialog>
+    <dialog id="workspace-dialog" class="dialog" aria-labelledby="workspace-dialog-heading">
+      <div class="dialog-heading"><h2 id="workspace-dialog-heading">New agent workspace</h2><button class="icon-button" data-close-dialog aria-label="Close"><Icon name="close" size={18} /></button></div>
+      <p class="field-hint">The agent works in its own sandbox: it edits files, runs commands and tests, and installs packages from npm and PyPI. Nothing leaves the sandbox without your approval.</p>
+      <form id="workspace-form" class="workspace-form">
+        <label>Name<input id="workspace-name" maxlength="120" placeholder="My project" /></label>
+        <fieldset class="choice-list">
+          <legend>Start from</legend>
+          <label class="choice"><input type="radio" name="workspace-source" value="empty" checked /><span><strong>Empty folder</strong><small>Build something new. You can upload a .zip of an existing project afterwards.</small></span></label>
+          <label class="choice"><input type="radio" name="workspace-source" value="git" /><span><strong>Git repository</strong><small>Cloned into the sandbox. The agent can push a branch, and asks you first.</small></span></label>
+        </fieldset>
+        <div id="workspace-git" hidden>
+          <label>Repository URL<input id="workspace-repo" type="url" placeholder="https://github.com/you/project" /></label>
+          <div class="field-grid">
+            <label>Branch<input id="workspace-branch" maxlength="200" placeholder="Default branch" /></label>
+            <label>Access token<input id="workspace-token" type="password" autocomplete="off" placeholder="For private repos and pushes" /></label>
+          </div>
+          <p class="field-hint">The token stays on your L.E.O. server; it is never visible inside the sandbox.</p>
+        </div>
+        <p class="form-feedback" id="workspace-feedback" role="status"></p>
+        <div class="form-actions"><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button type="submit" class="primary-button" id="workspace-create">Create workspace</button></div>
+      </form>
+    </dialog>
     <dialog id="settings-dialog" class="dialog settings-dialog" aria-labelledby="settings-heading">
       <div class="dialog-heading"><h2 id="settings-heading">Settings</h2><button class="icon-button" data-close-dialog aria-label="Close settings"><Icon name="close" size={18} /></button></div>
       <div class="settings-layout">
         <div class="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
           <span class="tab-marker" aria-hidden="true"></span>
-          <button type="button" role="tab" id="tab-models" aria-controls="panel-models" aria-selected="true">Models</button>
-          <button type="button" role="tab" id="tab-skills" aria-controls="panel-skills" aria-selected="false" tabindex="-1">Skills</button>
-          <button type="button" role="tab" id="tab-routing" aria-controls="panel-routing" aria-selected="false" tabindex="-1">Routing</button>
-          <button type="button" role="tab" id="tab-search" aria-controls="panel-search" aria-selected="false" tabindex="-1">Web search</button>
-          <button type="button" role="tab" id="tab-limits" aria-controls="panel-limits" aria-selected="false" tabindex="-1">Limits</button>
-          <button type="button" role="tab" id="tab-general" aria-controls="panel-general" aria-selected="false" tabindex="-1">General</button>
+          <button type="button" role="tab" id="tab-models" aria-controls="panel-models" aria-selected="true"><Icon name="layers" size={16} /><span>Models</span></button>
+          <button type="button" role="tab" id="tab-skills" aria-controls="panel-skills" aria-selected="false" tabindex="-1"><Icon name="spark" size={16} /><span>Skills</span></button>
+          <button type="button" role="tab" id="tab-routing" aria-controls="panel-routing" aria-selected="false" tabindex="-1"><Icon name="compass" size={16} /><span>Routing</span></button>
+          <button type="button" role="tab" id="tab-search" aria-controls="panel-search" aria-selected="false" tabindex="-1"><Icon name="globe" size={16} /><span>Web search</span></button>
+          <button type="button" role="tab" id="tab-limits" aria-controls="panel-limits" aria-selected="false" tabindex="-1"><Icon name="gauge" size={16} /><span>Limits</span></button>
+          <button type="button" role="tab" id="tab-general" aria-controls="panel-general" aria-selected="false" tabindex="-1"><Icon name="settings" size={16} /><span>General</span></button>
         </div>
         <div class="settings-panels">
           <section class="settings-panel" role="tabpanel" id="panel-models" aria-labelledby="tab-models">
-            <div class="panel-intro"><p>Add a provider once, then choose which of its models to use.</p><button class="secondary-button" id="add-connection">Add provider</button></div>
+            <div class="panel-intro"><div><h3>Models</h3><p>Sign in with an account or add an API key, then choose which models L.E.O. may use.</p></div><button class="primary-button" id="add-connection"><Icon name="plus" size={14} />Add provider</button></div>
+            <section id="account-chooser" class="provider-form account-chooser" aria-labelledby="account-heading" hidden>
+              <div class="section-heading"><h3 id="account-heading">Sign in with an account</h3><button type="button" class="text-button" id="account-close">Close</button></div>
+              <p class="field-hint">Sign in once; L.E.O. adds the account's models and keeps the sign-in fresh through 9Router.</p>
+              <div id="account-options" class="account-options"></div>
+              <div id="account-flow" class="account-flow" hidden>
+                <p id="account-flow-text"></p>
+                <code id="account-code" class="account-code" hidden></code>
+                <div class="form-actions start"><a id="account-open" class="primary-button" target="_blank" rel="noopener noreferrer">Open sign-in page</a><button type="button" class="secondary-button" id="account-cancel">Cancel</button></div>
+              </div>
+              <p class="form-feedback" id="account-feedback" role="status"></p>
+              <div class="account-divider"><span>or</span></div>
+              <button type="button" class="text-button" id="use-api-key">Use an API key instead ›</button>
+            </section>
+            <div id="account-list" class="account-list" hidden></div>
             <form id="provider-form" class="provider-form" hidden>
               <input id="provider-id" type="hidden" />
               <div class="field-grid">
@@ -156,6 +212,7 @@ import '../styles/global.css';
               <div class="field-grid">
                 <label>Strength<select id="provider-tier"><option value="light">Light: small or fast</option><option value="standard">Standard</option><option value="strong">Strong: top model</option></select></label>
                 <label class="check-label inline-check"><input id="provider-reasoning" type="checkbox" /> Thinks before answering</label>
+                <label>Tool calling (agent mode)<select id="provider-tools"><option value="">Not known yet: try it</option><option value="true">Supported</option><option value="false">Not supported</option></select></label>
               </div>
               <fieldset class="skill-picker"><legend>Good at</legend><div id="provider-skills" class="skill-options"></div></fieldset>
               <label class="check-label"><input id="provider-enabled" type="checkbox" checked /> Use this model</label>
@@ -197,7 +254,7 @@ import '../styles/global.css';
             </section>
           </section>
           <section class="settings-panel" role="tabpanel" id="panel-skills" aria-labelledby="tab-skills" hidden>
-            <div class="panel-intro"><p>Each task is matched to a skill by keywords and sent to a model that has it.</p><button class="secondary-button" id="add-skill">Add skill</button></div>
+            <div class="panel-intro"><div><h3>Skills</h3><p>Each task is matched to a skill by keywords and sent to a model that has it.</p></div><button class="primary-button" id="add-skill"><Icon name="plus" size={14} />Add skill</button></div>
             <form id="skill-form" class="provider-form" hidden>
               <input id="skill-id" type="hidden" />
               <div class="field-grid">
@@ -218,7 +275,7 @@ import '../styles/global.css';
           </section>
           <form id="orchestration-form" class="orchestration-form">
             <section class="settings-panel" role="tabpanel" id="panel-routing" aria-labelledby="tab-routing" hidden>
-              <div class="panel-intro"><p>How L.E.O. picks a model for each task.</p></div>
+              <div class="panel-intro"><div><h3>Routing</h3><p>How L.E.O. picks a model for each task.</p></div></div>
               <fieldset class="choice-list">
                 <legend>Model choice</legend>
                 <label class="choice"><input type="radio" name="routing" value="auto" /><span><strong>Auto <em>Recommended</em></strong><small>Considers every model you turned on. Picks one that fits the task, then the cheapest: free models cost nothing, paid ones are priced from the tokens they actually use.</small></span></label>
@@ -226,16 +283,18 @@ import '../styles/global.css';
                 <label class="choice"><input type="radio" name="routing" value="local_first" /><span><strong>Local first</strong><small>Prefers models running on this computer.</small></span></label>
                 <label class="choice"><input type="radio" name="routing" value="priority" /><span><strong>By priority</strong><small>Follows each model's priority number.</small></span></label>
               </fieldset>
-              <div class="toggle-row">
-                <span><strong>Match tasks to skills</strong><small>Sends coding to coders, design to designers, and keeps light work on light models.</small></span>
-                <input id="smart-routing" type="checkbox" class="switch" aria-label="Match tasks to skills" />
+              <div class="settings-card">
+                <div class="toggle-row">
+                  <span><strong>Match tasks to skills</strong><small>Sends coding to coders, design to designers, and keeps light work on light models.</small></span>
+                  <input id="smart-routing" type="checkbox" class="switch" aria-label="Match tasks to skills" />
+                </div>
+                <div class="toggle-row">
+                  <span><strong>Allow paid models</strong><small>Used only within the cost limit below.</small></span>
+                  <input id="allow-paid" type="checkbox" class="switch" aria-label="Allow paid models" />
+                </div>
+                <div class="reveal" id="paid-limit"><div><label class="narrow">Max cost per run ($)<input id="max-cost" type="number" min="0.001" max="100" step="any" required /></label></div></div>
+                <label class="narrow">Default mode<select id="mode-select"><option value="auto">Auto</option><option value="quick">Quick</option><option value="reviewed">Reviewed</option><option value="deep">Deep</option></select></label>
               </div>
-              <div class="toggle-row">
-                <span><strong>Allow paid models</strong><small>Used only within the cost limit below.</small></span>
-                <input id="allow-paid" type="checkbox" class="switch" aria-label="Allow paid models" />
-              </div>
-              <div class="reveal" id="paid-limit"><div><label class="narrow">Max cost per run ($)<input id="max-cost" type="number" min="0.001" max="100" step="any" required /></label></div></div>
-              <label class="narrow">Default mode<select id="mode-select"><option value="auto">Auto</option><option value="quick">Quick</option><option value="reviewed">Reviewed</option><option value="deep">Deep</option></select></label>
               <details class="advanced">
                 <summary>Fixed roles and instructions</summary>
                 <p class="field-hint">Generator is used only when matching tasks to skills is off.</p>
@@ -248,21 +307,25 @@ import '../styles/global.css';
               </details>
             </section>
             <section class="settings-panel" role="tabpanel" id="panel-search" aria-labelledby="tab-search" hidden>
-              <div class="panel-intro"><p>Searches only when a request needs current information, then cites the pages it read.</p></div>
-              <div class="field-grid">
-                <label>When to search<select id="web-search"><option value="auto">When needed</option><option value="off">Never</option></select></label>
-                <label>Pages to read<input id="search-pages" type="number" min="1" max="5" required /></label>
+              <div class="panel-intro"><div><h3>Web search</h3><p>Searches only when a request needs current information, then cites the pages it read.</p></div></div>
+              <div class="settings-card">
+                <div class="field-grid">
+                  <label>When to search<select id="web-search"><option value="auto">When needed</option><option value="off">Never</option></select></label>
+                  <label>Pages to read<input id="search-pages" type="number" min="1" max="5" required /></label>
+                </div>
+                <label>SearXNG address<input id="search-url" type="url" placeholder="http://localhost:8888" /></label>
+                <div class="form-actions start"><button type="button" class="secondary-button" id="test-search">Test search</button></div>
               </div>
-              <label>SearXNG address<input id="search-url" type="url" placeholder="http://localhost:8888" /></label>
-              <div class="form-actions start"><button type="button" class="secondary-button" id="test-search">Test search</button></div>
-              <div class="toggle-row">
-                <span><strong>Real photos for pages</strong><small>Finds openly licensed photos on Wikimedia Commons, checks that they load, and credits the photographers. No key needed.</small></span>
-                <input id="page-photos" type="checkbox" class="switch" aria-label="Real photos for pages" />
+              <div class="settings-card">
+                <div class="toggle-row">
+                  <span><strong>Real photos for pages</strong><small>Finds openly licensed photos on Wikimedia Commons, checks that they load, and credits the photographers. No key needed.</small></span>
+                  <input id="page-photos" type="checkbox" class="switch" aria-label="Real photos for pages" />
+                </div>
               </div>
             </section>
             <section class="settings-panel" role="tabpanel" id="panel-limits" aria-labelledby="tab-limits" hidden>
-              <div class="panel-intro"><p>Caps for each run. Failed calls still count, since the provider may have charged for them.</p></div>
-              <div class="field-grid">
+              <div class="panel-intro"><div><h3>Limits</h3><p>Caps for each run. Failed calls still count, since the provider may have charged for them.</p></div></div>
+              <div class="field-grid settings-card">
                 <label>Model calls per run<input id="max-calls" type="number" min="1" max="20" required /></label>
                 <label>Repair rounds<input id="max-repairs" type="number" min="0" max="3" required /></label>
                 <label>Output tokens per call<input id="max-output-tokens" type="number" min="128" max="65536" required /></label>
@@ -271,6 +334,16 @@ import '../styles/global.css';
                 <label>Provider timeout (s)<input id="timeout-seconds" type="number" min="10" max="600" required /></label>
                 <label>Run time limit (s)<input id="max-run-seconds" type="number" min="30" max="3600" required /></label>
               </div>
+              <div class="panel-intro"><div><h3>Agent mode</h3><p>Agents take many steps, so they get a larger allowance. When one runs out, the agent asks before continuing.</p></div></div>
+              <div class="field-grid settings-card">
+                <label>Steps before asking<input id="agent-max-steps" type="number" min="5" max="1000" required /></label>
+                <label>Model calls per run<input id="agent-max-calls" type="number" min="10" max="5000" required /></label>
+                <label>Tokens per run<input id="agent-token-budget" type="number" min="100000" max="100000000" required /></label>
+                <label>Max cost per run ($)<input id="agent-max-cost" type="number" min="0.001" max="1000" step="any" required /></label>
+                <label>Time limit (s)<input id="agent-max-run-seconds" type="number" min="300" max="86400" required /></label>
+                <label>Sub-agents at once<input id="agent-parallel" type="number" min="1" max="8" required /></label>
+                <label>Command timeout (s)<input id="agent-command-timeout" type="number" min="10" max="3600" required /></label>
+              </div>
             </section>
             <div class="settings-save" id="settings-save" hidden>
               <p class="form-feedback" id="settings-feedback" role="status"></p>
@@ -278,14 +351,17 @@ import '../styles/global.css';
             </div>
           </form>
           <section class="settings-panel" role="tabpanel" id="panel-general" aria-labelledby="tab-general" hidden>
-            <div class="settings-row">
-              <label for="theme-select">Appearance</label>
-              <select id="theme-select"><option value="dark">Dark</option><option value="light">Light</option></select>
-            </div>
-            <div class="settings-row"><span>Conversation history <small>Saved on your L.E.O. server</small></span><button class="secondary-button" id="clear-history">Clear</button></div>
-            <div id="clear-confirmation" class="clear-confirmation" hidden>
-              <p>Delete all conversations? This cannot be undone.</p>
-              <div><button class="secondary-button" id="cancel-clear">Cancel</button><button class="secondary-button danger" id="confirm-clear">Delete all</button></div>
+            <div class="panel-intro"><div><h3>General</h3><p>Appearance, history, and shortcuts.</p></div></div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <span>Appearance <small>Dark or light theme on this device</small></span>
+                <select id="theme-select" aria-label="Appearance"><option value="dark">Dark</option><option value="light">Light</option></select>
+              </div>
+              <div class="settings-row"><span>Conversation history <small>Saved on your L.E.O. server</small></span><button class="secondary-button" id="clear-history">Clear</button></div>
+              <div id="clear-confirmation" class="clear-confirmation" hidden>
+                <p>Delete all conversations? This cannot be undone.</p>
+                <div><button class="secondary-button" id="cancel-clear">Cancel</button><button class="secondary-button danger" id="confirm-clear">Delete all</button></div>
+              </div>
             </div>
             <details class="shortcuts">
               <summary>Keyboard shortcuts<Icon name="down" size={15} /></summary>

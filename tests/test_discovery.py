@@ -8,7 +8,8 @@ from .conftest import sse_response
 
 OPENROUTER = {'data': [
     {'id': 'big/ultra-550b:free', 'name': 'Ultra (free)', 'description': 'A frontier reasoning model.', 'context_length': 1000000,
-     'pricing': {'prompt': '0', 'completion': '0'}, 'architecture': {'output_modalities': ['text']}, 'reasoning': {'mandatory': False, 'default_enabled': True}},
+     'pricing': {'prompt': '0', 'completion': '0'}, 'architecture': {'output_modalities': ['text']}, 'reasoning': {'mandatory': False, 'default_enabled': True},
+     'supported_parameters': ['tools', 'reasoning']},
     {'id': 'pool/laguna-xs:free', 'name': 'Laguna XS (free)', 'description': 'The latest coding agent model.', 'context_length': 262144,
      'pricing': {'prompt': '0', 'completion': '0'}, 'architecture': {'output_modalities': ['text']}, 'reasoning': {'mandatory': True}},
     {'id': 'g/gemma-31b-it:free', 'name': 'Gemma 31B (free)', 'description': 'Instruction tuned.', 'context_length': 131072,
@@ -48,6 +49,7 @@ async def test_openrouter_discovery_offers_free_text_models_only():
     by_id = {m['model']: m for m in found['models']}
     assert set(by_id) == {'big/ultra-550b:free', 'pool/laguna-xs:free', 'g/gemma-31b-it:free', 'liquid/lfm-2.6b:free'}
     assert by_id['big/ultra-550b:free']['tier'] == 'strong' and by_id['big/ultra-550b:free']['reasoning'] is True
+    assert by_id['big/ultra-550b:free']['tools'] is True and by_id['g/gemma-31b-it:free']['tools'] is False
     assert by_id['pool/laguna-xs:free']['skills'][0] == 'coding' and by_id['pool/laguna-xs:free']['tier'] == 'light'
     assert by_id['g/gemma-31b-it:free']['reasoning'] is False and by_id['g/gemma-31b-it:free']['free'] is True
     assert {s['model'] for s in found['skipped']} == {'g/lyria:free', 'openrouter/free'}, 'paid models are not even listed'
@@ -61,7 +63,26 @@ async def test_gemini_discovery_uses_native_catalog_and_skips_non_chat():
     found = await discover(conn('https://generativelanguage.googleapis.com/v1beta/openai', free=True), 'gkey', httpx.MockTransport(handler))
     assert seen == [('/v1beta/models', 'gkey')]
     assert [m['model'] for m in found['models']] == ['gemini-9-flash-lite', 'gemini-9-pro']
+    assert all(m['tools'] is True for m in found['models'])
     assert {s['reason'] for s in found['skipped']} == {'not a text chat model', 'alias of another model'}
+
+
+async def test_router_discovery_reads_capabilities_and_skips_tool_combos():
+    catalog = {'object': 'list', 'data': [
+        {'id': 'cc/claude-opus-4-7', 'owned_by': 'cc', 'capabilities': {'reasoning': True, 'contextWindow': 200000, 'toolCalling': True}},
+        {'id': 'if/qwen3-coder-plus', 'owned_by': 'if', 'capabilities': {'reasoning': False, 'contextWindow': 1000000}},
+        {'id': 'premium-coding', 'owned_by': 'combo', 'context_length': 128000, 'capabilities': {'reasoning': True}},
+        {'id': 'web', 'owned_by': 'combo', 'kind': 'webSearch'},
+        {'id': 'xai/grok-imagine', 'owned_by': 'xai', 'capabilities': {'imageOutput': True}},
+    ]}
+    found = await discover(conn('http://localhost:20128/v1'), None, httpx.MockTransport(lambda r: httpx.Response(200, json=catalog)))
+    by_id = {m['model']: m for m in found['models']}
+    assert set(by_id) == {'cc/claude-opus-4-7', 'if/qwen3-coder-plus', 'premium-coding'}
+    assert by_id['cc/claude-opus-4-7']['tier'] == 'strong' and by_id['cc/claude-opus-4-7']['reasoning'] is True
+    assert by_id['cc/claude-opus-4-7']['context_window'] == 200000 and by_id['premium-coding']['context_window'] == 128000
+    assert by_id['cc/claude-opus-4-7']['tools'] is True and by_id['premium-coding']['tools'] is None
+    assert by_id['if/qwen3-coder-plus']['skills'][0] == 'coding' and by_id['if/qwen3-coder-plus']['reasoning'] is False
+    assert {s['model'] for s in found['skipped']} == {'web', 'xai/grok-imagine'}
 
 
 async def test_check_access_reports_unusable_models():
@@ -124,3 +145,4 @@ async def test_anthropic_discovery_profiles_claude_with_suggested_prices():
     assert by_id['claude-sonnet-5-5']['tier'] == 'standard' and by_id['claude-haiku-5-5']['tier'] == 'light' and by_id['claude-haiku-5-5']['input_price'] == 0.10
     assert by_id['claude-haiku-5-5']['reasoning'] is True and by_id['claude-haiku-4-5']['reasoning'] is False, 'effort only from 4.6 on'
     assert all(m['free'] is False for m in found['models']) and [s['model'] for s in found['skipped']] == ['claude-3-haiku']
+    assert all(m['tools'] is True for m in found['models'])

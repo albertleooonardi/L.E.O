@@ -2,7 +2,7 @@
 
 OpenRouter: only free models are offered (price 0 or a ``:free`` ID). Gemini: text chat models from the native
 catalog (image, speech, audio, live, embedding, robotics, and agent products are left out). Other
-OpenAI-compatible servers: whatever their ``/models`` lists. Profiles are suggestions from catalog data
+OpenAI-compatible servers: whatever their ``/models`` lists, using a router's ``capabilities`` (9Router) when present. Profiles are suggestions from catalog data
 (size, family, description, thinking support); the owner can edit them, and access can be checked with
 one tiny request per model before adding it.
 """
@@ -42,7 +42,7 @@ def claims(description):
     return " ".join(part for part in re.split(r"(?<=[.!?])\s+", description[:600]) if not NEGATED.search(part))
 
 
-def profile(model_id, description="", thinking=False, context=None, free=None, name=None):
+def profile(model_id, description="", thinking=False, context=None, free=None, name=None, tools=None):
     text = f"{model_id} {name or ''}"
     description = claims(description or "")
     size = size_billions(text, description[:400])
@@ -63,7 +63,7 @@ def profile(model_id, description="", thinking=False, context=None, free=None, n
     elif model_id.startswith("gemini-") and tier != "light":
         skills = ["frontend", "design", "general"]  # Gemini's strength, as in the Gemini preset.
     # Everything else is a generalist: it can take any task and loses ties to a specialist.
-    return {"model": model_id, "name": name or model_id, "tier": tier, "skills": skills, "reasoning": bool(thinking),
+    return {"model": model_id, "name": name or model_id, "tier": tier, "skills": skills, "reasoning": bool(thinking), "tools": tools,
             "context_window": max(1024, min(int(context or 32768), 2000000)), "free": free, "description": (description or "")[:240]}
 
 
@@ -103,7 +103,9 @@ async def discover(connection, key, transport=None):
             else:
                 reasoning = item.get("reasoning") or {}
                 thinks = bool(reasoning.get("mandatory") or reasoning.get("default_enabled", bool(reasoning)))
-                models.append(profile(model_id, item.get("description") or "", thinks, item.get("context_length"), True, item.get("name")))
+                supported = item.get("supported_parameters") or []
+                models.append(profile(model_id, item.get("description") or "", thinks, item.get("context_length"), True,
+                                      item.get("name"), "tools" in supported))
     elif kind == "gemini":
         native = connection["base_url"].removesuffix("/openai")
         data = await _get(native + "/models", {"x-goog-api-key": key} if key else {}, transport, {"pageSize": 1000})
@@ -116,7 +118,7 @@ async def discover(connection, key, transport=None):
                 skipped.append({"model": model_id, "reason": "alias of another model"})
             else:
                 models.append(profile(model_id, item.get("description") or "", item.get("thinking"), item.get("inputTokenLimit"),
-                                      connection.get("free"), item.get("displayName")))
+                                      connection.get("free"), item.get("displayName"), True))
     elif kind == "anthropic":
         data = await _get(connection["base_url"] + "/models", providers.headers(connection, key), transport, {"limit": 1000})
         for item in data.get("data", []):
@@ -132,15 +134,24 @@ async def discover(connection, key, transport=None):
             price = CLAUDE_PRICES.get(re.sub(r"-\d{8}$", "", model_id))  # Dated snapshots share their family's price.
             models.append({"model": model_id, "name": item.get("display_name") or model_id, "tier": tier, "skills": skills,
                            # Effort control exists from 4.6 on; earlier models reject it.
-                           "reasoning": number >= 4.6, "context_window": max(1024, min(int(item.get("max_input_tokens") or 200000), 2000000)),
+                           "reasoning": number >= 4.6, "tools": True,
+                           "context_window": max(1024, min(int(item.get("max_input_tokens") or 200000), 2000000)),
                            "free": False, "input_price": price[0] if price else None, "output_price": price[1] if price else None,
                            "description": "Suggested price from Anthropic's list; edit it if it changes." if price else "Set prices before paid use."})
     else:
         data = await _get(connection["base_url"] + "/models", providers.headers(connection, key), transport)
         for item in data.get("data", data.get("models", [])):
             model_id = str(item.get("id", item.get("name", ""))).removeprefix("models/") if isinstance(item, dict) else ""
-            if model_id and not NOT_CHAT.search(model_id):
-                models.append(profile(model_id, "", False, item.get("context_length"), connection.get("free")))
+            # Routers such as 9Router describe each model in a capabilities object and list search/fetch combos by kind.
+            caps = item.get("capabilities") if isinstance(item, dict) and isinstance(item.get("capabilities"), dict) else {}
+            if not model_id:
+                continue
+            if NOT_CHAT.search(model_id) or item.get("kind") or caps.get("imageOutput") or caps.get("audioOutput"):
+                skipped.append({"model": model_id, "reason": "not a text chat model"})
+            else:
+                tool_support = caps.get("tools") if "tools" in caps else caps.get("toolCalling")
+                models.append(profile(model_id, "", caps.get("reasoning"), item.get("context_length") or caps.get("contextWindow"),
+                                      connection.get("free"), tools=tool_support if isinstance(tool_support, bool) else None))
     return {"provider": kind, "models": sorted(models, key=lambda m: m["model"]), "skipped": skipped}
 
 

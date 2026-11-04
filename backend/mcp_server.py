@@ -15,9 +15,9 @@ import uuid
 
 import httpx
 
-VERSION = "0.2.0"
-TERMINAL = {"completed", "failed", "cancelled"}
-MODES = ["auto", "quick", "reviewed", "deep"]
+VERSION = "0.3.0"
+TERMINAL = {"completed", "failed", "cancelled", "waiting"}
+MODES = ["auto", "quick", "reviewed", "deep", "agent"]
 
 TOOLS = [
     {"name": "leo_ask",
@@ -25,9 +25,9 @@ TOOLS = [
                     "for each task, then returns the answer with the routing and token usage. Pass conversation_id to continue a chat.",
      "inputSchema": {"type": "object", "required": ["prompt"], "properties": {
          "prompt": {"type": "string", "description": "The request, as you would type it in the L.E.O. chat."},
-         "mode": {"type": "string", "enum": MODES, "description": "auto (default) lets L.E.O. choose; quick is one call; reviewed adds a review; deep plans and splits tasks."},
+         "mode": {"type": "string", "enum": MODES, "description": "auto (default) lets L.E.O. choose; agent works autonomously in a sandbox workspace with coding tools and sub-agents."},
          "conversation_id": {"type": "string", "description": "Continue an existing L.E.O. conversation."},
-         "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 3600, "description": "Stop waiting after this long (the run keeps going in L.E.O.)."}}}},
+         "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 7200, "description": "Stop waiting after this long (the run keeps going in L.E.O.)."}}}},
     {"name": "leo_route",
      "description": "Preview how L.E.O. would route a request (skill, difficulty, mode, ranked models) without calling any model or spending tokens.",
      "inputSchema": {"type": "object", "required": ["prompt"], "properties": {
@@ -82,7 +82,8 @@ def ask(client, args):
     if usage.get("review_passed") is False:
         footer.append("Review: unresolved findings; inspect the answer.")
     if run["status"] != "completed":
-        text = f"L.E.O. run {run['status']}: {run.get('error') or 'no detail'}"
+        detail = "approval required in the L.E.O. app" if run["status"] == "waiting" else run.get("error") or "no detail"
+        text = f"L.E.O. run {run['status']}: {detail}"
         if run.get("output"):
             text += "\n\nPartial answer:\n" + run["output"]
         return text + "\n\n---\n" + "\n".join(footer), True

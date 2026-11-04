@@ -14,14 +14,24 @@ services:
       retries: 10
     restart: unless-stopped
   api:
-    build: .
+    build:
+      context: .
+      target: app
     environment: &environment
       LEO_DATABASE_URL: postgresql+psycopg://leo:${LEO_DB_PASSWORD:-leo-local-development}@postgres:5432/leo
       LEO_API_TOKEN: ${LEO_API_TOKEN:-}
       LEO_ALLOWED_HOSTS: ${LEO_ALLOWED_HOSTS:-localhost,127.0.0.1}
       LEO_ALLOWED_ORIGINS: ${LEO_ALLOWED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+      LEO_ALLOW_REGISTRATION: ${LEO_ALLOW_REGISTRATION:-}
+      LEO_ENCRYPTION_KEY: ${LEO_ENCRYPTION_KEY:-}
+      LEO_9ROUTER_URL: http://9router:20128
+      LEO_9ROUTER_PASSWORD: ${LEO_9ROUTER_PASSWORD:-leo-local-development}
+      LEO_SANDBOX_URL: http://sandboxd:8100
+      LEO_SANDBOX_TOKEN: ${LEO_SANDBOX_TOKEN:-leo-local-development}
     ports:
       - "127.0.0.1:8000:8000"
+      # ChatGPT (Codex) sign-in redirect; OpenAI only accepts http://localhost:1455/auth/callback.
+      - "127.0.0.1:1455:1455"
     volumes:
       - leo-data:/app/.leo
     extra_hosts:
@@ -36,7 +46,9 @@ services:
       retries: 10
     restart: unless-stopped
   worker:
-    build: .
+    build:
+      context: .
+      target: app
     command: ["python", "-m", "backend.worker"]
     environment: *environment
     volumes:
@@ -59,6 +71,70 @@ services:
     ports:
       - "127.0.0.1:8888:8080"
     restart: unless-stopped
+  # Account sign-in backend (ChatGPT/Codex, Copilot, Gemini CLI, …). L.E.O. drives it from Settings → Add provider.
+  # No host port: only L.E.O.'s containers reach it. Pinned because L.E.O. uses its dashboard API.
+  9router:
+    image: decolua/9router:0.5.112
+    environment:
+      DATA_DIR: /app/data
+      INITIAL_PASSWORD: ${LEO_9ROUTER_PASSWORD:-leo-local-development}
+    volumes:
+      - 9router-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:20128/api/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  # Agent mode. sandboxd is the only service with the Docker socket: it starts one locked-down container per
+  # workspace (no capabilities, CPU/memory/process limits, non-root) on the internal `leo-sandbox` network,
+  # whose only way out is the egress proxy below. No host port: only the API and worker reach it.
+  sandboxd:
+    build:
+      context: .
+      target: sandboxd
+    environment:
+      LEO_SANDBOX_TOKEN: ${LEO_SANDBOX_TOKEN:-leo-local-development}
+      LEO_SANDBOX_IMAGE: leo-sandbox:latest
+      LEO_SANDBOX_NETWORK: leo-sandbox
+      LEO_SANDBOX_PROXY: http://egress:3128
+      LEO_SANDBOX_MEMORY: ${LEO_SANDBOX_MEMORY:-2g}
+      LEO_SANDBOX_CPUS: ${LEO_SANDBOX_CPUS:-2}
+      # Set to runsc after installing gVisor for stronger isolation between sandboxes and the host.
+      LEO_SANDBOX_RUNTIME: ${LEO_SANDBOX_RUNTIME:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      sandbox-image:
+        condition: service_completed_successfully
+      egress:
+        condition: service_started
+    restart: unless-stopped
+  # Sandboxes reach package registries (npm, PyPI, crates, Go, RubyGems, Maven) through this proxy and nothing else.
+  # Add hosts with LEO_EGRESS_ALLOW_EXTRA, e.g. "registry.example.com,.mycorp.dev".
+  egress:
+    build:
+      context: .
+      target: app
+    command: ["python", "-m", "backend.egress"]
+    environment:
+      LEO_EGRESS_ALLOW_EXTRA: ${LEO_EGRESS_ALLOW_EXTRA:-}
+    networks:
+      - default
+      - sandbox
+    restart: unless-stopped
+  # Builds the image agent workspaces run in, then exits.
+  sandbox-image:
+    build: deploy/sandbox
+    image: leo-sandbox:latest
+    command: ["true"]
+    network_mode: none
+    restart: "no"
+networks:
+  sandbox:
+    name: leo-sandbox
+    internal: true
 volumes:
   postgres-data:
   leo-data:
+  9router-data:

@@ -2,16 +2,18 @@ import { canvas, extractPage, streamingHtml } from './canvas';
 import { renderMarkdown } from './markdown';
 import { breakdowns, compact, levelMeter, levelOf, money, node, percent, seconds, successRate, tokens, type Report } from './usage-ui';
 
-type Mode = 'auto' | 'quick' | 'reviewed' | 'deep';
-type Provider = { id: string; name: string; protocol: string; base_url: string; model: string; local: boolean; free: boolean; enabled: boolean; has_key: boolean; priority: number; context_window: number; input_price: number | null; output_price: number | null; token_parameter: string; skills: string[]; tier: string; reasoning: boolean; calls?: number; avg_input_tokens?: number | null; avg_output_tokens?: number | null };
+type Mode = 'auto' | 'quick' | 'reviewed' | 'deep' | 'agent';
+type Provider = { id: string; name: string; protocol: string; base_url: string; model: string; local: boolean; free: boolean; enabled: boolean; has_key: boolean; priority: number; context_window: number; input_price: number | null; output_price: number | null; token_parameter: string; skills: string[]; tier: string; reasoning: boolean; tools?: boolean | null; calls?: number; avg_input_tokens?: number | null; avg_output_tokens?: number | null };
 type Skill = { id: string; name: string; description: string; keywords: string[]; instructions: string; enabled: boolean };
 type Preset = { id: string; name: string; protocol: string; base_url: string; local?: boolean; free?: boolean; hint: string; skills?: string[]; tier?: string; reasoning?: boolean };
-type Preferences = { generator_id: string | null; planner_id: string | null; reviewer_id: string | null; mode: Mode; routing: string; allow_paid: boolean; max_cost: number; max_calls: number; max_repairs: number; max_output_tokens: number; context_tokens: number; token_budget: number; timeout_seconds: number; max_run_seconds: number; system_prompt: string; smart_routing?: boolean; web_search?: string; search_url?: string; search_pages?: number; page_photos?: boolean };
+type Preferences = { generator_id: string | null; planner_id: string | null; reviewer_id: string | null; mode: Mode; routing: string; allow_paid: boolean; max_cost: number; max_calls: number; max_repairs: number; max_output_tokens: number; context_tokens: number; token_budget: number; timeout_seconds: number; max_run_seconds: number; system_prompt: string; smart_routing?: boolean; web_search?: string; search_url?: string; search_pages?: number; page_photos?: boolean;
+  agent_max_steps: number; agent_max_calls: number; agent_token_budget: number; agent_max_cost: number; agent_max_run_seconds: number; agent_parallel: number; agent_command_timeout: number };
 type Usage = { route?: RouteInfo; calls?: number; input_tokens?: number; output_tokens?: number; estimated_cost?: number; estimated?: boolean; uncertain_calls?: number; context_messages_omitted?: number; review_passed?: boolean | null };
 type Run = { id: string; conversation_id: string; status: string; phase: string; output: string; error?: string; usage: Usage; mode: Mode; created_at?: number };
-type Conversation = { id: string; title: string; updated_at: number; active_run: string | null };
+type Conversation = { id: string; title: string; updated_at: number; active_run: string | null; workspace?: boolean };
+type Workspace = { id: string; name: string; source: string; repo_url: string | null; branch: string | null; has_token: boolean; status?: string; error?: string };
 type Message = { role: 'user' | 'assistant'; content: string; run_id?: string };
-type FullConversation = Conversation & { messages: Message[]; runs: Run[] };
+type FullConversation = Conversation & { messages: Message[]; runs: Run[]; workspace: Workspace | null };
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T { return document.getElementById(id) as T; }
 const field = (id: string) => el<HTMLInputElement>(id);
@@ -33,6 +35,7 @@ let ready = false;
 let toastTimer: ReturnType<typeof setTimeout>;
 let navigation = 0;
 let currentUser: { id: string; username: string } | null = null;
+let activeAgent = false;
 
 function toast(text: string) {
   el('toast').textContent = text; el('toast').hidden = false;
@@ -51,18 +54,22 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 const send = <T>(path: string, method: string, body?: unknown) => api<T>(path, { method, credentials: 'include', ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 function rememberChat() { try { activeId ? localStorage.setItem('leo-active-chat', activeId) : localStorage.removeItem('leo-active-chat'); } catch {} }
-function closeStream() { stream?.close(); stream = null; activeRun = null; draft = ''; clearInterval(liveClock); updateSend(); }
+function closeStream() { stream?.close(); stream = null; activeRun = null; activeAgent = false; draft = ''; clearInterval(liveClock); updateSend(); }
+function steering() { return Boolean(activeRun && activeAgent && prompt.value.trim()); }
 function updateSend() {
-  const busy = Boolean(activeRun);
+  const busy = Boolean(activeRun) && !steering();
   const button = el<HTMLButtonElement>('send-button');
   button.disabled = submitting || (!busy && (!ready || !prompt.value.trim()));
-  button.setAttribute('aria-label', busy ? 'Stop response' : 'Send message');
-  button.title = busy ? 'Stop response' : 'Send message';
+  const label = busy ? 'Stop response' : steering() ? 'Send to the agent while it works' : 'Send message';
+  button.setAttribute('aria-label', label); button.title = label;
   button.querySelector<SVGElement>('svg')!.style.display = busy ? 'none' : '';
   button.querySelector<HTMLElement>('.stop-square')!.hidden = !busy;
-  el('stop-run').hidden = !busy;
+  el('stop-run').hidden = !activeRun;
 }
 function resizePrompt() { prompt.style.height = 'auto'; prompt.style.height = `${Math.min(prompt.scrollHeight, 220)}px`; updateSend(); }
+// The floating header lifts off the page once the conversation scrolls under it.
+const syncScrolled = () => document.body.classList.toggle('scrolled', window.scrollY > 4);
+window.addEventListener('scroll', syncScrolled, { passive: true }); syncScrolled();
 function scrollToLatest() { if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 350) requestAnimationFrame(() => window.scrollTo({ top: document.body.scrollHeight })); }
 
 // Render generated text as DOM nodes only. Model output never becomes HTML.
@@ -105,6 +112,7 @@ function renderConversation() {
   el('conversation-title').textContent = current?.title || '';
   document.title = current ? `${current.title} — L.E.O` : 'L.E.O';
   el('run-panel').hidden = true; el('run-events').replaceChildren();
+  syncWorkspace();
   const last = current?.runs.at(-1);
   if (last && !current?.active_run) showRun(last);
   renderHistory(); updateSend(); void refreshUsage();
@@ -150,6 +158,7 @@ async function refreshUsage() {
 document.addEventListener('leo:canvas-open', () => { if (!el('usage-panel').hidden) setUsagePanel(false, false); });
 function setUsagePanel(open: boolean, remember = true) {
   if (open && canvas.open) canvas.close();
+  if (open && !el('workspace-panel').hidden) setWorkspacePanel(false);
   el('usage-panel').hidden = !open; document.body.classList.toggle('usage-open', open);
   el('toggle-usage').setAttribute('aria-expanded', String(open)); el('context-meter').setAttribute('aria-expanded', String(open));
   if (remember) try { localStorage.setItem('leo-usage-panel', open ? 'open' : 'closed'); } catch {}
@@ -245,11 +254,12 @@ const STAGES: Record<Mode, [string, string][]> = {
   quick: [['generate', 'Generate'], ['check', 'Check']],
   reviewed: [['generate', 'Generate'], ['check', 'Check'], ['review', 'Review'], ['repair', 'Repair']],
   deep: [['plan', 'Plan'], ['tasks', 'Tasks'], ['generate', 'Generate'], ['check', 'Check'], ['review', 'Review'], ['repair', 'Repair']],
+  agent: [['sandbox', 'Sandbox'], ['work', 'Work'], ['finish', 'Finish']],
 };
-const ACTIVITY: Record<string, string> = { research: 'Searching the web', plan: 'Planning the steps', tasks: 'Working on the subtasks', generate: 'Writing the answer', review: 'Reviewing the answer', repair: 'Fixing review findings' };
+const ACTIVITY: Record<string, string> = { sandbox: 'Starting the sandbox', work: 'Working', research: 'Searching the web', plan: 'Planning the steps', tasks: 'Working on the subtasks', generate: 'Writing the answer', review: 'Reviewing the answer', repair: 'Fixing review findings' };
 let liveClock: ReturnType<typeof setInterval> | undefined;
 function stageOf(phase: string) {
-  return phase.startsWith('research_') ? 'research' : phase === 'planning' ? 'plan' : phase.startsWith('task_') ? 'tasks' : phase === 'generating' ? 'generate'
+  return phase === 'sandbox' ? 'sandbox' : phase.startsWith('agent:') ? 'work' : phase.startsWith('research_') ? 'research' : phase === 'planning' ? 'plan' : phase.startsWith('task_') ? 'tasks' : phase === 'generating' ? 'generate'
     : phase.startsWith('reviewing') ? 'review' : phase.startsWith('repairing') ? 'repair' : null;
 }
 function stageTrack(stages: [string, string][]) {
@@ -301,7 +311,9 @@ function watchRun(id: string) {
   el('messages').append(messageNode({ role: 'assistant', content: '' }, true));
   const run = current?.runs.find(r => r.id === id);
   const mode = (run?.mode || select('composer-mode').value) as Mode;
+  activeAgent = mode === 'agent';
   el('pending-response').insertBefore(liveNode(mode, run?.created_at ?? Date.now() / 1000), el('pending-content'));
+  if (activeAgent) el('run-live').append(node('ul', '', 'agent-todos'), node('ol', '', 'agent-feed'));
   renderDraft();
   void refreshUsage();
   stream = new EventSource(`/api/runs/${id}/events`);
@@ -363,8 +375,10 @@ function watchRun(id: string) {
     setStage('review', data.passed ? 'done' : 'issues', data.passed ? 'Passed' : (data.issues || []).join('; '));
     if (data.passed) { setStage('repair', 'skipped', 'Not needed'); setActivity('Review passed, finishing up'); }
   });
+  listenAgent(listen, id);
   listen('done', async data => {
-    source.close(); activeRun = null; stream = null; updateSend(); clearInterval(liveClock);
+    source.close(); activeRun = null; activeAgent = false; stream = null; updateSend(); clearInterval(liveClock);
+    if (!el('workspace-panel').hidden) void loadFiles();
     const page = data.status === 'completed' ? extractPage(data.output || '') : null;
     if (page) canvas.finish(page);
     logActivity(data.error || `Run ${data.status}`);
@@ -384,6 +398,141 @@ function watchRun(id: string) {
     } catch { /* EventSource resumes from its last event ID automatically. */ }
   };
 }
+// Agent runs: a timeline of steps and tool calls, the todo list, sub-agents, and approval requests.
+function agentName(agent: string) { return agent === 'main' ? 'Lead' : `Sub-agent ${agent.slice(4)}`; }
+function feed(kind: string, text: string, id = '') {
+  const list = document.querySelector('#run-live .agent-feed'); if (!list) { logActivity(text); return null; }
+  const item = node('li', '', `feed-${kind}`); if (id) item.dataset.call = id;
+  item.append(node('span', text, 'feed-text'));
+  list.append(item); while (list.children.length > 200) list.firstChild?.remove();
+  scrollToLatest(); return item;
+}
+function renderTodos(items: { content: string; status: string }[]) {
+  const list = document.querySelector('#run-live .agent-todos'); if (!list) return;
+  list.replaceChildren(...items.map(t => { const item = node('li', t.content); item.dataset.status = t.status; return item; }));
+}
+let filesTimer: ReturnType<typeof setTimeout> | undefined;
+function listenAgent(listen: (kind: string, handler: (data: any) => void) => void, runId: string) {
+  listen('agent_step', data => {
+    setStage('work', 'active');
+    setActivity(`${agentName(data.agent)} · step ${data.step}${data.model ? ` with ${data.model}` : ''}`);
+    if (data.text && data.agent === 'main') feed('think', data.text);
+    for (const call of data.tools || []) feed(data.agent === 'main' ? 'call' : 'subcall', `${data.agent === 'main' ? '' : agentName(data.agent) + ' · '}${call.name} ${call.summary}`, call.id);
+  });
+  listen('agent_tool', data => {
+    const item = document.querySelector<HTMLElement>(`#run-live .agent-feed li[data-call="${CSS.escape(data.id)}"]`);
+    if (item) {
+      item.dataset.ok = String(data.ok);
+      const detail = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = data.ok ? 'Output' : 'Error';
+      detail.append(summary, node('pre', data.output)); item.append(detail);
+    }
+    if (['write_file', 'edit_file', 'bash'].includes(data.name) && !el('workspace-panel').hidden) { clearTimeout(filesTimer); filesTimer = setTimeout(() => void loadFiles(), 1200); }
+  });
+  listen('todos', data => renderTodos(data.items || []));
+  listen('subagent', data => feed('sub', data.status === 'started' ? `${agentName(data.agent)} (${data.skill}) started: ${data.task}` : `${agentName(data.agent)} finished: ${data.report}`));
+  listen('compacted', data => feed('note', `${agentName(data.agent)}: older steps summarized to free up context`));
+  listen('steer', data => { if (!document.querySelector('#run-live .feed-you:last-child')) feed('you', data.message); });
+  listen('approval', data => {
+    setActivity('Waiting for your approval'); el('status-dot').dataset.status = 'waiting';
+    const card = node('div', '', 'approval-card'); card.id = `approval-${data.id}`;
+    card.append(node('strong', data.kind === 'git_push' ? 'Push to the repository?' : data.kind === 'budget' ? 'Allow more budget?' : 'Keep going?'), node('p', data.message));
+    if (data.detail?.message) card.append(node('small', `Commit message: ${data.detail.message}`));
+    const actions = node('div', '', 'form-actions start');
+    for (const [label, approved, style] of [['Approve', true, 'primary-button'], ['Decline', false, 'secondary-button']] as const) {
+      const button = document.createElement('button'); button.type = 'button'; button.className = style; button.textContent = label;
+      button.addEventListener('click', async () => {
+        actions.querySelectorAll('button').forEach(b => (b as HTMLButtonElement).disabled = true);
+        try { await send(`/runs/${runId}/approve`, 'POST', { approval_id: data.id, approved }); }
+        catch (e) { toast(errorText(e)); actions.querySelectorAll('button').forEach(b => (b as HTMLButtonElement).disabled = false); }
+      });
+      actions.append(button);
+    }
+    card.append(actions); el('run-live').append(card); scrollToLatest();
+  });
+  listen('approval_resolved', data => {
+    document.getElementById(`approval-${data.id}`)?.remove();
+    feed('note', data.approved ? 'Approved; the agent continues' : 'Declined; the agent was told');
+    setActivity(data.approved ? 'Continuing' : 'Continuing without it');
+  });
+}
+// The Files panel: browse, upload to, and download the chat's sandbox workspace.
+function syncWorkspace() {
+  const workspace = current?.workspace;
+  el('toggle-workspace').hidden = !workspace;
+  if (workspace) select('composer-mode').value = 'agent';
+  if (!workspace) setWorkspacePanel(false, false);
+  else if (!el('workspace-panel').hidden) void loadFiles();
+}
+function setWorkspacePanel(open: boolean, load = true) {
+  if (open) { if (canvas.open) canvas.close(); setUsagePanel(false, false); }
+  el('workspace-panel').hidden = !open; document.body.classList.toggle('usage-open', open || !el('usage-panel').hidden);
+  el('toggle-workspace').setAttribute('aria-expanded', String(open));
+  if (open && load) void loadFiles();
+}
+async function loadFiles() {
+  const workspace = current?.workspace; if (!workspace) return;
+  el('workspace-meta').textContent = workspace.repo_url ? `${workspace.repo_url.replace(/^https:\/\//, '')} · ${workspace.branch || 'default branch'}` : 'Sandbox workspace';
+  el<HTMLAnchorElement>('workspace-download').href = `/api/workspaces/${workspace.id}/download`;
+  try {
+    const result = await api<{ entries: { path: string; type: string; size: number }[] }>(`/workspaces/${workspace.id}/files?depth=4`);
+    if (current?.workspace?.id !== workspace.id) return;
+    const items = result.entries.map(entry => {
+      const item = document.createElement('li'); item.dataset.type = entry.type;
+      item.style.setProperty('--depth', String(entry.path.split('/').length - 1));
+      const button = document.createElement('button'); button.type = 'button'; button.textContent = entry.path.split('/').pop()!; button.title = entry.path;
+      if (entry.type === 'file') button.addEventListener('click', () => void openFile(workspace.id, entry.path)); else button.disabled = true;
+      item.append(button); return item;
+    });
+    el('workspace-files').replaceChildren(...(items.length ? items : [node('li', 'No files yet. Ask the agent to build something, or upload a .zip.', 'empty')]));
+  } catch (e) { el('workspace-files').replaceChildren(node('li', errorText(e), 'empty')); }
+}
+async function openFile(workspaceId: string, path: string) {
+  try {
+    const file = await api<{ path: string; content: string; binary: boolean; size: number }>(`/workspaces/${workspaceId}/file?path=${encodeURIComponent(path)}`);
+    el('workspace-file-name').textContent = path;
+    el('workspace-file-content').textContent = file.binary ? `Binary file, ${file.size.toLocaleString()} bytes.` : file.content;
+    el('workspace-viewer').hidden = false; el('workspace-files').hidden = true;
+  } catch (e) { toast(errorText(e)); }
+}
+el('workspace-file-close').addEventListener('click', () => { el('workspace-viewer').hidden = true; el('workspace-files').hidden = false; });
+el('toggle-workspace').addEventListener('click', () => setWorkspacePanel(el('workspace-panel').hidden));
+el('close-workspace').addEventListener('click', () => setWorkspacePanel(false));
+el('workspace-refresh').addEventListener('click', () => void loadFiles());
+field('workspace-upload').addEventListener('change', async () => {
+  const file = field('workspace-upload').files?.[0]; const workspace = current?.workspace;
+  if (!file || !workspace) return;
+  try {
+    const response = await fetch(`/api/workspaces/${workspace.id}/upload`, { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/zip' }, body: file });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || `Upload failed (${response.status})`);
+    toast(`${file.name} unpacked into the workspace`); await loadFiles();
+  } catch (e) { toast(errorText(e)); }
+  field('workspace-upload').value = '';
+});
+function openWorkspaceDialog() {
+  el<HTMLFormElement>('workspace-form').reset(); el('workspace-git').hidden = true; el('workspace-feedback').textContent = '';
+  closeSidebar(); dialog('workspace-dialog').showModal(); field('workspace-name').focus();
+}
+el('new-workspace').addEventListener('click', openWorkspaceDialog);
+document.querySelectorAll<HTMLInputElement>('input[name=workspace-source]').forEach(input => input.addEventListener('change', () => {
+  el('workspace-git').hidden = input.value !== 'git' || !input.checked;
+  field('workspace-repo').required = !el('workspace-git').hidden;
+}));
+el('workspace-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const source = document.querySelector<HTMLInputElement>('input[name=workspace-source]:checked')?.value || 'empty';
+  const body = source === 'git'
+    ? { name: field('workspace-name').value.trim(), source, repo_url: field('workspace-repo').value.trim(), branch: field('workspace-branch').value.trim() || null, token: field('workspace-token').value || null }
+    : { name: field('workspace-name').value.trim(), source };
+  el('workspace-feedback').textContent = source === 'git' ? 'Starting the sandbox and cloning…' : 'Starting the sandbox…';
+  el<HTMLButtonElement>('workspace-create').disabled = true;
+  try {
+    const workspace = await send<Workspace>('/workspaces', 'POST', body);
+    field('workspace-token').value = ''; dialog('workspace-dialog').close();
+    await refreshHistory(); await openChat(workspace.id); setWorkspacePanel(true); prompt.focus();
+  } catch (e) { el('workspace-feedback').textContent = errorText(e); }
+  finally { el<HTMLButtonElement>('workspace-create').disabled = false; }
+});
 async function stopRun() {
   if (!activeRun) return;
   try { await send(`/runs/${activeRun}/cancel`, 'POST'); el('run-status').textContent = 'Stopping…'; }
@@ -391,7 +540,14 @@ async function stopRun() {
 }
 el('stop-run').addEventListener('click', stopRun);
 el('chat-form').addEventListener('submit', async event => {
-  event.preventDefault(); if (activeRun) { await stopRun(); return; }
+  event.preventDefault();
+  if (activeRun && steering()) {
+    const message = prompt.value.trim();
+    try { await send(`/runs/${activeRun}/steer`, 'POST', { message }); prompt.value = ''; resizePrompt(); feed('you', message); }
+    catch (e) { toast(errorText(e)); }
+    return;
+  }
+  if (activeRun) { await stopRun(); return; }
   const text = prompt.value.trim(); if (!text || submitting || !ready) return;
   submitting = true; updateSend();
   try {
@@ -403,7 +559,7 @@ el('chat-form').addEventListener('submit', async event => {
   finally { submitting = false; updateSend(); }
 });
 prompt.addEventListener('input', resizePrompt);
-prompt.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!activeRun) el<HTMLFormElement>('chat-form').requestSubmit(); } });
+prompt.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!activeRun || steering()) el<HTMLFormElement>('chat-form').requestSubmit(); } });
 
 function refreshConnectionStatus() {
   const enabled = connections.filter(p => p.enabled);
@@ -416,7 +572,7 @@ function roleOptions(value: string | null) {
   return [new Option('Auto · follow fallback order', ''), ...connections.map(p => new Option(`${p.name} · ${p.model}${p.enabled ? '' : ' (disabled)'}`, p.id, false, p.id === value))];
 }
 // Fields the connection API accepts; used to flip one setting without resending the key.
-const CONNECTION_FIELDS = ['name', 'protocol', 'base_url', 'model', 'local', 'free', 'enabled', 'priority', 'context_window', 'input_price', 'output_price', 'token_parameter', 'skills', 'tier', 'reasoning'] as const;
+const CONNECTION_FIELDS = ['name', 'protocol', 'base_url', 'model', 'local', 'free', 'enabled', 'priority', 'context_window', 'input_price', 'output_price', 'token_parameter', 'skills', 'tier', 'reasoning', 'tools'] as const;
 const openGroups = new Set<string>();
 function groupLabel(list: Provider[]) {
   const preset = presets.find(x => x.base_url === list[0].base_url && x.id !== 'custom');
@@ -445,7 +601,7 @@ function modelRow(p: Provider) {
   const name = document.createElement('strong'); name.textContent = modelLabel(p);
   const strength = p.tier[0].toUpperCase() + p.tier.slice(1);
   const profile = document.createElement('small');
-  profile.textContent = `${strength}${p.skills.length ? `, ${skillNames(p.skills).toLowerCase()}` : ', any task'}${p.free ? '' : ', paid'}`;
+  profile.textContent = `${strength}${p.skills.length ? `, ${skillNames(p.skills).toLowerCase()}` : ', any task'}${p.free ? '' : ', paid'}${p.tools === true ? ', calls tools' : p.tools === false ? ', no tool calling' : ''}`;
   detail.append(name, profile);
   if (!p.has_key && !p.local) {
     // Cloud models almost always need a key; make a missing one impossible to miss.
@@ -507,7 +663,8 @@ function routingChoice() { return routingInputs().find(i => i.checked)?.value ||
 // The cost limit only matters when paid models are allowed.
 function syncPaidLimit() { el('paid-limit').classList.toggle('open', field('allow-paid').checked); }
 field('allow-paid').addEventListener('change', syncPaidLimit);
-const numericFields = ['max_cost', 'max_calls', 'max_repairs', 'max_output_tokens', 'context_tokens', 'token_budget', 'timeout_seconds', 'max_run_seconds'] as const;
+const numericFields = ['max_cost', 'max_calls', 'max_repairs', 'max_output_tokens', 'context_tokens', 'token_budget', 'timeout_seconds', 'max_run_seconds',
+  'agent_max_steps', 'agent_max_calls', 'agent_token_budget', 'agent_max_cost', 'agent_max_run_seconds', 'agent_parallel', 'agent_command_timeout'] as const;
 async function loadSettings() {
   [connections, preferences, presets, skills] = await Promise.all([api<Provider[]>('/connections'), api<Preferences>('/settings'), api<Preset[]>('/presets'), api<Skill[]>('/skills')]);
   await loadUser();
@@ -519,6 +676,7 @@ async function loadSettings() {
   select('web-search').value = preferences.web_search || 'auto'; field('search-url').value = preferences.search_url || ''; field('search-pages').value = String(preferences.search_pages ?? 3);
   field('allow-paid').checked = preferences.allow_paid; syncPaidLimit(); el<HTMLTextAreaElement>('system-prompt').value = preferences.system_prompt;
   for (const key of numericFields) field(key.replaceAll('_', '-')).value = String(preferences[key]);
+  void loadAccounts();
 }
 
 async function loadUser() {
@@ -527,7 +685,7 @@ async function loadUser() {
     currentUser = user;
     const badge = el('user-badge');
     const name = el('user-badge-name');
-    if (badge && name) { badge.hidden = false; name.textContent = user.username; }
+    if (badge && name) { badge.hidden = false; name.textContent = user.username; el('user-badge-initial').textContent = user.username.slice(0, 1).toUpperCase(); }
   } catch {
     currentUser = null;
     const badge = el('user-badge');
@@ -663,6 +821,7 @@ function editProvider(provider?: Provider, anchor?: Element) {
     select('provider-protocol').value = provider.protocol; select('provider-token-param').value = provider.token_parameter;
     for (const key of ['local', 'free', 'enabled', 'reasoning'] as const) field(`provider-${key}`).checked = Boolean(provider[key]);
     select('provider-tier').value = provider.tier || 'standard'; renderSkillPicker(provider.skills || []); renderKeySources();
+    select('provider-tools').value = provider.tools == null ? '' : String(provider.tools);
     el('provider-hint').textContent = presets.find(p => p.id === select('provider-preset').value)?.hint || '';
   }
   syncAdvanced();
@@ -690,7 +849,86 @@ el('remove-provider').addEventListener('click', async () => {
   try { await send(`/connections/${id}`, 'DELETE'); el('provider-form').hidden = true; await loadSettings(); toast('Model removed'); } catch (e) { el('provider-feedback').textContent = errorText(e); }
 });
 select('provider-preset').addEventListener('change', () => { applyPreset(); syncAdvanced(); });
-el('add-connection').addEventListener('click', () => editProvider());
+// Account sign-in through 9Router: one click per provider; the API-key form stays one step away.
+type AccountProvider = { id: string; name: string; flow: 'device' | 'redirect'; risk: string | null };
+type Account = { id: string; provider: string; name: string; label: string };
+type SignIn = { id: string; provider: string; status: 'waiting' | 'finishing' | 'done' | 'error'; error: string | null; url: string; user_code: string | null; result: { account: string; added: number } | null };
+let accountInfo: { available: boolean; error: string | null; providers: AccountProvider[]; accounts: Account[] } | null = null;
+let signIn: SignIn | null = null;
+let signInTimer: ReturnType<typeof setTimeout> | undefined;
+async function loadAccounts() {
+  try { accountInfo = await api('/accounts'); } catch { accountInfo = null; }
+  renderAccounts();
+}
+function renderAccounts() {
+  const accounts = accountInfo?.accounts || [];
+  el('account-list').hidden = !accounts.length;
+  el('account-list').replaceChildren(Object.assign(document.createElement('h3'), { textContent: 'Signed-in accounts' }), ...accounts.map(a => {
+    const row = document.createElement('div'); row.className = 'account-row';
+    const text = document.createElement('div');
+    text.append(Object.assign(document.createElement('strong'), { textContent: a.name }), Object.assign(document.createElement('small'), { textContent: a.label || 'Signed in' }));
+    const remove = Object.assign(document.createElement('button'), { type: 'button', className: 'text-button danger', textContent: 'Disconnect' });
+    remove.addEventListener('click', () => void disconnectAccount(a));
+    row.append(text, remove); return row;
+  }));
+  el('account-options').replaceChildren(...(accountInfo?.providers || []).map(p => {
+    const button = Object.assign(document.createElement('button'), { type: 'button', className: 'account-option', disabled: !accountInfo?.available || Boolean(signIn) });
+    button.append(Object.assign(document.createElement('strong'), { textContent: p.name }), Object.assign(document.createElement('small'), { textContent: p.flow === 'device' ? 'Sign in with a code' : 'Sign in in the browser' }));
+    button.addEventListener('click', () => void startSignIn(p));
+    return button;
+  }));
+  if (accountInfo && !accountInfo.available && !signIn) el('account-feedback').textContent = accountInfo.error || 'Account sign-in is unavailable';
+}
+function showChooser() {
+  el('provider-form').hidden = true; el('account-chooser').hidden = false; el('account-feedback').textContent = '';
+  el('account-chooser').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  void loadAccounts();
+}
+function stopSignIn() {
+  clearTimeout(signInTimer);
+  if (signIn?.status === 'waiting') void send(`/accounts/signin/${signIn.id}`, 'DELETE').catch(() => {});
+  signIn = null; el('account-flow').hidden = true; renderAccounts();
+}
+async function startSignIn(p: AccountProvider) {
+  if (p.risk && !window.confirm(`${p.name}\n\n${p.risk}`)) return;
+  el('account-feedback').textContent = `Starting ${p.name} sign-in…`;
+  try { signIn = await send<SignIn>('/accounts/signin', 'POST', { provider: p.id, accept_risk: Boolean(p.risk) }); }
+  catch (e) { el('account-feedback').textContent = errorText(e); return; }
+  el('account-feedback').textContent = '';
+  el('account-code').hidden = !signIn.user_code; el('account-code').textContent = signIn.user_code || '';
+  el('account-flow-text').textContent = signIn.user_code
+    ? `Copy this code, open the ${p.name} sign-in page, and enter it there. L.E.O. notices when you're done.`
+    : `Open the ${p.name} sign-in page and sign in. L.E.O. notices when you're done.`;
+  el<HTMLAnchorElement>('account-open').href = signIn.url; el('account-flow').hidden = false;
+  renderAccounts(); signInTimer = setTimeout(() => void pollSignIn(p), 5000);
+}
+async function pollSignIn(p: AccountProvider) {
+  if (!signIn) return;
+  try { signIn = await api<SignIn>(`/accounts/signin/${signIn.id}`); }
+  catch (e) { el('account-feedback').textContent = errorText(e); stopSignIn(); return; }
+  if (signIn.status === 'done' || signIn.status === 'error') {
+    const finished = signIn; signIn = null; el('account-flow').hidden = true;
+    if (finished.status === 'done') {
+      const added = finished.result?.added || 0;
+      el('account-chooser').hidden = true;
+      toast(`${p.name} connected${finished.result?.account ? ` as ${finished.result.account}` : ''}: ${added ? `${added} model${added === 1 ? '' : 's'} added` : 'no new models'}`);
+    } else el('account-feedback').textContent = finished.error || 'Sign-in failed';
+    await loadSettings(); return;
+  }
+  signInTimer = setTimeout(() => void pollSignIn(p), 5000);
+}
+async function disconnectAccount(a: Account) {
+  if (!window.confirm(`Disconnect ${a.name}${a.label ? ` (${a.label})` : ''}? Its models are removed from L.E.O.`)) return;
+  try {
+    const result = await send<{ removed_models: number }>(`/accounts/${a.id}`, 'DELETE');
+    toast(`${a.name} disconnected${result.removed_models ? `, ${result.removed_models} models removed` : ''}`);
+  } catch (e) { toast(errorText(e)); }
+  await loadSettings();
+}
+el('account-close').addEventListener('click', () => { stopSignIn(); el('account-chooser').hidden = true; });
+el('account-cancel').addEventListener('click', stopSignIn);
+el('use-api-key').addEventListener('click', () => { stopSignIn(); el('account-chooser').hidden = true; editProvider(); });
+el('add-connection').addEventListener('click', showChooser);
 el('cancel-provider').addEventListener('click', () => { field('provider-key').value = ''; el('provider-form').hidden = true; });
 el('provider-form').addEventListener('submit', async event => {
   event.preventDefault();
@@ -703,6 +941,7 @@ el('provider-form').addEventListener('submit', async event => {
     local: field('provider-local').checked, free: field('provider-free').checked, enabled: field('provider-enabled').checked,
     priority: Number(field('provider-priority').value), context_window: Number(field('provider-context').value), input_price: price('provider-input-price'), output_price: price('provider-output-price'), token_parameter: select('provider-token-param').value,
     tier: select('provider-tier').value, reasoning: field('provider-reasoning').checked,
+    tools: select('provider-tools').value === '' ? null : select('provider-tools').value === 'true',
     skills: [...el('provider-skills').querySelectorAll<HTMLInputElement>('input:checked')].map(box => box.value),
   };
   try {

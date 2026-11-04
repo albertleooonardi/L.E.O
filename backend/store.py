@@ -6,11 +6,10 @@ import tempfile
 import uuid
 from urllib.parse import urlsplit
 
-import bcrypt
 from cryptography.fernet import Fernet
 from sqlalchemy import (JSON, Boolean, Column, Float, Integer, MetaData, String, Table, Text,
-                        and_, create_engine, delete, event, func, insert, inspect, or_, select, update)
-from sqlalchemy.exc import IntegrityError
+                        and_, create_engine, delete, event, func, insert, inspect, or_, select, text, update)
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 
 from .config import Config
 from .router import STARTER_SKILLS
@@ -19,18 +18,18 @@ from .schemas import Preferences
 
 metadata = MetaData()
 connections = Table("connections", metadata,
-    Column("id", String(36), primary_key=True), Column("user_id", String(36)), Column("config", JSON, nullable=False),
+    Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True), Column("config", JSON, nullable=False),
     Column("secret", Text), Column("cooldown_until", Float, default=0, nullable=False))
 settings = Table("settings", metadata, Column("id", Integer, primary_key=True), Column("config", JSON, nullable=False))
 conversations = Table("conversations", metadata,
-    Column("id", String(36), primary_key=True), Column("user_id", String(36)), Column("title", Text, nullable=False),
+    Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True), Column("title", Text, nullable=False),
     Column("updated_at", Float, nullable=False), Column("active_run", String(36)))
 messages = Table("messages", metadata,
     Column("id", String(36), primary_key=True), Column("conversation_id", String(36), index=True, nullable=False),
     Column("role", String(20), nullable=False), Column("content", Text, nullable=False),
     Column("created_at", Float, nullable=False), Column("run_id", String(36)))
 runs = Table("runs", metadata,
-    Column("id", String(36), primary_key=True), Column("user_id", String(36)), Column("request_id", String(100), unique=True, nullable=False),
+    Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True), Column("request_id", String(100), unique=True, nullable=False),
     Column("conversation_id", String(36), index=True, nullable=False),
     Column("status", String(20), nullable=False), Column("phase", String(40), nullable=False),
     Column("mode", String(20), nullable=False), Column("prompt", Text, nullable=False),
@@ -55,9 +54,14 @@ skills = Table("skills", metadata,
 users = Table("users", metadata,
     Column("id", String(36), primary_key=True), Column("username", String(80), unique=True, nullable=False),
     Column("password_hash", String(255), nullable=False), Column("created_at", Float, nullable=False))
+# Agent-mode sandbox workspaces, one per conversation (same id). The git token is encrypted like API keys.
+workspaces = Table("workspaces", metadata,
+    Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True),
+    Column("config", JSON, nullable=False), Column("secret", Text), Column("created_at", Float, nullable=False))
 user_sessions = Table("user_sessions", metadata,
-    Column("id", String(36), primary_key=True), Column("user_id", String(36), nullable=False),
-    Column("token_hash", String(255), nullable=False), Column("expires_at", Float, nullable=False),
+    Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True, nullable=False),
+    # SHA-256 hex digest of the session token (see auth.token_digest).
+    Column("token_hash", String(255), unique=True, index=True, nullable=False), Column("expires_at", Float, nullable=False),
     Column("created_at", Float, nullable=False))
 
 TERMINAL = {"completed", "failed", "cancelled"}
@@ -119,20 +123,39 @@ class Store:
                 pass
 
     def _add_user_id_columns(self):
-        """Add user_id to connections, conversations, runs on existing databases."""
-        from sqlalchemy import text
-        inspector = inspect(self.engine)
-        for table, column in (("connections", "user_id"), ("conversations", "user_id"), ("runs", "user_id")):
-            cols = {c["name"] for c in inspector.get_columns(table)}
-            if column not in cols:
+        """Add user_id (and the session/ownership indexes) to databases created before accounts existed."""
+        for table in ("connections", "conversations", "runs"):
+            self._migrate(lambda: "user_id" in {c["name"] for c in inspect(self.engine).get_columns(table)},
+                          f"ALTER TABLE {table} ADD COLUMN user_id VARCHAR(36)")
+            self._migrate(None, f"CREATE INDEX IF NOT EXISTS ix_{table}_user_id ON {table} (user_id)")
+        with self.engine.begin() as db:
+            # Sessions issued before tokens were stored as SHA-256 digests can never match again.
+            db.execute(delete(user_sessions).where(func.length(user_sessions.c.token_hash) != 64))
+        self._migrate(None, "CREATE UNIQUE INDEX IF NOT EXISTS ix_user_sessions_token_hash ON user_sessions (token_hash)")
+        self._migrate(None, "CREATE INDEX IF NOT EXISTS ix_user_sessions_user_id ON user_sessions (user_id)")
+
+    def _migrate(self, done, statement):
+        """Apply one schema change unless `done()` says it is already there (None: the statement is idempotent)."""
+        if done and done():
+            return
+        try:
+            with self.engine.begin() as db:
+                db.execute(text(statement))
+        except (OperationalError, ProgrammingError, IntegrityError):
+            # The API and worker can start together; the other process may have applied it first.
+            if done is None:
                 with self.engine.begin() as db:
-                    db.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} VARCHAR(36)"))
+                    db.execute(text(statement))  # IF NOT EXISTS is a no-op once the other process has committed.
+            elif not done():
+                raise
 
     # -- preferences ------------------------------------------------------
 
     def preferences(self):
         with self.engine.connect() as db:
-            return db.execute(select(settings.c.config).where(settings.c.id == 1)).scalar_one()
+            stored = db.execute(select(settings.c.config).where(settings.c.id == 1)).scalar_one()
+        # Settings saved by an older version lack newer fields; their defaults apply until the owner saves.
+        return {**Preferences().model_dump(), **stored}
 
     def set_preferences(self, value):
         with self.engine.begin() as db:
@@ -162,6 +185,21 @@ class Store:
             row = db.execute(select(users).where(users.c.username == username)).mappings().first()
         return dict(row) if row else None
 
+    def has_users(self) -> bool:
+        with self.engine.connect() as db:
+            return db.execute(select(users.c.id).limit(1)).first() is not None
+
+    def admin_user_id(self) -> str | None:
+        """The first account created owns the workspace-wide settings and skills."""
+        with self.engine.connect() as db:
+            return db.execute(select(users.c.id).order_by(users.c.created_at, users.c.id).limit(1)).scalar()
+
+    def adopt_orphans(self, user_id: str) -> None:
+        """Give rows saved before accounts existed (user_id NULL) to the workspace's first user."""
+        with self.engine.begin() as db:
+            for table in (connections, conversations, runs):
+                db.execute(update(table).where(table.c.user_id.is_(None)).values(user_id=user_id))
+
     # -- sessions ---------------------------------------------------------
 
     def create_session(self, user_id: str, token_hash: str, expires_at: float) -> str:
@@ -171,23 +209,19 @@ class Store:
                                                     expires_at=expires_at, created_at=time.time()))
         return session_id
 
-    def get_session_by_token(self, token: str) -> dict | None:
-        """Look up a session by comparing the token against stored hashes.
-
-        Since we can't reverse the hash, we load all non-expired sessions and
-        check each one. Sessions are expected to be few per user.
-        """
-        now = time.time()
+    def get_session_by_digest(self, token_hash: str) -> dict | None:
         with self.engine.connect() as db:
-            rows = db.execute(select(user_sessions).where(user_sessions.c.expires_at > now)).mappings().all()
-        for row in rows:
-            if bcrypt.checkpw(token.encode("utf-8"), row["token_hash"].encode("utf-8")):
-                return dict(row)
-        return None
+            row = db.execute(select(user_sessions).where(user_sessions.c.token_hash == token_hash,
+                                                         user_sessions.c.expires_at > time.time())).mappings().first()
+        return dict(row) if row else None
 
-    def delete_session(self, session_id: str) -> None:
+    def delete_session_by_digest(self, token_hash: str) -> None:
         with self.engine.begin() as db:
-            db.execute(delete(user_sessions).where(user_sessions.c.id == session_id))
+            db.execute(delete(user_sessions).where(user_sessions.c.token_hash == token_hash))
+
+    def purge_expired_sessions(self) -> None:
+        with self.engine.begin() as db:
+            db.execute(delete(user_sessions).where(user_sessions.c.expires_at <= time.time()))
 
     def list_skills(self):
         with self.engine.connect() as db:
@@ -221,7 +255,7 @@ class Store:
             query = query.where(connections.c.user_id == user_id)
         with self.engine.connect() as db:
             rows = db.execute(query).mappings().all()
-        return [{"skills": [], "tier": "standard", "reasoning": False, **row["config"], "id": row["id"], "has_key": bool(row["secret"]),
+        return [{"skills": [], "tier": "standard", "reasoning": False, "tools": None, **row["config"], "id": row["id"], "has_key": bool(row["secret"]),
                  "cooldown_until": row["cooldown_until"], **({"secret": row["secret"]} if private else {})} for row in rows]
 
     def model_usage(self):
@@ -244,7 +278,7 @@ class Store:
         if not row:
             return None
         row = dict(row)
-        return {"skills": [], "tier": "standard", "reasoning": False, **row["config"], "id": row["id"], "has_key": bool(row["secret"]),
+        return {"skills": [], "tier": "standard", "reasoning": False, "tools": None, **row["config"], "id": row["id"], "has_key": bool(row["secret"]),
                 "cooldown_until": row["cooldown_until"], **({"secret": row["secret"]} if private else {})}
 
     def save_connection(self, value, connection_id=None, user_id: str | None = None):
@@ -303,13 +337,55 @@ class Store:
             if row:
                 db.execute(update(connections).where(connections.c.id == connection_id).values(config={**row[0], "reasoning": True}))
 
+    def mark_tools(self, connection_id, supported):
+        """Record whether a model accepts native tool calls, learned from its first agent call."""
+        with self.engine.begin() as db:
+            row = db.execute(select(connections.c.config).where(connections.c.id == connection_id)).first()
+            if row and row[0].get("tools") != supported:
+                db.execute(update(connections).where(connections.c.id == connection_id).values(config={**row[0], "tools": supported}))
+
+    # -- workspaces -------------------------------------------------------
+
+    def create_workspace(self, value, user_id: str | None):
+        """A new conversation with its sandbox workspace record; the caller creates the sandbox itself."""
+        data = dict(value)
+        token = data.pop("token", None)
+        workspace_id, now = str(uuid.uuid4()), time.time()
+        repo = (data.get("repo_url") or "").rstrip("/").removesuffix(".git").rsplit("/", 1)[-1]
+        title = data.get("name") or repo or "New workspace"
+        with self.engine.begin() as db:
+            db.execute(insert(conversations).values(id=workspace_id, user_id=user_id, title=title[:70], updated_at=now, active_run=None))
+            db.execute(insert(workspaces).values(id=workspace_id, user_id=user_id, created_at=now, config={**data, "name": title},
+                                                 secret=self.cipher.encrypt(token.encode()).decode() if token else None))
+        return self.get_workspace(workspace_id, user_id)
+
+    def get_workspace(self, workspace_id, user_id: str | None = None, private=False):
+        query = select(workspaces).where(workspaces.c.id == workspace_id)
+        if user_id:
+            query = query.where(workspaces.c.user_id == user_id)
+        with self.engine.connect() as db:
+            row = db.execute(query).mappings().first()
+        if not row:
+            return None
+        value = {**row["config"], "id": row["id"], "user_id": row["user_id"], "created_at": row["created_at"], "has_token": bool(row["secret"])}
+        if private:
+            value["token"] = self.cipher.decrypt(row["secret"].encode()).decode() if row["secret"] else ""
+        return value
+
+    def update_workspace(self, workspace_id, **values):
+        with self.engine.begin() as db:
+            row = db.execute(select(workspaces.c.config).where(workspaces.c.id == workspace_id)).first()
+            if row:
+                db.execute(update(workspaces).where(workspaces.c.id == workspace_id).values(config={**row[0], **values}))
+
     def list_conversations(self, user_id: str | None = None):
         query = select(conversations)
         if user_id:
             query = query.where(conversations.c.user_id == user_id)
         query = query.order_by(conversations.c.updated_at.desc())
         with self.engine.connect() as db:
-            return [dict(row) for row in db.execute(query).mappings()]
+            spaces = set(db.execute(select(workspaces.c.id)).scalars())
+            return [{**dict(row), "workspace": row["id"] in spaces} for row in db.execute(query).mappings()]
 
     def conversation(self, conversation_id: str, user_id: str | None = None):
         query = select(conversations).where(conversations.c.id == conversation_id)
@@ -321,28 +397,27 @@ class Store:
                 return None
             history = [dict(m) for m in db.execute(select(messages).where(messages.c.conversation_id == conversation_id).order_by(messages.c.created_at, messages.c.id)).mappings()]
             history_runs = [self.public_run(dict(r)) for r in db.execute(select(runs).where(runs.c.conversation_id == conversation_id).order_by(runs.c.created_at)).mappings()]
-        return {**dict(row), "messages": history, "runs": history_runs}
+        return {**dict(row), "messages": history, "runs": history_runs, "workspace": self.get_workspace(conversation_id)}
 
     def delete_conversation(self, conversation_id: str, user_id: str | None = None):
         with self.engine.begin() as db:
             query = select(conversations.c.active_run).where(conversations.c.id == conversation_id)
             if user_id:
                 query = query.where(conversations.c.user_id == user_id)
-            active = db.execute(query).scalar()
-            if active:
+            found = db.execute(query).first()
+            if not found:
+                raise KeyError(conversation_id)
+            if found.active_run:
                 raise Conflict("Stop the active run before deleting this conversation")
             ids = select(runs.c.id).where(runs.c.conversation_id == conversation_id)
             db.execute(delete(events).where(events.c.run_id.in_(ids)))
             db.execute(delete(calls).where(calls.c.run_id.in_(ids)))
             db.execute(delete(runs).where(runs.c.conversation_id == conversation_id))
-            query = delete(messages).where(messages.c.conversation_id == conversation_id)
-            db.execute(query)
-            query = delete(conversations).where(conversations.c.id == conversation_id)
-            if user_id:
-                query = query.where(conversations.c.user_id == user_id)
-            db.execute(query)
+            db.execute(delete(messages).where(messages.c.conversation_id == conversation_id))
+            db.execute(delete(workspaces).where(workspaces.c.id == conversation_id))
+            db.execute(delete(conversations).where(conversations.c.id == conversation_id))
 
-    def create_run(self, request, user_id: str):
+    def create_run(self, request, user_id: str | None):
         prefs = self.preferences()
         providers = self.list_connections(user_id, True)
         eligible = [p for p in providers if p["enabled"] and (p["free"] or prefs["allow_paid"])]
@@ -352,17 +427,27 @@ class Store:
         run_id, conversation_id = str(uuid.uuid4()), request.conversation_id or str(uuid.uuid4())
         mode = request.mode or prefs["mode"]
         with self.engine.begin() as db:
-            existing = db.execute(select(runs).where(runs.c.request_id == request.request_id)).mappings().first()
+            query = select(runs).where(runs.c.request_id == request.request_id)
+            if user_id:
+                query = query.where(runs.c.user_id == user_id)
+            existing = db.execute(query).mappings().first()
             if existing:
                 if existing["prompt"] != request.prompt or (request.conversation_id and existing["conversation_id"] != request.conversation_id):
                     raise Conflict("Request ID was already used for another message")
                 return self.public_run(dict(existing))
             if request.conversation_id:
-                claimed = db.execute(update(conversations).where(conversations.c.id == conversation_id, conversations.c.active_run.is_(None)).values(active_run=run_id, updated_at=now))
+                query = update(conversations).where(conversations.c.id == conversation_id, conversations.c.active_run.is_(None))
+                if user_id:
+                    query = query.where(conversations.c.user_id == user_id)
+                claimed = db.execute(query.values(active_run=run_id, updated_at=now))
                 if not claimed.rowcount:
                     raise Conflict("Conversation is missing or already has an active run")
             else:
                 db.execute(insert(conversations).values(id=conversation_id, user_id=user_id, title=request.prompt[:70], updated_at=now, active_run=run_id))
+            if mode == "agent" and not db.execute(select(workspaces.c.id).where(workspaces.c.id == conversation_id)).first():
+                # Agent mode works in a sandbox; a chat without one gets an empty workspace.
+                db.execute(insert(workspaces).values(id=conversation_id, user_id=user_id, created_at=now, secret=None,
+                                                     config={"name": request.prompt[:70], "source": "empty", "repo_url": None, "branch": None}))
             history = [{"role": r.role, "content": r.content} for r in db.execute(select(messages).where(messages.c.conversation_id == conversation_id).order_by(messages.c.created_at, messages.c.id))]
             db.execute(insert(messages).values(id=str(uuid.uuid4()), conversation_id=conversation_id, role="user", content=request.prompt, created_at=now, run_id=run_id))
             row = dict(id=run_id, request_id=request.request_id, conversation_id=conversation_id, user_id=user_id,
@@ -431,7 +516,8 @@ class Store:
 
     def cancel(self, run_id: str, user_id: str | None = None):
         with self.engine.begin() as db:
-            query = update(runs).where(runs.c.id == run_id, runs.c.status == "queued")
+            # Queued runs and runs waiting for an approval have no worker; they stop at once.
+            query = update(runs).where(runs.c.id == run_id, runs.c.status.in_(["queued", "waiting"]))
             if user_id:
                 query = query.where(runs.c.user_id == user_id)
             result = db.execute(query.values(
@@ -464,6 +550,51 @@ class Store:
             db.execute(update(conversations).where(conversations.c.id == row, conversations.c.active_run == run_id).values(active_run=None, updated_at=time.time()))
             db.execute(insert(events).values(run_id=run_id, kind="done", data={"status": status, "output": output, "error": error, "usage": usage or {}}, created_at=time.time()))
 
+    def wait(self, run_id, owner, state, approval):
+        """Pause a run for the owner's approval: release the lease and keep the checkpoint for resumption."""
+        with self.engine.begin() as db:
+            result = db.execute(update(runs).where(runs.c.id == run_id, runs.c.lease_owner == owner, runs.c.status == "running").values(
+                status="waiting", phase="waiting", state=state, lease_owner=None, lease_until=0, updated_at=time.time()))
+            if not result.rowcount:
+                raise LostLease()
+            db.execute(insert(events).values(run_id=run_id, kind="approval", data=approval, created_at=time.time()))
+
+    def resolve_approval(self, run_id, approval_id, approved, user_id: str | None = None):
+        """Record the owner's answer and queue the run again; a worker resumes it from its checkpoint."""
+        with self.engine.begin() as db:
+            query = select(runs).where(runs.c.id == run_id)
+            if user_id:
+                query = query.where(runs.c.user_id == user_id)
+            row = db.execute(query).mappings().first()
+            if not row:
+                raise KeyError(run_id)
+            pending = (row["state"] or {}).get("pending_approval")
+            if row["status"] != "waiting" or not pending or pending["id"] != approval_id:
+                raise Conflict("This run is not waiting for that approval")
+            state = {**row["state"], "pending_approval": None, "approvals": {**row["state"].get("approvals", {}), approval_id: approved},
+                     "resumed_at": time.time()}
+            # Matching updated_at makes a double click (or two tabs) resolve the approval only once.
+            done = db.execute(update(runs).where(runs.c.id == run_id, runs.c.status == "waiting", runs.c.updated_at == row["updated_at"]).values(
+                status="queued", phase="queued", state=state, updated_at=time.time())).rowcount
+            if not done:
+                raise Conflict("This approval was already answered")
+            db.execute(insert(events).values(run_id=run_id, kind="approval_resolved", created_at=time.time(),
+                                             data={"id": approval_id, "approved": approved, "kind": pending["kind"]}))
+
+    def steer(self, run_id, message, user_id: str | None = None):
+        """Queue a message for a running agent; it reads it before its next step."""
+        run = self.get_run(run_id, user_id)
+        if not run:
+            raise KeyError(run_id)
+        if run["status"] in TERMINAL:
+            raise Conflict("This run has finished; send a new message instead")
+        self.event(run_id, "steer", {"message": message})
+
+    def events_of(self, run_id, kind, after=0):
+        with self.engine.connect() as db:
+            return [dict(r) for r in db.execute(select(events).where(events.c.run_id == run_id, events.c.kind == kind, events.c.id > after)
+                                                .order_by(events.c.id)).mappings()]
+
     def call_rows(self, run_id: str, user_id: str | None = None):
         query = select(calls).where(calls.c.run_id == run_id)
         if user_id:
@@ -493,6 +624,10 @@ class Store:
             windows.setdefault((None, c["model"]), c["context_window"])
 
         def role(stage):
+            if stage.startswith("agent:"):
+                # Agent stages are "agent:<name>:<step>": the main agent, a sub-agent, or context compaction.
+                name = stage.split(":")[1]
+                return "agent" if name == "main" else "compactor" if name == "compact" else "subagent"
             return "planner" if stage == "planning" else "reviewer" if stage.startswith("reviewing") else "generator"
 
         def blank():

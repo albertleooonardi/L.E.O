@@ -1,12 +1,14 @@
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 
 from . import providers, tools
 from .context import parse_plan, parse_review, prepare_context, static_review, token_bound
 from .router import EFFORT, SEARCH_CUES, TIERS, call_cost, choose_mode, classify, rank, wants_review
+from .sandbox import SandboxError
 from .store import LostLease
 
 
@@ -28,12 +30,22 @@ class BudgetExceeded(ValueError):
 
 
 class Orchestrator:
-    def __init__(self, store, run, owner, transport=None):
-        self.store, self.run, self.owner, self.transport = store, run, owner, transport
+    def __init__(self, store, run, owner, transport=None, sandbox=None):
+        self.store, self.run, self.owner, self.transport, self.sandbox = store, run, owner, transport, sandbox
         self.id, self.state = run["id"], run["state"]
         self.prefs = self.state["preferences"]
         self.user_id = run.get("user_id")
         self.started = time.monotonic()
+        self.agent = run["mode"] == "agent"
+
+    def limits(self):
+        """Calls, tokens, cost, and seconds this run may use. Agent runs have their own, larger allowance,
+        multiplied by each extension the owner approved."""
+        if not self.agent:
+            return self.prefs["max_calls"], self.prefs["token_budget"], self.prefs["max_cost"], self.prefs["max_run_seconds"]
+        times = 1 + self.state.get("budget_extensions", 0)
+        return (self.prefs["agent_max_calls"] * times, self.prefs["agent_token_budget"] * times, self.prefs["agent_max_cost"] * times,
+                self.prefs["agent_max_run_seconds"])
 
     def check(self):
         current = self.store.get_run(self.id, self.user_id, True)
@@ -41,8 +53,9 @@ class Orchestrator:
             raise LostLease()
         if current["cancel_requested"]:
             raise Cancelled()
-        # Persist elapsed time by using wall time from initial run creation.
-        if time.time() - self.run["created_at"] > self.prefs["max_run_seconds"]:
+        # Persist elapsed time by using wall time from initial run creation (or the last approval, for agent runs).
+        started = max(self.run["created_at"], self.state.get("resumed_at") or 0)
+        if time.time() - started > self.limits()[3]:
             raise BudgetExceeded("Run time limit reached")
 
     def save(self, **values):
@@ -67,15 +80,19 @@ class Orchestrator:
                 "review_passed": self.state.get("review_passed"), "static_checks": self.state.get("checks", []),
                 "route": self.state.get("route")}
 
-    def candidates(self, role, skill=None, difficulty=None):
+    def candidates(self, role, skill=None, difficulty=None, tools=False):
         """Eligible connections in the order to try them, and why the first was chosen."""
         selected = self.prefs.get(f"{role}_id")
         choices = [{"skills": [], "tier": "standard", "reasoning": False, **p} for p in self.state["providers"]
                    if p["enabled"] and (p["free"] or self.prefs["allow_paid"])]
         # Live disabled/deleted connections are never used, even by queued snapshots.
         live = {p["id"]: p for p in self.store.list_connections(self.user_id)}
-        choices = self.store.with_usage([p for p in choices if p["id"] in live and live[p["id"]]["enabled"] and live[p["id"]]["cooldown_until"] <= time.time()])
-        if role == "generator" and skill and self.prefs.get("smart_routing", True):
+        choices = self.store.with_usage([{**p, "tools": live[p["id"]].get("tools")} for p in choices
+                                         if p["id"] in live and live[p["id"]]["enabled"] and live[p["id"]]["cooldown_until"] <= time.time()])
+        if tools:
+            # Agents need native tool calling: models known not to support it are skipped, untried ones are tried last.
+            choices = [p for p in choices if p.get("tools") is not False]
+        if role in ("generator", "subagent") and skill and self.prefs.get("smart_routing", True):
             # The routing head picks the generator for each task; planner/reviewer assignments still apply.
             ordered, reason = rank(choices, skill, difficulty or "standard", self.prefs)
         else:
@@ -85,8 +102,8 @@ class Orchestrator:
                              not p["local"] if route in ("local_first", "auto") else not p["free"] if route == "free_first" else False,
                              p["priority"], p["id"]))
             reason = "assigned in Settings" if selected and ordered and ordered[0]["id"] == selected else "fallback order"
-        if role in ("reviewer", "planner"):
-            # Judging and planning need the strongest model available; a reviewer never grades its own answer.
+        if role in ("reviewer", "planner", "agent"):
+            # Judging, planning, and leading an agent run need the strongest model available; a reviewer never grades its own answer.
             writer = self.state.get("last_generator")
             ordered = sorted(ordered, key=lambda p: (p["id"] != selected if selected else False, p["model"] == writer and role == "reviewer",
                                                      -TIERS.get(p.get("tier", "standard"), 1), round(call_cost(p), 6), p["priority"], p["id"]))
@@ -97,6 +114,8 @@ class Orchestrator:
             ordered = free[:FREE_ATTEMPTS] + paid + free[FREE_ATTEMPTS:]
             if ordered and not ordered[0]["free"]:
                 reason += "; no free model available, using a paid backup"
+        if tools:
+            ordered = sorted(ordered, key=lambda p: p.get("tools") is not True)
         return ordered, reason
 
     async def research(self, key, queries, urls):
@@ -150,19 +169,20 @@ class Orchestrator:
         extra = next((s.get("instructions", "") for s in self.state.get("skills", []) if s["id"] == skill and s.get("enabled", True)), "")
         return self.prefs["system_prompt"] + (f"\n\n{extra}" if extra else "")
 
-    def reserve(self, provider, stage, messages, max_output):
+    def reserve(self, provider, stage, messages, max_output, extra=0):
         rows = self.store.call_rows(self.id)
-        if len(rows) >= self.prefs["max_calls"]:
+        max_calls, token_budget, max_cost, _ = self.limits()
+        if len(rows) >= max_calls:
             raise BudgetExceeded("Model call limit reached")
-        input_bound = token_bound(messages)
+        input_bound = token_bound(messages) + extra
         used = sum(r["input_tokens"] + r["output_tokens"] if r["status"] == "completed" and not r["estimated"] else r["reserved_tokens"] for r in rows)
-        if used + input_bound + max_output > self.prefs["token_budget"]:
+        if used + input_bound + max_output > token_budget:
             raise BudgetExceeded("Run token allowance reached; increase it in Settings or use Quick mode")
         if not provider["free"] and (provider["input_price"] is None or provider["output_price"] is None):
             raise BudgetExceeded(f"Set input and output prices for {provider['name']} before paid usage")
         cost = 0 if provider["free"] else (input_bound * provider["input_price"] + max_output * provider["output_price"]) / 1_000_000
         spent = sum(r["cost"] if r["status"] == "completed" else r["reserved_cost"] for r in rows)
-        if spent + cost > self.prefs["max_cost"]:
+        if spent + cost > max_cost:
             raise BudgetExceeded("Estimated run cost would exceed your spending limit")
         call_id = str(uuid.uuid4())
         self.store.add_call(dict(id=call_id, run_id=self.id, stage=stage, provider=provider["name"], model=provider["model"],
@@ -170,11 +190,17 @@ class Orchestrator:
             reserved_cost=cost, cost=cost, estimated=True, created_at=time.time(), elapsed_ms=0))
         return call_id
 
-    async def call(self, stage, role, prompt, history=None, system=None, output_limit=None, visible=False, skill=None, difficulty=None):
+    async def call(self, stage, role, prompt, history=None, system=None, output_limit=None, visible=False, skill=None, difficulty=None,
+                   messages=None, tools=None):
+        """One model call with fallback across eligible connections; completed stages are reused on recovery.
+
+        Agents pass a whole transcript as `messages` and tool schemas as `tools`; the result is then
+        {"text", "tool_calls"} instead of text."""
         self.check()
         if stage in self.state["completed"]:
             return self.state["completed"][stage]
-        choices, reason = self.candidates(role, skill, difficulty)
+        choices, reason = self.candidates(role, skill, difficulty, bool(tools))
+        tool_bytes = len(json.dumps(tools)) // 3 if tools else 0
         # Match thinking effort to the task: simple work should not run at full effort.
         effort = EFFORT.get(difficulty or "light") if self.prefs.get("smart_routing", True) else None
         if effort and role == "generator" and "single-page build" in (self.state.get("route") or {}).get("signals", []):
@@ -188,9 +214,14 @@ class Orchestrator:
             output_limit_for_call = min(output_limit or self.prefs["max_output_tokens"], self.prefs["max_output_tokens"])
             limit = min(provider["context_window"], self.prefs["context_tokens"]) - output_limit_for_call
             try:
-                context, omitted = prepare_context(history or [], system, prompt, limit)
-                self.state["omitted"] = max(self.state.get("omitted", 0), omitted)
-                call_id = self.reserve(provider, stage, context, output_limit_for_call)
+                if messages is not None:
+                    if token_bound(messages) + tool_bytes > limit:
+                        raise ValueError(f"{provider['name']}: the agent's context is larger than this model's window")
+                    context = messages
+                else:
+                    context, omitted = prepare_context(history or [], system, prompt, limit)
+                    self.state["omitted"] = max(self.state.get("omitted", 0), omitted)
+                call_id = self.reserve(provider, stage, context, output_limit_for_call, tool_bytes)
             except BudgetExceeded:
                 raise  # Budget limits apply to all providers; no point trying another.
             except ValueError as exc:
@@ -206,12 +237,14 @@ class Orchestrator:
             last_flush = started
             input_tokens = output_tokens = None
             finish = None
+            calls = providers.ToolCalls()
             try:
                 async with asyncio.timeout(self.prefs["timeout_seconds"]):
                     async for chunk in providers.stream(provider, self.store.decrypt(provider), context, output_limit_for_call,
-                                                          self.prefs["timeout_seconds"], self.transport, effort):
+                                                          self.prefs["timeout_seconds"], self.transport, effort, tools):
                         self.check()
                         text += chunk.text
+                        calls.add(chunk.calls)
                         pending += chunk.text
                         if chunk.input_tokens is not None:
                             input_tokens = chunk.input_tokens
@@ -223,7 +256,8 @@ class Orchestrator:
                             self.store.event(self.id, "token", {"text": pending})
                             self.save(output=text)
                             pending, last_flush = "", time.monotonic()
-                if not text.strip():
+                tool_calls = calls.result()
+                if not text.strip() and not tool_calls:
                     if finish == "refusal":
                         raise providers.ProviderError("The model declined this request; trying another model")
                     if finish in {"length", "max_tokens"}:
@@ -249,9 +283,12 @@ class Orchestrator:
                 _strikes.pop(provider["id"], None)
                 if role == "generator":
                     self.state["last_generator"] = provider["model"]
-                self.state["completed"][stage] = text
+                if tool_calls and provider.get("tools") is not True:
+                    self.store.mark_tools(provider["id"], True)
+                result = {"text": text, "tool_calls": tool_calls, "model": provider["model"]} if tools else text
+                self.state["completed"][stage] = result
                 self.save(usage=self.usage(), **({"output": text} if visible else {}))
-                return text
+                return result
             except (providers.ProviderError, TimeoutError) as exc:
                 self.store.update_call(call_id, status="failed", elapsed_ms=int((time.monotonic() - started) * 1000))
                 error = str(exc) or "Provider timed out"
@@ -264,6 +301,10 @@ class Orchestrator:
                     queue.insert(0, provider)
                     continue
                 errors.append(f"{provider['name']}: {error}")
+                if tools and provider.get("tools") is None and re.search(r"HTTP 40[04]", error) and re.search(r"tool|function", error, re.I):
+                    # The API rejected tool definitions (OpenRouter answers 404 "no endpoints that support tool use"):
+                    # this model cannot be an agent; remember that.
+                    self.store.mark_tools(provider["id"], False)
                 if isinstance(exc, providers.ProviderError) and exc.retryable:
                     strikes = _strikes[provider["id"]] = _strikes.get(provider["id"], 0) + 1
                     self.store.cooldown(provider["id"], min(3600, max(exc.retry_after or 30, 30 * 2 ** (strikes - 1))))
@@ -291,6 +332,12 @@ class Orchestrator:
         answer = ""
         try:
             self.check()
+            if self.agent:
+                from .agent import AgentRun  # Imported here: the agent module builds on this one.
+                answer = await AgentRun(self).run()
+                if answer is not None:  # None: paused for the owner's approval.
+                    self.store.finish(self.id, self.owner, "completed", answer, usage=self.usage())
+                return
             prompt = self.run["prompt"]
             # Stage events were already published before a checkpoint; do not repeat them on recovery.
             replayed = set(self.state["completed"])
@@ -410,6 +457,7 @@ class Orchestrator:
                     except BudgetExceeded:
                         # No budget left for a review call: the answer stands, unreviewed.
                         self.state["review_passed"] = False
+                        self.state["review_skipped"] = True
                         self.save()
                         self.store.event(self.id, "warning", {"message": "Review skipped: run budget reached."})
                         break
@@ -431,7 +479,7 @@ class Orchestrator:
                     if f"repairing_{attempt}" not in replayed:
                         self.store.event(self.id, "validation", {"checks": checks})
             self.check()
-            if self.state.get("review_passed") is False:
+            if self.state.get("review_passed") is False and not self.state.get("review_skipped"):
                 self.store.event(self.id, "warning", {"message": "Review did not pass within the repair limit. The answer is available for your inspection."})
             self.store.finish(self.id, self.owner, "completed", answer, usage=self.usage())
         except Cancelled:
@@ -441,7 +489,8 @@ class Orchestrator:
         except asyncio.CancelledError:
             raise  # Keep checkpoint and reservation for lease-based recovery.
         except Exception as exc:
-            if not isinstance(exc, (ValueError, providers.ProviderError)):
+            known = (ValueError, providers.ProviderError, SandboxError)
+            if not isinstance(exc, known):
                 logging.getLogger("leo.worker").exception("Unexpected failure in run %s", self.id)
-            safe = str(exc) if isinstance(exc, (ValueError, providers.ProviderError)) else "Internal worker error; inspect the server logs"
+            safe = str(exc) if isinstance(exc, known) else "Internal worker error; inspect the server logs"
             self.store.finish(self.id, self.owner, "failed", answer, error=safe, usage=self.usage())

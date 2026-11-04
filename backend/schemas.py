@@ -1,3 +1,4 @@
+import re
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -28,6 +29,8 @@ class Connection(StrictModel):
     skills: list[str] = Field(default_factory=list, max_length=20)
     tier: Literal["light", "standard", "strong"] = "standard"
     reasoning: bool = False
+    # Native tool calling, which agent mode needs: True/False when known, None until the first agent call finds out.
+    tools: bool | None = None
 
     @field_validator("base_url")
     @classmethod
@@ -63,6 +66,14 @@ class Preferences(StrictModel):
     token_budget: int = Field(default=200000, ge=2048, le=2000000)
     timeout_seconds: int = Field(default=120, ge=10, le=600)
     max_run_seconds: int = Field(default=600, ge=30, le=3600)
+    # Agent mode works for many steps, so it has its own, larger allowance. Reaching one asks to extend it.
+    agent_max_steps: int = Field(default=80, ge=5, le=1000)
+    agent_max_calls: int = Field(default=200, ge=10, le=5000)
+    agent_token_budget: int = Field(default=4000000, ge=100000, le=100000000)
+    agent_max_cost: float = Field(default=1.0, gt=0, le=1000, allow_inf_nan=False)
+    agent_max_run_seconds: int = Field(default=7200, ge=300, le=86400)
+    agent_parallel: int = Field(default=3, ge=1, le=8)
+    agent_command_timeout: int = Field(default=300, ge=10, le=3600)
     system_prompt: str = Field(default="You are L.E.O., a helpful assistant. Answer accurately and concisely. State uncertainty. For code, provide complete usable examples and explain assumptions.", max_length=4000)
 
     @field_validator("search_url")
@@ -96,15 +107,11 @@ class User(StrictModel):
     created_at: float
 
 
-class Token(StrictModel):
-    access_token: str
-    token_type: str = "bearer"
-
-
 class RunInput(StrictModel):
     prompt: str = Field(min_length=1, max_length=30000)
     conversation_id: str | None = None
-    mode: Literal["auto", "quick", "reviewed", "deep"] | None = None
+    # "agent" works in the conversation's sandbox workspace with tools and sub-agents.
+    mode: Literal["auto", "quick", "reviewed", "deep", "agent"] | None = None
     # Per-message override of web search: True forces it, False skips it, None lets HEAD decide.
     search: bool | None = None
     request_id: str = Field(min_length=8, max_length=100)
@@ -144,6 +151,7 @@ class DiscoveredModel(BaseModel):
     tier: Literal["light", "standard", "strong"] = "standard"
     skills: list[str] = Field(default_factory=list, max_length=20)
     reasoning: bool = False
+    tools: bool | None = None
     context_window: int = Field(default=32768, ge=1024, le=2000000)
     free: bool | None = None
     input_price: float | None = Field(default=None, ge=0, le=10000, allow_inf_nan=False)
@@ -153,3 +161,48 @@ class DiscoveredModel(BaseModel):
 class AdoptModels(StrictModel):
     models: list[DiscoveredModel] = Field(min_length=1, max_length=60)
     check: bool = True
+
+
+class AccountSignIn(StrictModel):
+    provider: str = Field(min_length=1, max_length=40)
+    # Providers that 9Router flags as risky need the owner's explicit consent first.
+    accept_risk: bool = False
+
+
+GIT_REF = re.compile(r"[A-Za-z0-9._/-]{1,200}")
+
+
+class WorkspaceInput(StrictModel):
+    """A sandbox workspace for agent mode: empty, or cloned from a git repository (a zip can be uploaded after)."""
+    name: str = Field(default="", max_length=120)
+    source: Literal["empty", "git"] = "empty"
+    repo_url: str | None = Field(default=None, max_length=500)
+    branch: str | None = Field(default=None, max_length=200)
+    # For private repositories and pushes; stored encrypted and never sent into the sandbox.
+    token: str | None = Field(default=None, max_length=4096, repr=False)
+
+    @field_validator("branch")
+    @classmethod
+    def valid_branch(cls, value):
+        if value is not None and (not GIT_REF.fullmatch(value) or value.startswith(("-", "/")) or ".." in value):
+            raise ValueError("Use a plain branch name such as main or feature/login")
+        return value
+
+    @model_validator(mode="after")
+    def valid_source(self):
+        if self.source == "git":
+            parsed = urlsplit(self.repo_url or "")
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query:
+                raise ValueError("Use an https:// repository URL without credentials; put a token in the token field")
+        elif self.repo_url:
+            raise ValueError("A repository URL needs source \"git\"")
+        return self
+
+
+class ApprovalInput(StrictModel):
+    approval_id: str = Field(min_length=1, max_length=64)
+    approved: bool
+
+
+class SteerInput(StrictModel):
+    message: str = Field(min_length=1, max_length=8000)

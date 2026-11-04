@@ -1,7 +1,13 @@
 import { LEVELS, breakdowns, levelMeter, levelOf, money, node, percent, seconds, share, shareBar, successRate, tokens, type Report } from './usage-ui';
 
+// The floating header lifts off the page once content scrolls under it.
+const syncScrolled = () => document.body.classList.toggle('scrolled', window.scrollY > 4);
+window.addEventListener('scroll', syncScrolled, { passive: true }); syncScrolled();
+
 const el = (id: string) => document.getElementById(id) as HTMLElement;
 const time = (value: number) => new Date(value * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const ROLE_LABELS: Record<string, string> = { agent: 'Lead agent', subagent: 'Sub-agent', compactor: 'Context compactor' };
+const roleLabel = (role: string) => ROLE_LABELS[role] || role;
 
 function row(cells: (string | HTMLElement)[], numeric: number[] = []) {
   const tr = document.createElement('tr');
@@ -50,7 +56,7 @@ function renderModels(report: Report) {
   const ranked = [...report.models].sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens));
   body.replaceChildren(...ranked.map((m, i) => row([
     modelCell(m.provider, m.model),
-    Object.entries(m.roles).map(([role, count]) => `${role} ×${count}`).join(', '),
+    Object.entries(m.roles).map(([role, count]) => `${roleLabel(role)} ×${count}`).join(', '),
     inlineShare(share(m.input_tokens + m.output_tokens, all), String(i % 6)),
     `${percent(successRate(m))} (${m.completed}/${m.calls - (m.in_progress ?? 0)})`,
     tokens(m.input_tokens, m.estimated), tokens(m.output_tokens, m.estimated),
@@ -76,7 +82,7 @@ function renderCalls(report: Report) {
   if (!report.recent_calls.length) return empty(body, 7, 'No calls recorded yet.');
   body.replaceChildren(...report.recent_calls.map(c => {
     const status = node('span', c.status, 'call-status'); status.dataset.status = c.status;
-    return row([time(c.created_at), c.conversation || '—', `${c.stage} · ${c.role}`, modelCell(c.provider, c.model), status,
+    return row([time(c.created_at), c.conversation || '—', `${c.stage} · ${roleLabel(c.role)}`, modelCell(c.provider, c.model), status,
       c.status === 'completed' ? `${tokens(c.input_tokens, c.estimated)} / ${tokens(c.output_tokens, c.estimated)}` : 'reserved', c.elapsed_ms ? seconds(c.elapsed_ms) : '—'], [5, 6]);
   }));
 }

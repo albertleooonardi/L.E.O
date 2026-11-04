@@ -8,7 +8,15 @@ def token_bound(messages):
 
     About 3 bytes per token stays above real counts for English and code (~4 bytes per token) and for
     multi-byte scripts (~3 bytes per character), without refusing requests that would fit."""
-    return sum(-(-len(m["content"].encode("utf-8")) // 3) + 8 for m in messages) + 32
+    return sum(-(-message_bytes(m) // 3) + 8 for m in messages) + 32
+
+
+def message_bytes(message):
+    """UTF-8 size of a message, including the tool calls an agent message carries."""
+    size = len((message.get("content") or "").encode("utf-8"))
+    if message.get("tool_calls"):
+        size += len(json.dumps(message["tool_calls"]).encode("utf-8"))
+    return size
 
 
 def prepare_context(history, system, prompt, limit):

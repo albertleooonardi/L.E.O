@@ -19,6 +19,90 @@ class Chunk:
     input_tokens: int | None = None
     output_tokens: int | None = None
     finish: str | None = None
+    # Tool-call fragments: {"index", "id", "name", "arguments"}; assemble them with ToolCalls.
+    calls: list | None = None
+
+
+class ToolCalls:
+    """Assembles streamed tool-call fragments into complete calls: [{"id", "name", "arguments": dict}]."""
+
+    def __init__(self):
+        self.parts = {}
+
+    def add(self, fragments):
+        for fragment in fragments or []:
+            # Some OpenAI-compatible servers (Gemini) send whole calls without an index; each is its own call.
+            key = fragment.get("index")
+            key = len(self.parts) if key is None else key
+            part = self.parts.setdefault(key, {"id": None, "name": "", "arguments": ""})
+            part["id"] = fragment.get("id") or part["id"]
+            part["name"] = fragment.get("name") or part["name"]
+            part["arguments"] += fragment.get("arguments") or ""
+
+    def result(self):
+        calls = []
+        for n, part in enumerate(self.parts[k] for k in sorted(self.parts)):
+            if not part["name"]:
+                continue
+            try:
+                arguments = json.loads(part["arguments"]) if part["arguments"].strip() else {}
+                if not isinstance(arguments, dict):
+                    raise ValueError()
+            except ValueError:
+                # Malformed arguments go back to the model as an error instead of failing the run.
+                arguments = {"_invalid_json": part["arguments"][:2000]}
+            calls.append({"id": part["id"] or f"call_{n}", "name": part["name"], "arguments": arguments})
+        return calls
+
+
+def _openai_messages(messages):
+    result = []
+    for m in messages:
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            result.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": [
+                {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])}}
+                for c in m["tool_calls"]]})
+        elif m["role"] == "tool":
+            result.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["content"]})
+        else:
+            result.append({"role": m["role"], "content": m["content"]})
+    return result
+
+
+def _anthropic_messages(messages):
+    result = []
+    for m in messages:
+        if m["role"] == "system":
+            continue
+        if m["role"] == "tool":
+            block = {"type": "tool_result", "tool_use_id": m["tool_call_id"], "content": m["content"]}
+            previous = result[-1] if result else None
+            # All results of one assistant turn go back together in a single user message.
+            if previous and previous["role"] == "user" and isinstance(previous["content"], list):
+                previous["content"].append(block)
+            else:
+                result.append({"role": "user", "content": [block]})
+        elif m["role"] == "assistant" and m.get("tool_calls"):
+            result.append({"role": "assistant", "content": ([{"type": "text", "text": m["content"]}] if m.get("content") else []) +
+                           [{"type": "tool_use", "id": c["id"], "name": c["name"], "input": c["arguments"]} for c in m["tool_calls"]]})
+        else:
+            result.append({"role": m["role"], "content": m["content"]})
+    return result
+
+
+def _responses_input(messages):
+    result = []
+    for m in messages:
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            if m.get("content"):
+                result.append({"role": "assistant", "content": m["content"]})
+            result += [{"type": "function_call", "call_id": c["id"], "name": c["name"], "arguments": json.dumps(c["arguments"])}
+                       for c in m["tool_calls"]]
+        elif m["role"] == "tool":
+            result.append({"type": "function_call_output", "call_id": m["tool_call_id"], "output": m["content"]})
+        else:
+            result.append({"role": m["role"], "content": m["content"]})
+    return result
 
 
 def headers(provider, key):
@@ -33,23 +117,33 @@ def headers(provider, key):
     return result
 
 
-def make_request(provider, messages, max_tokens, effort=None):
-    """Build the request. `effort` (low/medium/high) is sent only to reasoning models, in each API's own form."""
+def make_request(provider, messages, max_tokens, effort=None, tools=None):
+    """Build the request. `effort` (low/medium/high) is sent only to reasoning models, in each API's own form.
+
+    `messages` use one neutral transcript format: assistant messages may carry `tool_calls`
+    ([{"id", "name", "arguments": dict}]) and `{"role": "tool", "tool_call_id", "name", "content"}` returns a result.
+    `tools` are [{"name", "description", "parameters": JSON schema}]."""
     protocol = provider["protocol"]
     payload = {"model": provider["model"], "stream": True}
     effort = effort if provider.get("reasoning") else None
     if protocol == "anthropic":
         payload.update(system="\n\n".join(m["content"] for m in messages if m["role"] == "system"),
-                       messages=[m for m in messages if m["role"] != "system"], max_tokens=max_tokens)
+                       messages=_anthropic_messages(messages), max_tokens=max_tokens)
         if effort:
             payload["output_config"] = {"effort": effort}  # Thinking depth on current Claude models.
+        if tools:
+            payload["tools"] = [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]} for t in tools]
         return "/messages", payload
     if protocol == "responses":
-        payload.update(input=messages, max_output_tokens=max_tokens, store=False)
+        payload.update(input=_responses_input(messages), max_output_tokens=max_tokens, store=False)
         if effort:
             payload["reasoning"] = {"effort": effort}
+        if tools:
+            payload["tools"] = [{"type": "function", **t} for t in tools]
         return "/responses", payload
-    payload.update(messages=messages, stream_options={"include_usage": True})
+    payload.update(messages=_openai_messages(messages), stream_options={"include_usage": True})
+    if tools:
+        payload["tools"] = [{"type": "function", "function": t} for t in tools]
     payload[provider.get("token_parameter", "max_tokens")] = max_tokens
     if effort:
         # OpenRouter takes a reasoning object; OpenAI-compatible APIs (OpenAI, Gemini, vLLM) take reasoning_effort.
@@ -120,8 +214,14 @@ def decode_chunk(protocol, data):
         kind = data.get("type")
         if kind == "message_start":
             return usage_chunk(data.get("message", {}).get("usage", {}))
+        if kind == "content_block_start" and (data.get("content_block") or {}).get("type") == "tool_use":
+            block = data["content_block"]
+            return Chunk(calls=[{"index": data.get("index"), "id": block.get("id"), "name": block.get("name"), "arguments": ""}])
         if kind == "content_block_delta":
-            return Chunk(text=data.get("delta", {}).get("text", ""))
+            delta = data.get("delta", {})
+            if delta.get("type") == "input_json_delta":
+                return Chunk(calls=[{"index": data.get("index"), "arguments": delta.get("partial_json", "")}])
+            return Chunk(text=delta.get("text", ""))
         if kind == "message_delta":
             chunk = usage_chunk(data.get("usage", {}))
             chunk.finish = data.get("delta", {}).get("stop_reason")
@@ -131,6 +231,11 @@ def decode_chunk(protocol, data):
     elif protocol == "responses":
         if data.get("type") == "response.output_text.delta":
             return Chunk(text=data.get("delta", ""))
+        if data.get("type") == "response.output_item.done" and (data.get("item") or {}).get("type") == "function_call":
+            # The finished item carries the whole call, so argument deltas need no assembly.
+            item = data["item"]
+            return Chunk(calls=[{"index": data.get("output_index"), "id": item.get("call_id"), "name": item.get("name"),
+                                 "arguments": item.get("arguments", "")}])
         if data.get("type") in {"response.completed", "response.incomplete"}:
             response = data.get("response", {})
             chunk = usage_chunk(response.get("usage") or {})
@@ -140,15 +245,19 @@ def decode_chunk(protocol, data):
         chunk = usage_chunk(data.get("usage") or {})
         choices = data.get("choices") or []
         if choices:
-            content = choices[0].get("delta", {}).get("content")
+            delta = choices[0].get("delta") or {}
+            content = delta.get("content")
             chunk.text = content if isinstance(content, str) else ""
             chunk.finish = choices[0].get("finish_reason")
+            if delta.get("tool_calls"):
+                chunk.calls = [{"index": c.get("index"), "id": c.get("id"), "name": (c.get("function") or {}).get("name"),
+                                "arguments": (c.get("function") or {}).get("arguments") or ""} for c in delta["tool_calls"]]
         return chunk
     return Chunk()
 
 
-async def stream(provider, key, messages, max_tokens, timeout, transport=None, effort=None):
-    path, payload = make_request(provider, messages, max_tokens, effort)
+async def stream(provider, key, messages, max_tokens, timeout, transport=None, effort=None, tools=None):
+    path, payload = make_request(provider, messages, max_tokens, effort, tools)
     finished = False
     output_bytes = 0
     try:
@@ -169,7 +278,7 @@ async def stream(provider, key, messages, max_tokens, timeout, transport=None, e
                     if len(raw) > 2_000_000:
                         raise ProviderError("Provider event exceeded the size limit")
                     chunk = decode_chunk(provider["protocol"], json.loads(raw))
-                    output_bytes += len(chunk.text.encode())
+                    output_bytes += len(chunk.text.encode()) + sum(len((c.get("arguments") or "").encode()) for c in chunk.calls or [])
                     if output_bytes > max_tokens * 64:
                         raise ProviderError("Provider exceeded the response size limit")
                     if chunk.finish:
