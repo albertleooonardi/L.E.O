@@ -84,8 +84,8 @@ class FakeSandbox:
     def __init__(self, router):
         self.router, self.ensured, self.deleted = router, [], []
 
-    async def ensure_router(self, user_id, password):
-        self.ensured.append((user_id, password))
+    async def ensure_router(self, user_id, password, adopt_legacy=False):
+        self.ensured.append((user_id, password) if not adopt_legacy else (user_id, password, 'adopt'))
         self.router.passwords.add(password)
         return f'http://leo-router-{user_id}:20128'
 
@@ -104,6 +104,28 @@ def router_client(store, sandbox):
     with TestClient(create_app(store.config, store, sandbox=sandbox)) as value:
         value.cookies.set('leo_session', store.user_session_token)
         yield value
+
+
+def test_models_on_the_old_shared_router_move_to_the_users_own(store, sandbox):
+    """Upgrading from the shared 9router service: at start, the user gets their own router started from a copy of it
+    (same password, accounts, and keys), and their models follow; other models stay where they are."""
+    from backend.schemas import Connection
+    old = store.save_connection(Connection(name='Codex', base_url='http://9router:20128/v1', model='cx/gpt', free=True,
+                                           api_key='sk-9r').model_dump(), user_id=store.user_id)
+    other = store.save_connection(Connection(name='Groq', base_url='https://api.groq.com/openai/v1', model='llama', free=True,
+                                             api_key='gsk').model_dump(), user_id=store.user_id)
+    store.config.router9_callback_port = 0
+    with TestClient(create_app(store.config, store, sandbox=sandbox)) as client:
+        async def moved():
+            await client.app.state.adopting
+
+        client.portal.call(moved)
+    assert sandbox.ensured == [(store.user_id, 'leo-local-development', 'adopt')]
+    url = f'http://leo-router-{store.user_id}:20128'
+    assert store.get_router(store.user_id) == {'url': url, 'password': 'leo-local-development'}
+    moved = store.get_connection(old['id'], store.user_id, private=True)
+    assert moved['base_url'] == f'{url}/v1' and store.decrypt(moved) == 'sk-9r', 'the key stays valid on the copy'
+    assert store.get_connection(other['id'], store.user_id)['base_url'] == 'https://api.groq.com/openai/v1'
 
 
 def test_accounts_off_without_sandbox(client):

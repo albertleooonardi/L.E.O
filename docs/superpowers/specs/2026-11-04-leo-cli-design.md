@@ -1,7 +1,9 @@
 # L.E.O CLI: the multi-agent orchestrator in your terminal
 
 **Date:** 4 November 2026  
-**Status:** approved in conversation; implementation follows directly (the user asked to skip the separate plan step)  
+**Status:** implemented (5 November 2026). The command (`app.py`) and terminal UI (`ui.py`) are done and work on
+Windows (Git Bash for commands, process-tree timeouts); `leo login`, sync, and `leo -p` were checked end to end
+against a local server.  
 **Part of:** L.E.O. as two products on one account ([accounts](2026-11-04-accounts-oauth-design.md),
 [Chat](2026-11-04-leo-chat-design.md)). The CLI is the multi-agent LLM Efficiency Orchestrator: a terminal agent that
 works on the local machine.
@@ -52,11 +54,14 @@ uvicorn, psycopg, and bcrypt into a `server` extra, which the Dockerfile install
 
 ## 3. Login, sync, and usage (server)
 
-**Device login:**
+**Device login** (started from inside `leo` on first run, or `/login`; `leo login` remains for scripts):
 1. `POST /api/cli/device` (public, rate-limited) returns `{device_code, user_code: "ABCD-EFGH", verification_url:
-   <server>/cli?code=…, interval, expires_in: 600}`.
-2. The `/cli` page asks for sign-in if needed, then shows "Allow L.E.O CLI on `<device>` to download your models and
-   API keys?" with Allow and Deny.
+   <server>/cli?code=…, interval, expires_in: 600}`. The CLI adds `&port=N` for a listener on `127.0.0.1` and opens
+   the link in the browser.
+2. The `/cli` page sends a signed-out browser to the L.E.O. sign-in page (password, register, or OAuth), then shows
+   "Allow L.E.O CLI on `<device>`?" with Allow and Deny. After the answer it navigates to
+   `http://127.0.0.1:N/callback?status=…`, and the CLI polls at once. The return carries no secret; without it
+   (SSH, another device) the CLI keeps polling every 3 seconds.
 3. `POST /api/cli/token {device_code}` answers `pending`, `denied`, or `expired`, or returns the token once (single use).
 4. The token is 256 bits. Its SHA-256 digest is stored in `cli_devices` (id, user_id, name, token_hash, created_at,
    last_used_at, revoked_at).

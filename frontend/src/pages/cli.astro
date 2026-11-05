@@ -40,13 +40,18 @@ import '../styles/global.css';
     <script>
       // Approve or deny a `leo login`: the code in the address must match the one the terminal shows.
       const el = (id: string) => document.getElementById(id) as HTMLElement;
-      const code = new URLSearchParams(location.search).get('code') || '';
+      const params = new URLSearchParams(location.search);
+      const code = params.get('code') || '';
+      // The terminal listens on 127.0.0.1:<port> so it can carry on as soon as the device is allowed. Only that address
+      // is ever used, and the return carries no secret: the terminal fetches its token with a code only it knows.
+      const port = Number(params.get('port'));
+      const terminal = Number.isInteger(port) && port >= 1024 && port <= 65535 ? `http://127.0.0.1:${port}/callback` : '';
       const done = (title: string, caption: string) => { el('cli-title').textContent = title; el('cli-caption').textContent = caption; el('cli-card').hidden = true; };
       async function load() {
-        if (!/^[A-Z2-9]{4}-[A-Z2-9]{4}$/i.test(code)) return done('No sign-in code', 'Run leo login in your terminal and open the link it shows.');
+        if (!/^[A-Z2-9]{4}-[A-Z2-9]{4}$/i.test(code)) return done('No sign-in code', 'Run leo in your terminal and open the link it shows.');
         const response = await fetch(`/api/cli/device/${encodeURIComponent(code)}`, { credentials: 'include' });
         if (response.status === 401) { location.href = `/login?next=${encodeURIComponent(location.pathname + location.search)}`; return; }
-        if (!response.ok) return done('This code has expired', 'Run leo login again for a new one.');
+        if (!response.ok) return done('This code has expired', 'Sign in again from your terminal (/login) for a new one.');
         const login: { device_name: string; status: string } = await response.json();
         if (login.status !== 'pending') return done('Already answered', 'This sign-in was already allowed or denied.');
         el('cli-title').textContent = `Allow L.E.O CLI on ${login.device_name}?`;
@@ -63,6 +68,7 @@ import '../styles/global.css';
           return;
         }
         el('cli-code').hidden = true;
+        if (terminal) { location.href = `${terminal}?status=${approve ? 'approved' : 'denied'}`; return; }
         approve ? done('L.E.O CLI is signed in', 'You can close this tab and go back to your terminal.') : done('Sign-in denied', 'The device did not get access.');
       }
       el('cli-allow').addEventListener('click', () => void answer(true));

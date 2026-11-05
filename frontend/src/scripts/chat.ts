@@ -1262,6 +1262,10 @@ el('open-settings').addEventListener('click', () => openSettings());
     if (failed) toast(failed === 'needs_client' ? 'This service needs a client ID: see the connector below' : failed === 'cancelled' ? 'Sign-in was cancelled' : 'Sign-in did not complete; see the connector below');
     else if (params.get('connected')) toast('Connector signed in');
   }
+  if (params.get('settings') === 'models') {  // From L.E.O CLI: "add a model on the website".
+    history.replaceState(null, '', location.pathname);
+    openSettings('tab-models');
+  }
   if (params.get('settings') === 'account') {
     const failed = params.get('error');
     history.replaceState(null, '', location.pathname);

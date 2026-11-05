@@ -382,6 +382,24 @@ class Store:
             db.execute(insert(routers).values(user_id=user_id, url=url, secret=self.cipher.encrypt(password.encode()).decode(),
                                               created_at=time.time()))
 
+    def connection_owners(self, base: str) -> set[str]:
+        """Users with a connection at `base…`."""
+        with self.engine.connect() as db:
+            rows = db.execute(select(connections.c.user_id, connections.c.config)).all()
+        return {uid for uid, config in rows if uid and (config.get("base_url", "") == base or config.get("base_url", "").startswith(base + "/"))}
+
+    def move_connections(self, user_id: str, old_base: str, new_base: str) -> int:
+        """Point a user's connections at `old_base…` to `new_base…` instead, keeping their keys; how many moved."""
+        moved = 0
+        with self.engine.begin() as db:
+            for row in db.execute(select(connections).where(connections.c.user_id == user_id)).mappings().all():
+                base = row["config"].get("base_url", "")
+                if base == old_base or base.startswith(old_base + "/"):
+                    config = {**row["config"], "base_url": new_base + base[len(old_base):]}
+                    db.execute(update(connections).where(connections.c.id == row["id"]).values(config=config, cooldown_until=0))
+                    moved += 1
+        return moved
+
     def get_user(self, user_id: str) -> dict | None:
         with self.engine.connect() as db:
             row = db.execute(select(users).where(users.c.id == user_id)).mappings().first()

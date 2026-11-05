@@ -1,4 +1,6 @@
 """L.E.O CLI's account against the real server app, in-process: device login, sync, usage reports, sign-out."""
+import asyncio
+import os
 import time
 import uuid
 
@@ -27,10 +29,17 @@ def server(tmp_path):
     store.save_router(user['id'], 'http://leo-router-a:20128', 'p' * 24)
     store.save_connection(Connection(name='Codex', base_url='http://leo-router-a:20128/v1', model='cx/gpt', free=True, api_key='sk-9r').model_dump(),
                           user_id=user['id'])
-    app = create_app(store.config, store)
+    seen = []
+
+    def router(request):  # The user's 9Router, which only the server can reach.
+        seen.append(request)
+        return httpx.Response(200, headers={'content-type': 'text/event-stream'},
+                              content=b'data: {"choices":[{"delta":{"content":"hi from codex"}}]}\n\ndata: [DONE]\n\n')
+
+    app = create_app(store.config, store, relay_transport=httpx.MockTransport(router))
     browser = TestClient(app)
     browser.cookies.set('leo_session', Auth(store, store.config).create_session(user['id']))
-    yield {'store': store, 'app': app, 'browser': browser, 'transport': httpx.ASGITransport(app=app)}
+    yield {'store': store, 'app': app, 'browser': browser, 'transport': httpx.ASGITransport(app=app), 'user': user, 'router_calls': seen}
     browser.close()
     store.engine.dispose()
 
@@ -47,22 +56,88 @@ async def no_wait(seconds):
 
 def approver(server, answer=True):
     def show(code, url):
-        assert url == f'http://testserver/cli?code={code}'
+        assert url.startswith(f'http://testserver/cli?code={code}&port=')
         assert server['browser'].post(f'/api/cli/device/{code}', json={'approve': answer}).status_code == 200
     return show
 
 
 async def test_login_syncs_models_keys_and_preferences(account, server):
     summary = await account.login('http://testserver', 'test-laptop', show=approver(server), sleep=no_wait)
-    assert summary == {'models': 2, 'chat_only': 1, 'username': 'ann'}
+    assert summary == {'models': 3, 'relayed': 1, 'username': 'ann'}
     store = account.store()
     synced = {c['model']: c for c in store.list_connections(account.user_id, private=True)}
-    assert set(synced) == {'m-free', 'm-strong'}, 'the 9Router model stays Chat only'
+    assert set(synced) == {'m-free', 'm-strong', 'cx/gpt'}
+    # The 9Router model is reached through the server, signed with the device token; the router key stays on the server.
+    assert synced['cx/gpt']['base_url'].startswith('http://testserver/api/cli/relay/')
+    assert store.decrypt(synced['cx/gpt']) == account.secrets.get('device-token')
     assert store.decrypt(synced['m-free']) == 'sk-or-1' and synced['m-free']['tools'] is True
     assert store.preferences()['planner_id'] == synced['m-strong']['id'], 'role choices follow the models to their local ids'
-    assert account.config()['chat_only'] == [{'name': 'Codex', 'model': 'cx/gpt'}]
-    assert (account.home / 'secrets.json').stat().st_mode & 0o777 == 0o600
-    assert 'sk-or-1' not in (account.home / 'leo.db').read_bytes().decode('latin-1'), 'keys are encrypted at rest'
+    if os.name != 'nt':  # Windows has no mode bits; the file sits in the user's own %APPDATA%.
+        assert (account.home / 'secrets.json').stat().st_mode & 0o777 == 0o600
+    database = (account.home / 'leo.db').read_bytes().decode('latin-1')
+    assert 'sk-or-1' not in database and 'sk-9r' not in database, 'keys are encrypted at rest; the router key never comes down'
+
+
+async def test_chatgpt_models_on_the_server_work_through_the_relay(account, server):
+    """A model call from the laptop goes to the server, which signs it with the router key and streams the answer back."""
+    from backend import providers
+    await account.login('http://testserver', show=approver(server), sleep=no_wait)
+    store = account.store()
+    codex = next(c for c in store.list_connections(account.user_id, private=True) if c['model'] == 'cx/gpt')
+    text = ''
+    async for chunk in providers.stream(codex, store.decrypt(codex), [{'role': 'user', 'content': 'hi'}], 100, 30, server['transport']):
+        text += chunk.text
+    assert text == 'hi from codex'
+    [call] = server['router_calls']
+    assert str(call.url) == 'http://leo-router-a:20128/v1/chat/completions' and call.headers['authorization'] == 'Bearer sk-9r'
+
+
+async def test_the_relay_only_reaches_the_users_own_router_and_only_for_model_calls(account, server):
+    await account.login('http://testserver', show=approver(server), sleep=no_wait)
+    token = account.secrets.get('device-token')
+    ids = {c['model']: c['id'] for c in server['store'].list_connections(server['user']['id'])}
+    async with httpx.AsyncClient(transport=server['transport'], base_url='http://testserver') as http:
+        signed = {'Authorization': f'Bearer {token}'}
+        assert (await http.post(f"/api/cli/relay/{ids['cx/gpt']}/chat/completions", json={})).status_code == 401, 'device token required'
+        assert (await http.post(f"/api/cli/relay/{ids['cx/gpt']}/v1/admin", json={}, headers=signed)).status_code == 404, 'model calls only'
+        assert (await http.post(f"/api/cli/relay/{ids['m-free']}/chat/completions", json={}, headers=signed)).status_code == 404,             'only models on the 9Router; others are called directly'
+        other = server['store'].create_user('bob', Auth.hash_password('bob-password'))
+        theirs = server['store'].save_connection(Connection(name='x', base_url='http://leo-router-a:20128/v1', model='cx/x').model_dump(),
+                                                 user_id=other['id'])
+        assert (await http.post(f"/api/cli/relay/{theirs['id']}/chat/completions", json={}, headers=signed)).status_code == 404
+    assert server['router_calls'] == []
+
+
+async def test_a_model_added_in_the_cli_is_saved_on_the_account(account, server):
+    await account.login('http://testserver', show=approver(server), sleep=no_wait)
+    await account.add_connection({'name': 'Groq · llama', 'base_url': 'https://api.groq.com/openai/v1', 'model': 'llama', 'api_key': 'gsk-1',
+                                  'free': True, 'tools': True})
+    on_server = {c['model']: c for c in server['store'].list_connections(server['user']['id'], private=True)}
+    assert server['store'].decrypt(on_server['llama']) == 'gsk-1', 'like Settings → Models: the website sees it too'
+    assert 'llama' in {c['model'] for c in account.store().list_connections(account.user_id)}, 'and it is synced down at once'
+
+
+async def test_the_browser_coming_back_ends_the_wait_at_once(account, server):
+    """After Allow, the page sends the browser to the terminal's listener on 127.0.0.1; no poll interval to wait out."""
+    pages, returns = [], []
+
+    async def never(seconds):
+        await asyncio.sleep(3600)
+
+    async def come_back(port):
+        reader, writer = await asyncio.open_connection('127.0.0.1', port)
+        writer.write(b'GET /callback?status=approved HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n')
+        pages.append(await reader.read())
+        writer.close()
+
+    def show(code, url):
+        assert server['browser'].post(f'/api/cli/device/{code}', json={'approve': True}).status_code == 200
+        returns.append(asyncio.ensure_future(come_back(int(url.rsplit('port=', 1)[1]))))
+
+    summary = await asyncio.wait_for(account.login('http://testserver', show=show, sleep=never), 10)
+    await returns[0]
+    assert summary['username'] == 'ann'
+    assert pages[0].startswith(b'HTTP/1.1 200') and b'L.E.O CLI is signed in' in pages[0]
 
 
 async def test_a_denied_login_saves_nothing(account, server):

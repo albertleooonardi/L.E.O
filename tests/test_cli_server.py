@@ -74,7 +74,7 @@ def test_a_device_token_only_opens_the_cli_endpoints(client, store):
     assert client.get('/api/cli/sync').status_code == 401
 
 
-def test_per_user_router_models_stay_chat_only(client, store):
+def test_per_user_router_models_are_relayed_without_their_key(client, store):
     store.save_router(store.user_id, 'http://leo-router-x:20128', 'p' * 24)
     store.save_connection(Connection(name='ChatGPT (Codex) · gpt-5', base_url='http://leo-router-x:20128/v1', model='cx/gpt-5', free=True,
                                      api_key='sk-9r').model_dump(), user_id=store.user_id)
@@ -83,7 +83,10 @@ def test_per_user_router_models_stay_chat_only(client, store):
     with anonymous(store) as cli:
         synced = cli.get('/api/cli/sync', headers={'Authorization': f'Bearer {token}'}).json()
     assert [c['model'] for c in synced['connections']] == ['test-model']
-    assert synced['chat_only'] == [{'name': 'ChatGPT (Codex) · gpt-5', 'model': 'cx/gpt-5'}]
+    [relayed] = synced['relayed']
+    # Called through /api/cli/relay/<id>: neither the router's address nor its key goes to the laptop.
+    assert relayed['model'] == 'cx/gpt-5' and 'base_url' not in relayed and 'api_key' not in relayed and 'secret' not in relayed
+    assert 'sk-9r' not in str(synced)
 
 
 def test_usage_reports_reach_the_usage_page(client, store):

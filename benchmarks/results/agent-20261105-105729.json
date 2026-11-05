@@ -1,0 +1,31 @@
+{
+  "started": "2026-11-05 10:58",
+  "results": [
+    {
+      "task": "build",
+      "workspace": "d7a48650-57b5-4892-9201-d670570fd96c",
+      "run": "d614e771-a12a-4e12-82eb-b0b253ae595f",
+      "status": "failed",
+      "error": "ChatGPT (Codex) \u00b7 gpt-5.6-terra-review: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-6-sol[1m]: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-5.6-sol[1m]: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-daybreak-blue-latest: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-6-astra[1m]: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-reserve: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-5.6-sol-review: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-6-sol: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-6-luna: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-5.6-sol: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-5.6-luna-review: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-5.6-luna: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 codex-auto-review: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-5.6-terra: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-6-astra: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-6-luna[1m]: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-6.1-terra: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-5.6-luna[1m]: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-6.1-sol: Cannot reach the provider; check its URL and that the server is running; ChatGPT (Codex) \u00b7 gpt-5.6-terra[1m]: Cannot reach the provider; check its URL and that the server is running",
+      "tests_passed": false,
+      "passed": false,
+      "problems": [],
+      "check_output": "\nno tests ran in 0.00s\nERROR: file or directory not found: tests\n\n",
+      "seconds": 79.0,
+      "worker_restarted": false,
+      "calls": 20,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "estimated_cost": 0.0,
+      "steps": 0,
+      "lead_steps": 0,
+      "subagents": 0,
+      "subagent_skills": [],
+      "compactions": 0,
+      "approvals": [],
+      "resumed": false,
+      "models": []
+    }
+  ],
+  "external": []
+}

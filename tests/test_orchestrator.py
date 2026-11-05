@@ -163,18 +163,32 @@ async def test_disabled_snapshot_connection_is_not_used(store):
 
 async def test_task_dependencies_and_synthesis(store):
     add_provider(store)
+    seen = []
     def handler(request):
         body = json.loads(request.content)
-        system = body['messages'][0]['content']
+        system, prompt = body['messages'][0]['content'], body['messages'][-1]['content']
+        seen.append(prompt)
         if 'execution plan' in system:
-            return sse_response('{"tasks": [{"instruction": "First", "depends_on": [], "skill": "general", "difficulty": "light"}, {"instruction": "Second", "depends_on": [1], "skill": "general", "difficulty": "light"}]}')
-        last = body['messages'][-1]['content']
-        if 'Your result is the final answer' in last:
-            return sse_response('Final answer from task 2')
-        return sse_response('Result from task 1')
+            return sse_response(json.dumps({'tasks': [
+                {'instruction': 'Define interface', 'depends_on': []},
+                {'instruction': 'Implement interface', 'depends_on': [1]},
+            ]}))
+        if 'Return only JSON' in system:
+            return sse_response('{"passed": true, "issues": []}')
+        if 'YOUR SUBTASK:\nDefine interface' in prompt:
+            return sse_response('INTERFACE_RESULT')
+        if 'YOUR SUBTASK:\nImplement interface' in prompt:
+            assert 'Task 1:\nINTERFACE_RESULT' in prompt and 'final answer the user sees' in prompt
+            return sse_response('IMPLEMENTATION_RESULT')
+        raise AssertionError('A chain of subtasks needs no synthesis call')
     result = await execute(store, make_run(store, mode='deep'), handler)
     assert result['status'] == 'completed'
-    assert 'Final answer from task 2' in result['output']
+    assert result['usage']['calls'] == 4, 'plan + 2 tasks + review; the last task is the answer'
+    assert result['output'] == 'IMPLEMENTATION_RESULT'
+    assert any('intermediate step' in p for p in seen), 'earlier tasks are asked to stay brief'
+    events = store.get_events(result['id'])
+    assert len([e for e in events if e['kind'] == 'task']) == 2
+    assert any(e['kind'] == 'token' and 'IMPLEMENTATION_RESULT' in e['data']['text'] for e in events), 'the final task streams as the answer'
 
 
 async def test_total_token_budget_blocks_excess_calls(store):
@@ -185,28 +199,52 @@ async def test_total_token_budget_blocks_excess_calls(store):
     assert 'token allowance' in result['error']
 
 
+def crash_after(store, run, completed, in_flight=None):
+    """Simulate a worker that checkpointed some stages, then lost its lease mid-call."""
+    claimed = store.claim('crashed-worker')
+    state = claimed['state']
+    state['completed'].update(completed)
+    store.checkpoint(run['id'], 'crashed-worker', state=state)
+    if in_flight:
+        store.add_call(dict(id=str(uuid.uuid4()), run_id=run['id'], stage=in_flight, provider='Local test', model='test-model',
+                            status='started', input_tokens=100, output_tokens=0, reserved_tokens=2148, reserved_cost=0,
+                            cost=0, estimated=True, created_at=time.time(), elapsed_ms=0))
+    with store.engine.begin() as db:
+        db.execute(update(runs).where(runs.c.id == run['id']).values(lease_until=0))
+
+
 async def test_deep_recovery_resumes_remaining_tasks_only(store):
     add_provider(store)
     run = make_run(store, mode='deep')
-    completed = []
+    plan = json.dumps({'tasks': [{'instruction': 'Define interface', 'depends_on': []},
+                                 {'instruction': 'Implement interface', 'depends_on': [1]}]})
+    crash_after(store, run, {'planning': plan, 'task_1': 'INTERFACE_RESULT'}, in_flight='task_2')
+    seen = []
     def handler(request):
         body = json.loads(request.content)
-        system = body['messages'][0]['content']
-        if 'execution plan' in system:
-            return sse_response('{"tasks": [{"instruction": "A", "depends_on": [], "skill": "general", "difficulty": "light"}, {"instruction": "B", "depends_on": [1], "skill": "general", "difficulty": "light"}]}')
-        completed.append(body)
-        if len(completed) == 1:
-            raise RuntimeError('worker dies after task 1')
-        return sse_response('Final from task 2')
+        system, prompt = body['messages'][0]['content'], body['messages'][-1]['content']
+        assert 'execution plan' not in system, 'Checkpointed plan must not be requested again'
+        assert 'YOUR SUBTASK:\nDefine interface' not in prompt, 'Checkpointed task must not run again'
+        if 'Return only JSON' in system:
+            seen.append('review')
+            return sse_response('{"passed": true, "issues": []}')
+        if 'YOUR SUBTASK:\nImplement interface' in prompt:
+            assert 'Task 1:\nINTERFACE_RESULT' in prompt
+            seen.append('task_2')
+            return sse_response('IMPLEMENTATION_RESULT')
+        seen.append('synthesis')
+        return sse_response('Final combined answer')
     result = await execute(store, run, handler)
-    assert result['status'] == 'failed'
-    # Recover: reset the run to queued so the worker can re-claim it
-    with store.engine.begin() as db:
-        from backend.store import runs
-        db.execute(update(runs).where(runs.c.id == run['id']).values(status="queued", phase="queued", lease_until=0, cancel_requested=False))
-    result2 = await execute(store, run, handler)
-    assert result2['status'] == 'completed'
-    assert len(completed) == 2
+    assert result['status'] == 'completed'
+    assert seen == ['task_2', 'review']
+    assert result['output'] == 'IMPLEMENTATION_RESULT'
+    ledger = store.call_rows(run['id'])
+    assert [c['status'] for c in ledger].count('interrupted') == 1
+    assert result['usage']['calls'] == 3 and result['usage']['uncertain_calls'] == 1
+    kinds = [e['kind'] for e in store.get_events(run['id'])]
+    assert 'plan' not in kinds, 'Replayed plan must not be republished'
+    assert [e['data']['id'] for e in store.get_events(run['id']) if e['kind'] == 'task'] == [2]
+    assert any('Resumed after a worker interruption' in e['data'].get('message', '') for e in store.get_events(run['id']) if e['kind'] == 'warning')
 
 
 async def test_reviewed_recovery_continues_repair_loop(store):
@@ -248,7 +286,7 @@ async def test_usage_report_shows_routing_per_model_and_context(store):
     add_provider(store)
     run = make_run(store)
     result = await execute(store, run, lambda r: sse_response('```python\ndef f():\n    return 1\n```'))
-    report = store.usage_report(store.user_id)
+    report = store.usage_report(user_id=store.user_id)
     assert report['totals']['calls'] >= 1
 
 
@@ -256,25 +294,27 @@ async def test_usage_report_counts_failed_calls_as_uncertain(store):
     add_provider(store)
     store.set_preferences({**store.preferences(), 'max_calls': 1})
     result = await execute(store, make_run(store), lambda r: sse_response('x'))
-    report = store.usage_report(store.user_id)
+    report = store.usage_report(user_id=store.user_id)
     assert report['totals']['calls'] >= 1
 
 
-async def test_usage_report_filters_to_one_conversation(store):
+async def test_usage_report_filters_to_one_conversation(client, store):
     add_provider(store)
-    run1 = make_run(store, conversation_id=str(uuid.uuid4()))
-    run2 = make_run(store, conversation_id=str(uuid.uuid4()))
-    result1 = await execute(store, run1, lambda r: sse_response('One'))
-    result2 = await execute(store, run2, lambda r: sse_response('Two'))
-    report = store.usage_report(run1['conversation_id'], store.user_id)
-    assert report['conversations'][0]['id'] == run1['conversation_id']
+    first, second = make_run(store), make_run(store, prompt='Second chat')
+    await execute(store, first, lambda r: sse_response('One'))
+    await execute(store, second, lambda r: sse_response('Two'))
+    report = client.get('/api/usage', params={'conversation_id': second['conversation_id']}).json()
+    assert [c['id'] for c in report['conversations']] == [second['conversation_id']]
+    assert report['totals']['calls'] == 1 and len(report['recent_calls']) == 1
+    assert report['models'][0]['roles'] == {'generator': 1}
+    assert client.get('/api/usage').json()['totals']['calls'] == 2
 
 
 async def test_usage_report_separates_running_calls(store):
     add_provider(store)
     run = make_run(store)
     result = await execute(store, run, lambda r: sse_response('x'))
-    report = store.usage_report(store.user_id)
+    report = store.usage_report(user_id=store.user_id)
     assert report['totals']['calls'] >= 1
 
 
@@ -284,20 +324,25 @@ async def test_usage_report_treats_started_calls_of_finished_runs_as_interrupted
     result = await execute(store, run, lambda r: sse_response('Done'))
     with store.engine.begin() as db:
         db.execute(update(runs).where(runs.c.id == run['id']).values(status='completed'))
-    report = store.usage_report(store.user_id)
+    report = store.usage_report(user_id=store.user_id)
     assert report['totals']['calls'] >= 1
 
 
 async def test_repeated_rate_limits_back_off_exponentially(store):
-    first = add_provider(store)
-    delays = []
-    def handler(request):
-        delays.append(time.monotonic())
-        if len(delays) < 3:
-            return httpx.Response(429, headers={'retry-after': '10'})
-        return sse_response('Finally')
-    result = await execute(store, make_run(store), handler)
-    assert result['output'] == 'Finally'
+    from backend import orchestrator
+    orchestrator._strikes.clear()
+    limited = add_provider(store)
+    store.save_connection(Connection(name='Backup', base_url='http://backup.test/v1', model='backup', free=True, priority=50).model_dump(), user_id=store.user_id)
+    handler = lambda r: httpx.Response(429, headers={'retry-after': '1'}) if r.url.host == 'local.test' else sse_response('ok')
+    cooldowns = []
+    for _ in range(3):
+        start = time.time()
+        await execute(store, make_run(store), handler)
+        cooldowns.append(round(store.get_connection(limited['id'])['cooldown_until'] - start))
+        store.cooldown(limited['id'], -1)  # Let the next run try it again.
+    assert [c // 10 for c in cooldowns] == [3, 6, 12], cooldowns
+    await execute(store, make_run(store), lambda r: sse_response('recovered'))
+    assert limited['id'] not in orchestrator._strikes, 'a success clears the strikes'
 
 
 async def test_reasoning_models_get_low_effort_on_simple_work(store):
@@ -316,7 +361,7 @@ async def test_usage_separates_actual_and_reserved_tokens(store):
     add_provider(store)
     run = make_run(store)
     result = await execute(store, run, lambda r: sse_response('Done'))
-    report = store.usage_report(store.user_id)
+    report = store.usage_report(user_id=store.user_id)
     assert report['totals']['calls'] >= 1
 
 

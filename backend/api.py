@@ -7,6 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from urllib.parse import urlencode
 
+import httpx
 from cryptography.fernet import InvalidToken
 from fastapi import FastAPI, HTTPException, Query, Request, Depends
 from fastapi.exceptions import RequestValidationError
@@ -53,12 +54,17 @@ PUBLIC_API_PATHS = {
     "/api/cli/token",
 }
 # Only these accept a L.E.O CLI device token (Authorization: Bearer), and nothing else does.
-CLI_DEVICE_PATHS = {"/api/cli/sync", "/api/cli/usage", "/api/cli/logout"}
+CLI_DEVICE_PATHS = {"/api/cli/sync", "/api/cli/usage", "/api/cli/logout", "/api/cli/connections"}
+# The CLI reaches models on the user's 9Router (on the server's network only) through the server: model calls only.
+CLI_RELAY_PREFIX = "/api/cli/relay/"
+RELAY_PATHS = {"chat/completions", "responses", "models"}
+MAX_RELAY_BYTES = 32 * 1024 * 1024
+LEGACY_ROUTER = "http://9router:20128"  # The shared 9router service of earlier versions (one per server, not per user).
 # OAuth start and callback check the session themselves when linking.
 PUBLIC_API_PREFIXES = ("/api/auth/oauth/",)
 
 
-def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=None):
+def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=None, relay_transport=None):
     config = config or Config()
     remote = [h for h in config.hosts if h.strip() not in LOCAL_HOSTS]
     if remote and not config.api_token:
@@ -111,8 +117,25 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
     # Model-account sign-in needs sandboxd, which runs each user's router.
     signins = SignIns(router_for, add_account_models) if sandbox else None
 
+    async def adopt_legacy_routers():
+        """Models signed in through the shared 9router of earlier versions move to the user's own router, which
+        sandboxd starts from a copy of the shared one (accounts and keys included). Retried at the next start if it fails."""
+        for uid in await run_in_threadpool(store.connection_owners, LEGACY_ROUTER):
+            try:
+                saved = store.get_router(uid)
+                if not saved:
+                    url = await sandbox.ensure_router(uid, config.legacy_router_password, adopt_legacy=True)
+                    store.save_router(uid, url, config.legacy_router_password)
+                    saved = {"url": url}
+                moved = store.move_connections(uid, LEGACY_ROUTER, saved["url"])
+                print(f"L.E.O.: moved {moved} models from the shared 9Router to the user's own ({saved['url']})")
+            except Exception as exc:  # sandboxd not ready yet, Docker down: try again next start.
+                print(f"L.E.O.: could not move models off the shared 9Router yet: {exc}")
+
     @asynccontextmanager
     async def lifespan(app):
+        if sandbox:
+            app.state.adopting = asyncio.create_task(adopt_legacy_routers())
         callback = None
         if signins and config.router9_callback_port:
             try:
@@ -120,6 +143,8 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
             except OSError as exc:  # Sign-in still works for device-code providers.
                 print(f"L.E.O.: ChatGPT (Codex) sign-in is off; port {config.router9_callback_port} is unavailable ({exc})")
         yield
+        if sandbox and not app.state.adopting.done():
+            app.state.adopting.cancel()
         if callback:
             callback.close()
         store.engine.dispose()
@@ -140,7 +165,8 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
 
             # Auth: session cookie or bearer token (LEO_API_TOKEN for admin/MCP). CORS preflights carry no credentials.
             public = request.url.path in PUBLIC_API_PATHS or request.url.path.startswith(PUBLIC_API_PREFIXES)
-            if request.url.path in CLI_DEVICE_PATHS and request.method != "OPTIONS":
+            device_path = request.url.path in CLI_DEVICE_PATHS or request.url.path.startswith(CLI_RELAY_PREFIX)
+            if device_path and request.method != "OPTIONS":
                 device = await run_in_threadpool(store.cli_device, request.headers.get("authorization", "").removeprefix("Bearer ").strip())
                 owner = device and await run_in_threadpool(store.get_user, device["user_id"])
                 if not owner:
@@ -803,16 +829,58 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
         """Everything the CLI needs to route on the laptop: models with their keys, preferences, and the skill catalog."""
         user, device = request.state.user, request.state.device
         router = store.get_router(user.id)
-        models, chat_only = [], []
+        models, relayed = [], []
         for c in store.list_connections(user.id, private=True):
             if not c["enabled"]:
                 continue
+            fields = {k: v for k, v in c.items() if k not in ("secret", "has_key", "cooldown_until")}
             if router and c["base_url"].startswith(router["url"]):
-                chat_only.append({"name": c["name"], "model": c["model"]})  # Per-user 9Router: reachable from the server only.
+                # Per-user 9Router: reachable from the server only, so the CLI calls it through /api/cli/relay/<id>,
+                # with its device token instead of the router key, which never leaves the server.
+                relayed.append({k: v for k, v in fields.items() if k != "base_url"})
                 continue
-            models.append({**{k: v for k, v in c.items() if k not in ("secret", "has_key", "cooldown_until")}, "api_key": store.decrypt(c) or None})
+            models.append({**fields, "api_key": store.decrypt(c) or None})
         return {"device": {"id": device["id"], "name": device["name"]}, "user": {"username": user.username},
-                "connections": models, "chat_only": chat_only, "preferences": store.preferences(), "skills": store.list_skills()}
+                "connections": models, "relayed": relayed, "chat_only": [], "preferences": store.preferences(), "skills": store.list_skills()}
+
+    @app.api_route(CLI_RELAY_PREFIX + "{connection_id}/{path:path}", methods=["GET", "POST"])
+    async def cli_relay(connection_id: str, path: str, request: Request):
+        """Forward one model call from the CLI to the user's own 9Router, streaming the answer back. Nothing is stored."""
+        uid = request.state.user.id
+        if path not in RELAY_PATHS:
+            raise HTTPException(404, "Only model calls are relayed")
+        router = store.get_router(uid)
+        c = store.get_connection(connection_id, uid, private=True)
+        if not c or not c["enabled"] or not router or not c["base_url"].startswith(router["url"]):
+            raise HTTPException(404, "This model is not on your 9Router; run leo sync")
+        body = await request.body()
+        if len(body) > MAX_RELAY_BYTES:
+            raise HTTPException(413, "The request is too large to relay")
+        client = httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10), trust_env=False, transport=relay_transport)
+        headers = {"Authorization": f"Bearer {store.decrypt(c)}", "Content-Type": request.headers.get("content-type", "application/json"),
+                   "Accept": request.headers.get("accept", "*/*")}
+        try:
+            upstream = await client.send(client.build_request(request.method, f"{c['base_url'].rstrip('/')}/{path}", content=body or None,
+                                                              headers=headers), stream=True)
+        except httpx.HTTPError as exc:
+            await client.aclose()
+            raise HTTPException(502, "Your 9Router is not reachable from the L.E.O. server") from exc
+
+        async def answer():
+            try:
+                async for chunk in upstream.aiter_bytes():  # Decoded: Content-Encoding is not passed on.
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
+        return StreamingResponse(answer(), status_code=upstream.status_code, media_type=upstream.headers.get("content-type"))
+
+    @app.post("/api/cli/connections", status_code=201)
+    def cli_add_connection(body: Connection, request: Request):
+        """A model added from the CLI is saved on the account, like one added in Settings → Models."""
+        saved = store.save_connection(body.model_dump(), user_id=request.state.user.id)
+        return {k: v for k, v in saved.items() if k != "secret"}
 
     @app.post("/api/cli/usage")
     def cli_usage(body: CliUsageInput, request: Request):

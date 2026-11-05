@@ -16,6 +16,7 @@ from .skills import Skills
 from .workspace import LocalWorkspace
 
 ACTIVE = {"queued", "running"}
+LEASE_WAIT = 40  # Seconds to wait for a closed window's 30-second claim on a run to expire.
 DECISIONS = {"once", "session", "project", "deny"}
 
 
@@ -124,11 +125,26 @@ class Sessions:
     def start(self, session):
         session.task = asyncio.create_task(self.drive(session))
 
-    async def drive(self, session):
+    async def drive(self, session, lease_wait=LEASE_WAIT):
+        waited = 0
         while True:
             claimed = await process_one(self.store, self.owner, self.transport, session.workspace, run_id=session.run_id)
-            if not claimed or session.status != "queued":
+            if claimed:
+                if session.status != "queued":
+                    break
+                continue
+            run = self.store.get_run(session.run_id, self.uid, True) if session.run_id else None
+            if not run or run["status"] != "running":
                 break
+            # A leo window that just closed still holds the run for up to 30 seconds; take it over when that runs out.
+            # A window that is still open keeps renewing it, so after a while this one stops trying.
+            if waited >= lease_wait:
+                self.notify(session, "This session is running in another leo window; follow it there.")
+                break
+            if waited == 0:
+                self.notify(session, "Waiting for the previous leo window to let go of this session…")
+            await asyncio.sleep(1)
+            waited += 1
         try:
             await self.account.report_usage()
         except Exception:  # Usage waits in the local store until the server is reachable.

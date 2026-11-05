@@ -166,6 +166,7 @@ class FakeDocker:
         self.calls, self.containers, self.archives = [], {}, []
         self.exec_specs, self.exec_starts, self.exit_code = [], [], 0
         self.images, self.pulls = {'decolua/9router:0.5.112', 'leo-sandbox:latest'}, []
+        self.volumes, self.specs, self.wait_code = set(), {}, 0
 
     def __call__(self, request):
         path, method = request.url.path, request.method
@@ -174,9 +175,17 @@ class FakeDocker:
             name = path.split('/')[2]
             return httpx.Response(200, json=self.containers[name]) if name in self.containers else httpx.Response(404, json={'message': 'no such container'})
         if path == '/volumes/create':
+            self.volumes.add(json.loads(request.content)['Name'])
             return httpx.Response(201, json={})
+        if method == 'GET' and path.startswith('/volumes/'):
+            return httpx.Response(200, json={}) if path.split('/')[2] in self.volumes else httpx.Response(404, json={'message': 'no such volume'})
+        if path.endswith('/wait'):
+            return httpx.Response(200, json={'StatusCode': self.wait_code})
+        if method == 'DELETE' and path.startswith('/containers/'):
+            return httpx.Response(204) if self.containers.pop(path.split('/')[2], None) else httpx.Response(404, json={'message': 'no such container'})
         if path == '/containers/create':
             self.spec = json.loads(request.content)
+            self.specs[request.url.params['name']] = self.spec
             if self.spec['Image'] not in self.images:
                 return httpx.Response(404, json={'message': f"No such image: {self.spec['Image']}"})
             self.containers[request.url.params['name']] = {'State': {'Running': False}, 'Config': {'Labels': self.spec.get('Labels', {})}}
@@ -262,7 +271,8 @@ UID = '0b1c2d3e-0000-4000-8000-0000000000aa'
 
 def test_sandboxd_runs_one_locked_down_router_per_user(sandboxd):
     client, docker = sandboxd
-    assert client.put(f'/routers/{UID}', json={'password': 'p' * 24}).json() == {'url': f'http://leo-router-{UID}:20128', 'status': 'running'}
+    assert client.put(f'/routers/{UID}', json={'password': 'p' * 24}).json() == {'url': f'http://leo-router-{UID}:20128', 'status': 'running',
+                                                                                   'adopted': False}
     spec, host = docker.spec, docker.spec['HostConfig']
     assert spec['Image'] == 'decolua/9router:0.5.112' and 'INITIAL_PASSWORD=' + 'p' * 24 in spec['Env'] and spec['Labels'] == {'leo.router': UID}
     assert host['NetworkMode'] == 'leo-routers' and host['CapDrop'] == ['ALL'] and host['SecurityOpt'] == ['no-new-privileges']
@@ -276,6 +286,37 @@ def test_sandboxd_runs_one_locked_down_router_per_user(sandboxd):
     assert client.delete(f'/routers/{UID}').json() == {'ok': True}
     assert ('DELETE', f'/containers/leo-router-{UID}') in docker.calls
     assert not any(path.startswith('/volumes/') and method == 'DELETE' for method, path in docker.calls), 'accounts stay in the volume'
+
+
+def test_sandboxd_starts_a_new_router_from_a_copy_of_the_old_shared_one(monkeypatch):
+    monkeypatch.setenv('LEO_SANDBOX_TOKEN', 'secret-token')
+    monkeypatch.setenv('LEO_LEGACY_ROUTER_VOLUME', 'leo_9router-data')
+    docker = FakeDocker()
+    docker.volumes.add('leo_9router-data')
+    with TestClient(create_app(Settings(), httpx.MockTransport(docker))) as client:
+        client.headers['Authorization'] = 'Bearer secret-token'
+        assert client.put(f'/routers/{UID}', json={'password': 'p' * 24, 'adopt_legacy': True}).json()['adopted'] is True
+        copy = docker.specs[f'leo-router-{UID}-adopt']
+        host = copy['HostConfig']
+        # Read-only from the one configured volume, into the new router's volume, with no network; then removed.
+        assert host['Mounts'] == [{'Type': 'volume', 'Source': 'leo_9router-data', 'Target': '/from', 'ReadOnly': True},
+                                  {'Type': 'volume', 'Source': f'leo-router-{UID}', 'Target': '/to'}]
+        assert host['NetworkMode'] == 'none' and host['CapDrop'] == ['ALL'] and copy['Cmd'] == ['cp -a /from/. /to/']
+        assert f'leo-router-{UID}-adopt' not in docker.containers
+        calls = docker.calls
+        assert calls.index(('POST', f'/containers/leo-router-{UID}-adopt/wait')) < calls.index(('POST', f'/containers/leo-router-{UID}/start'))
+        # Only a router's first start copies: an existing one is just started.
+        assert client.put(f'/routers/{UID}', json={'password': 'p' * 24, 'adopt_legacy': True}).json()['adopted'] is False
+        # A failed copy fails the request, so the API keeps the models where they are and tries again later.
+        docker.wait_code = 1
+        other = '0b1c2d3e-0000-4000-8000-0000000000cc'
+        assert client.put(f'/routers/{other}', json={'password': 'p' * 24, 'adopt_legacy': True}).status_code == 500
+
+
+def test_sandboxd_adopts_nothing_without_the_old_volume(sandboxd):
+    client, docker = sandboxd
+    assert client.put(f'/routers/{UID}', json={'password': 'p' * 24, 'adopt_legacy': True}).json()['adopted'] is False
+    assert f'leo-router-{UID}-adopt' not in docker.specs
 
 
 def test_sandboxd_pulls_the_router_image_once_and_leaves_foreign_containers_alone(sandboxd):

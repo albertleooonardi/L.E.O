@@ -61,6 +61,9 @@ class Settings:
         # Reachable by the API and worker, with internet access for the providers the router signs in to.
         self.router_network = os.getenv("LEO_ROUTER_NETWORK", "leo-routers")
         self.router_memory = _bytes(os.getenv("LEO_ROUTER_MEMORY", "512m"))
+        # The volume of the shared 9router service from before each user had their own; a user's first router can
+        # start from a copy of it, keeping the accounts and keys their models use. Empty: nothing to adopt.
+        self.legacy_router_volume = os.getenv("LEO_LEGACY_ROUTER_VOLUME", "")
 
 
 class DockerError(Exception):
@@ -152,6 +155,7 @@ class Docker:
 
 class RouterInput(BaseModel):
     password: str = Field(min_length=16, max_length=200, repr=False)
+    adopt_legacy: bool = False  # Start a new router from a copy of the old shared one (LEO_LEGACY_ROUTER_VOLUME).
 
 
 class ExecInput(BaseModel):
@@ -342,12 +346,15 @@ def create_app(settings=None, docker_transport=None):
     async def ensure_router(uid: str, body: RouterInput):
         """Create or start the user's 9Router. Its volume keeps signed-in accounts; the password applies on first start."""
         name = router_name(uid)
+        adopted = False
         async with locks.setdefault(name, asyncio.Lock()):
             info = await docker.inspect(name)
             if info and (info.get("Config", {}).get("Labels") or {}).get(ROUTER_LABEL) != uid:
                 raise HTTPException(409, f"{name} exists but was not created by sandboxd")
             if info is None:
                 await docker.request("POST", "/volumes/create", json={"Name": name, "Labels": {ROUTER_LABEL: uid}})
+                if body.adopt_legacy:
+                    adopted = await adopt_legacy(name)
                 spec = {"Image": settings.router_image, "Hostname": "router", "Labels": {ROUTER_LABEL: uid},
                         "Env": ["DATA_DIR=/app/data", f"INITIAL_PASSWORD={body.password}"],
                         "HostConfig": {"Mounts": [{"Type": "volume", "Source": name, "Target": "/app/data"}],
@@ -370,7 +377,45 @@ def create_app(settings=None, docker_transport=None):
                 info = await docker.inspect(name)
             if not info["State"]["Running"]:
                 await docker.request("POST", f"/containers/{name}/start", ok=(304,))
-        return {"url": f"http://{name}:{ROUTER_PORT}", "status": "running"}
+        return {"url": f"http://{name}:{ROUTER_PORT}", "status": "running", "adopted": adopted}
+
+    async def adopt_legacy(volume):
+        """Copy the old shared router's data into a new router's volume (before its first start); False if there is none.
+
+        Only the one configured volume can be copied, read-only, by a throwaway container with no network."""
+        legacy = settings.legacy_router_volume
+        if not legacy:
+            return False
+        try:
+            await docker.request("GET", f"/volumes/{legacy}")
+        except DockerError as exc:
+            if exc.status == 404:
+                return False
+            raise
+        spec = {"Image": settings.router_image, "Entrypoint": ["sh", "-c"], "Cmd": ["cp -a /from/. /to/"], "User": "0:0",
+                "Labels": {ROUTER_LABEL: "adopt"},
+                "HostConfig": {"Mounts": [{"Type": "volume", "Source": legacy, "Target": "/from", "ReadOnly": True},
+                                          {"Type": "volume", "Source": volume, "Target": "/to"}],
+                               "NetworkMode": "none", "CapDrop": ["ALL"], "CapAdd": ["CHOWN", "DAC_OVERRIDE", "FOWNER"],
+                               "SecurityOpt": ["no-new-privileges"], "PidsLimit": 64}}
+        helper = f"{volume}-adopt"
+        await docker.request("DELETE", f"/containers/{helper}", ok=(404,), params={"force": "true"})  # Left by a crash.
+        for attempt in range(2):
+            try:
+                await docker.request("POST", "/containers/create", params={"name": helper}, json=spec)
+                break
+            except DockerError as exc:
+                if exc.status != 404 or attempt:
+                    raise
+                await pull(settings.router_image)
+        try:
+            await docker.request("POST", f"/containers/{helper}/start")
+            code = (await docker.request("POST", f"/containers/{helper}/wait", timeout=600)).json().get("StatusCode")
+        finally:
+            await docker.request("DELETE", f"/containers/{helper}", ok=(404,), params={"force": "true"})
+        if code != 0:
+            raise HTTPException(500, f"Copying the old 9Router data failed (exit {code})")
+        return True
 
     @app.delete("/routers/{uid}")
     async def stop_router(uid: str):

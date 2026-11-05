@@ -102,6 +102,8 @@ services:
       # Set to runsc after installing gVisor for stronger isolation between sandboxes and the host.
       LEO_SANDBOX_RUNTIME: ${LEO_SANDBOX_RUNTIME:-}
       LEO_ROUTER_NETWORK: leo-routers
+      # Data of the shared 9router service of earlier versions; users whose models still use it get their own copy.
+      LEO_LEGACY_ROUTER_VOLUME: ${LEO_LEGACY_ROUTER_VOLUME:-leo_9router-data}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

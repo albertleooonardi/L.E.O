@@ -1,6 +1,7 @@
 """LocalWorkspace, the permission policy, and agent skills: the parts of L.E.O CLI that act on the user's machine."""
 import asyncio
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -37,7 +38,10 @@ async def test_files_round_trip_and_listing_skips_noise(project):
 async def test_paths_cannot_leave_the_project(project, tmp_path):
     box = LocalWorkspace(project)
     (tmp_path / 'secret.txt').write_text('keys')
-    (project / 'escape').symlink_to(tmp_path)
+    try:
+        (project / 'escape').symlink_to(tmp_path, target_is_directory=True)
+    except OSError:
+        pytest.skip('creating symlinks needs Developer Mode or admin rights on Windows')
     for path in ('../secret.txt', str(tmp_path / 'secret.txt'), 'escape/secret.txt'):
         with pytest.raises(SandboxError, match='inside'):
             await box.read_file('s', path)
@@ -48,9 +52,10 @@ async def test_paths_cannot_leave_the_project(project, tmp_path):
 
 async def test_commands_run_in_the_project_and_report_their_exit(project):
     box = LocalWorkspace(project)
-    result = await box.exec('s', 'pwd; echo oops >&2; exit 3', 10)
+    python = Path(sys.executable).as_posix()
+    result = await box.exec('s', f'"{python}" -c "import os; print(os.getcwd())"; echo oops >&2; exit 3', 10)
     assert result['exit_code'] == 3 and os.path.realpath(project) in result['output'] and 'oops' in result['output']
-    long = await box.exec('s', 'python3 -c "print(\'x\' * 5000)"', 10, max_output=1000)
+    long = await box.exec('s', f'"{python}" -c "print(\'x\' * 5000)"', 10, max_output=1000)
     assert long['truncated'] and 'characters omitted' in long['output']
 
 

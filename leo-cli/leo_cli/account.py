@@ -21,6 +21,11 @@ from backend.store import Store, calls, runs
 
 SERVICE = "leo-cli"
 LOCAL_USER = "local"
+# What the browser shows when the sign-in page sends it back to the terminal.
+RETURN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>L.E.O CLI</title><style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#151515;color:#ececec;
+font:16px/1.5 system-ui,sans-serif}}main{{padding:24px;max-width:420px}}h1{{font-size:22px;margin:0 0 8px}}p{{margin:0;color:#a3a3a3}}</style>
+</head><body><main><h1>{title}</h1><p>{text}</p></main></body></html>"""
 
 
 class AccountError(Exception):
@@ -147,30 +152,71 @@ class Account:
     # -- sign in ----------------------------------------------------------------
 
     async def login(self, server, device_name=None, show=print, sleep=asyncio.sleep):
-        """Device-code sign-in: `show(user_code, url)` tells the user where to approve; returns the sync summary."""
+        """Browser sign-in: `show(user_code, url)` sends the user to the server's sign-in page; returns the sync summary.
+
+        The page asks the user to sign in or register (password or OAuth) and to allow this device, then sends the
+        browser back to a listener on 127.0.0.1 so the terminal carries on at once. The redirect carries no secret: the
+        token is fetched with the device code, which never leaves this process, so polling alone also works (SSH, or
+        a browser on another computer)."""
         server = server.rstrip("/")
         name = (device_name or f"{socket.gethostname()} ({platform.system()})")[:80]
-        async with httpx.AsyncClient(base_url=server, timeout=30, transport=self.transport) as http:
-            try:
-                started = (await http.post("/api/cli/device", json={"device_name": name})).raise_for_status().json()
-            except httpx.HTTPStatusError as exc:
-                raise AccountError(f"The server refused to start a sign-in (HTTP {exc.response.status_code})") from exc
-            except httpx.HTTPError as exc:
-                raise AccountError(f"Cannot reach {server}: {type(exc).__name__}") from exc
-            show(started["user_code"], started["verification_url"])
-            deadline = time.monotonic() + started["expires_in"]
-            while time.monotonic() < deadline:
-                await sleep(started["interval"])
-                answer = (await http.post("/api/cli/token", json={"device_code": started["device_code"]})).json()
-                if answer["status"] == "approved":
-                    break
-                if answer["status"] in ("denied", "expired"):
-                    raise AccountError("The sign-in was denied" if answer["status"] == "denied" else "The sign-in code expired; run leo login again")
-            else:
-                raise AccountError("The sign-in code expired; run leo login again")
+        returned = asyncio.Event()
+        listener = await self._listen(returned)
+        try:
+            async with httpx.AsyncClient(base_url=server, timeout=30, transport=self.transport) as http:
+                try:
+                    started = (await http.post("/api/cli/device", json={"device_name": name})).raise_for_status().json()
+                except httpx.HTTPStatusError as exc:
+                    raise AccountError(f"The server refused to start a sign-in (HTTP {exc.response.status_code})") from exc
+                except httpx.HTTPError as exc:
+                    raise AccountError(f"Cannot reach {server}: {type(exc).__name__}") from exc
+                url = started["verification_url"]
+                if listener:
+                    url += f"&port={listener.sockets[0].getsockname()[1]}"
+                show(started["user_code"], url)
+                deadline = time.monotonic() + started["expires_in"]
+                while time.monotonic() < deadline:
+                    pause, back = asyncio.ensure_future(sleep(started["interval"])), asyncio.ensure_future(returned.wait())
+                    await asyncio.wait({pause, back}, return_when=asyncio.FIRST_COMPLETED)
+                    pause.cancel(), back.cancel()
+                    returned.clear()
+                    answer = (await http.post("/api/cli/token", json={"device_code": started["device_code"]})).json()
+                    if answer["status"] == "approved":
+                        break
+                    if answer["status"] in ("denied", "expired"):
+                        raise AccountError("The sign-in was denied" if answer["status"] == "denied" else "The sign-in expired; try again")
+                else:
+                    raise AccountError("The sign-in expired; try again")
+        finally:
+            if listener:
+                listener.close()
         self.secrets.set("device-token", answer["token"])
         self.save(server=server, device_name=name)
         return await self.sync()
+
+    async def _listen(self, returned):
+        """A one-page HTTP listener on 127.0.0.1 for the browser's return; None if it cannot start (then polling only)."""
+        async def answer(reader, writer):
+            try:
+                request = (await asyncio.wait_for(reader.readline(), 5)).decode("latin-1")
+                denied = "status=denied" in request
+                page = RETURN_PAGE.format(title="Sign-in denied" if denied else "L.E.O CLI is signed in",
+                                          text="The device did not get access." if denied else "You can close this tab and go back to your terminal.")
+                body = page.encode()
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n"
+                             + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
+                await writer.drain()
+                if request.startswith("GET /callback"):
+                    returned.set()
+            except (OSError, asyncio.TimeoutError):
+                pass
+            finally:
+                writer.close()
+
+        try:
+            return await asyncio.start_server(answer, "127.0.0.1", 0)
+        except OSError:
+            return None
 
     async def sync(self):
         """Replace the local models, preferences, and skill catalog with the server's."""
@@ -196,12 +242,38 @@ class Account:
             fields = {k: v for k, v in item.items() if k in known and k not in ("api_key", "key_from")}
             saved = store.save_connection(Connection(**fields, api_key=item.get("api_key")).model_dump(), user_id=uid)
             ids[item["id"]] = saved["id"]
+        relayed = data.get("relayed", [])
+        for item in relayed:
+            # Models on the user's 9Router, which only the server reaches: called through the server's relay, signed
+            # with this device's token (the router key stays on the server).
+            fields = {k: v for k, v in item.items() if k in known and k not in ("api_key", "key_from", "base_url")}
+            saved = store.save_connection(Connection(**fields, base_url=f"{self.server}/api/cli/relay/{item['id']}", api_key=token).model_dump(),
+                                          user_id=uid)
+            ids[item["id"]] = saved["id"]
         preferences = dict(data["preferences"])
         for role in ("generator_id", "planner_id", "reviewer_id"):
             preferences[role] = ids.get(preferences.get(role))
         store.set_preferences(preferences)
-        self.save(username=data["user"]["username"], device_name=data["device"]["name"], synced_at=time.time(), chat_only=data["chat_only"])
-        return {"models": len(data["connections"]), "chat_only": len(data["chat_only"]), "username": data["user"]["username"]}
+        self.save(username=data["user"]["username"], device_name=data["device"]["name"], synced_at=time.time(), relayed=len(relayed))
+        return {"models": len(data["connections"]) + len(relayed), "relayed": len(relayed), "username": data["user"]["username"]}
+
+    async def add_connection(self, connection):
+        """Save a model on the account (as Settings → Models does), then sync it down."""
+        token = self.secrets.get("device-token")
+        if not token:
+            raise SignedOut()
+        async with self.client(token) as http:
+            try:
+                response = await http.post("/api/cli/connections", json=connection)
+            except httpx.HTTPError as exc:
+                raise AccountError(f"Cannot reach {self.server}: {type(exc).__name__}") from exc
+        if response.status_code == 401:
+            raise SignedOut()
+        if not response.is_success:
+            detail = response.json().get("detail") if response.headers.get("content-type", "").startswith("application/json") else None
+            raise AccountError(f"The server did not save the model: {detail or response.status_code}")
+        await self.sync()
+        return response.json()
 
     async def logout(self):
         token = self.secrets.get("device-token")

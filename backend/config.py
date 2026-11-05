@@ -32,6 +32,8 @@ class Config:
     oidc_name: str = field(default_factory=lambda: os.getenv("LEO_OIDC_NAME", "") or "Single sign-on")
     # Where the API listens for the ChatGPT (Codex) sign-in redirect; OpenAI only accepts localhost:1455.
     router9_callback_port: int = field(default_factory=lambda: int(os.getenv("LEO_9ROUTER_CALLBACK_PORT", "1455")))
+    # Password of the shared 9router service of earlier versions, which a user's adopted copy keeps.
+    legacy_router_password: str = field(default_factory=lambda: os.getenv("LEO_9ROUTER_PASSWORD", "leo-local-development"), repr=False)
     # Connectors (remote MCP servers) must be HTTPS on public addresses; this allows http:// and private networks too,
     # for self-hosted MCP servers.
     mcp_allow_private: bool = field(default_factory=lambda: os.getenv("LEO_MCP_ALLOW_PRIVATE", "").lower() in {"1", "true", "yes"})

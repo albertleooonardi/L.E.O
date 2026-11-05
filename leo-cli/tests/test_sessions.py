@@ -2,6 +2,7 @@
 import asyncio
 import json
 import subprocess
+from pathlib import Path
 
 import httpx
 import pytest
@@ -157,11 +158,11 @@ async def test_a_worktree_session_works_on_its_own_branch(account, project):
     subprocess.run(['git', '-C', str(project), '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'start'], check=True)
     sessions = Sessions(account, project, autorun=True, transport=Model(writes_hello).transport)
     isolated = await sessions.open(worktree=True)
-    assert isolated.branch.startswith('leo/session-1-') and '.leo-cli/worktrees/' in isolated.root
+    assert isolated.branch.startswith('leo/session-1-') and '.leo-cli/worktrees/' in Path(isolated.root).as_posix()
     await sessions.send(isolated, 'Create hello.txt')
     await settle(isolated)
     assert (project / '.leo-cli' / 'worktrees').exists() and not (project / 'hello.txt').exists()
-    assert (await_path := __import__('pathlib').Path(isolated.root) / 'hello.txt').read_text() == 'hi from leo\n'
+    assert (Path(isolated.root) / 'hello.txt').read_text() == 'hi from leo\n'
     assert sessions.history()[0]['id'] == isolated.id
 
 

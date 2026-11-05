@@ -5,23 +5,64 @@ inside the project folder (paths are resolved through symlinks first), and the p
 without asking.
 """
 import asyncio
+import functools
 import os
 import platform
+import shutil
 import signal
 import stat
+import subprocess
 from pathlib import Path
 
 from backend.sandbox import SandboxError
 
 SKIP = {".git", "node_modules", "__pycache__", ".venv", "venv", ".leo-cli"}
 KEEP = 4_000_000  # Bytes of command output kept before the middle is dropped.
+WINDOWS = platform.system() == "Windows"
+
+
+@functools.cache
+def find_bash():
+    """The bash that runs agent commands. On Windows that is Git Bash: the `bash` on PATH there is often the WSL
+    launcher, which would run commands in a different Linux system with its own files and tools."""
+    if not WINDOWS:
+        return shutil.which("bash") or "/bin/bash"
+    candidates = [os.getenv("LEO_CLI_BASH")]
+    git = shutil.which("git")
+    if git:  # ...\Git\cmd\git.exe or ...\Git\mingw64\bin\git.exe
+        install = Path(git).resolve().parents[1 if Path(git).parent.name == "cmd" else 2]
+        candidates.append(str(install / "bin" / "bash.exe"))
+    for base in (os.getenv("ProgramFiles"), os.getenv("ProgramFiles(x86)"), os.path.join(os.getenv("LOCALAPPDATA", ""), "Programs")):
+        if base:
+            candidates.append(os.path.join(base, "Git", "bin", "bash.exe"))
+    found = shutil.which("bash")
+    if found and "windowsapps" not in found.lower() and "system32" not in found.lower():
+        candidates.append(found)
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    raise SandboxError("L.E.O CLI runs commands with bash; install Git for Windows (it includes Git Bash), "
+                       "or set LEO_CLI_BASH to a bash.exe")
 
 
 def environment():
     system = {"Darwin": "macOS"}.get(platform.system(), platform.system())
-    return (f"Environment: the user's own computer ({system}, {platform.machine()}), as the user, with the tools installed there. "
+    shell = (" Commands run in Git Bash: use Unix commands and forward slashes; C:\\ is /c/ there. Prefer `python` over `python3`."
+             if WINDOWS else "")
+    return (f"Environment: the user's own computer ({system}, {platform.machine()}), as the user, with the tools installed there.{shell} "
             "There is no sandbox: changes are real. Edits and commands may need the user's approval first; if one is declined, "
             "continue another way or ask the user.")
+
+
+def kill_tree(pid):
+    """Stop a command and everything it started: its process group on Unix, its process tree on Windows."""
+    try:
+        if WINDOWS:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        else:
+            os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
 
 
 class LocalWorkspace:
@@ -49,8 +90,10 @@ class LocalWorkspace:
 
         Not a login shell: `leo` was started from the user's shell, so PATH and the rest are already right, and profile
         scripts would print their noise into every result."""
-        process = await asyncio.create_subprocess_exec("bash", "-c", command, cwd=self.resolve(cwd or "."), stdin=asyncio.subprocess.DEVNULL,
-                                                       stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+        # Its own session (Unix) or process group (Windows), so a timeout can stop the whole tree.
+        detach = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {"start_new_session": True}
+        process = await asyncio.create_subprocess_exec(find_bash(), "-c", command, cwd=self.resolve(cwd or "."), stdin=asyncio.subprocess.DEVNULL,
+                                                       stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **detach)
         output = bytearray()
 
         async def collect():  # Read as it comes, so a command that times out still shows what it printed.
@@ -64,10 +107,7 @@ class LocalWorkspace:
             await asyncio.wait_for(process.wait(), timeout)
         except asyncio.TimeoutError:
             timed_out = True
-            try:
-                os.killpg(process.pid, signal.SIGKILL)  # Its own session, so background children go too.
-            except ProcessLookupError:
-                pass
+            await asyncio.to_thread(kill_tree, process.pid)  # Background children go too.
             await process.wait()
         try:
             await asyncio.wait_for(reader, 2)  # A background child may still hold the pipe; never wait on it for long.
@@ -117,7 +157,7 @@ class LocalWorkspace:
                 if child.name in SKIP:
                     continue
                 directory = child.is_dir() and not child.is_symlink()
-                entries.append({"path": os.path.relpath(child, self.root), "type": "dir" if directory else "file",
+                entries.append({"path": Path(os.path.relpath(child, self.root)).as_posix(), "type": "dir" if directory else "file",
                                 "size": 0 if directory else child.lstat().st_size})
                 if directory and level < depth:
                     walk(child, level + 1)
