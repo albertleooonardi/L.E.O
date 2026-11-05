@@ -33,6 +33,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts.choice_input import ChoiceInput
 from prompt_toolkit.styles import DynamicStyle
+from prompt_toolkit.utils import get_cwidth
 from rich import box
 from rich.console import Console, Group
 from rich.markdown import Markdown
@@ -45,11 +46,13 @@ from rich.text import Text
 
 from . import theme
 from .account import AccountError
+from .policy import compound
 
 TERMINAL = {"completed", "failed", "cancelled"}
 INTERRUPTED = "\0interrupted"  # The prompt was closed to show an approval question.
 CHOICES = {"y": "once", "s": "session", "p": "project", "n": "deny"}
 ANSWERS = {"once": "yes", "session": "yes, this session", "project": "yes, always in this project", "deny": "no"}
+SHORT_ANSWERS = {"once": "yes", "session": "session", "project": "project", "deny": "no"}  # For a narrow terminal.
 HELP = [
     ("Sessions", [("/new [--worktree]", "start another session (in its own git worktree with --worktree)"),
                   ("/sessions", "list sessions in this window"), ("/switch N", "show session N"),
@@ -95,6 +98,16 @@ def clip(text, limit):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+def clip_left(text, limit):
+    """Text that keeps its end when it is too long, for paths: the folder name matters more than where it lives."""
+    text = str(text)
+    return text if len(text) <= limit else "…" + text[len(text) - limit + 1:]
+
+
+def plural(count, word, many=None):
+    return f"{count} {word if count == 1 else many or word + 's'}"
+
+
 def tokens(n):
     return f"{n / 1000:.1f}K" if n >= 1000 else str(n)
 
@@ -126,8 +139,8 @@ def home_path(path):
 def suggested_prefix(command):
     """What to remember for "allow commands like this": the program and its subcommand, e.g. `npm test` or `pytest`."""
     words = command.strip().split()
-    if not words:
-        return command
+    if not words or compound(command):
+        return command.strip()  # Chained commands are remembered exactly as approved.
     keep = words[:2] if len(words) > 1 and not words[1].startswith(("-", "/", ".", "'", '"')) and "=" not in words[1] else words[:1]
     return " ".join(keep)
 
@@ -150,6 +163,7 @@ class Renderer:
         self.model = None
         self.started = None  # When the current turn's first event arrived, for the elapsed time at the end.
         self.activity = None  # The latest tool call, for the status bar.
+        self.parallel = {}  # agent -> how many tool calls its latest step made: their results then say which call they belong to.
 
     def event(self, kind, data):
         for item in self.render(kind, data):
@@ -166,6 +180,7 @@ class Renderer:
 
     def reset(self):
         self.model = self.started = self.activity = None
+        self.parallel = {}
 
     def short(self, value):
         """Paths inside the project as relative paths: the agent needs them absolute, a reader does not."""
@@ -210,9 +225,13 @@ class Renderer:
         if agent == "main" and data.get("text") and data.get("tools"):
             # Thinking out loud between tool calls, a step back from the answer; the final answer comes with done.
             out.append(Padding(Markdown(data["text"], code_theme=theme.code(), style="leo.muted"), (0, 0, 0, 2)))
-        for call in data.get("tools") or []:
+        calls = data.get("tools") or []
+        self.parallel[agent] = sum(1 for call in calls if call["name"] != "todo_write")
+        for call in calls:
             summary = f"({clip(call['summary'], 100)})" if call.get("summary") else ""
             self.activity = call["name"] + summary
+            if call["name"] == "todo_write":
+                continue  # The plan itself is shown by its todos event.
             line = self.step_prefix(agent)
             line.append(f"{self.g.dot} ", style="leo.lead" if agent == "main" else "leo.accent")
             line.append(call["name"], style="bold")
@@ -222,22 +241,32 @@ class Renderer:
 
     def on_agent_tool(self, data):
         output = str(data.get("output") or "")
-        lines = output.splitlines()
-        prefix = self.result_prefix(data.get("agent") or "main")
-        hook = self.g.hook
+        lines, name, agent = output.splitlines(), data.get("name"), data.get("agent") or "main"
+        if name == "todo_write" and data.get("ok"):
+            return []  # The plan was just shown.
+        prefix = self.result_prefix(agent)
+        hook = f"{self.g.hook} "
+        if self.parallel.get(agent, 0) > 1:  # Several calls ran at once: say which one this result is for.
+            label = data.get("summary") if len(data.get("summary") or "") > 1 else name  # "list_files" says more than ".".
+            hook += f"{clip(label, 40)} {self.g.sep} "
         if not data.get("ok"):
-            return [prefix + Text(f"{hook} {self.g.fail} {clip(output, 160)}", style="leo.error")]
-        if data.get("name") == "bash" and lines:
+            return [prefix + Text(f"{hook}{self.g.fail} {clip(output, 160)}", style="leo.error")]
+        if name == "bash" and lines:
             body = [l for l in lines[1:] if l.strip() and l.strip() != "(no output)"]
             failed = not lines[0].startswith("exit code 0")
-            note = lines[0] + (f" {self.g.sep} {len(body)} line{'s' if len(body) != 1 else ''} of output" if body else "")
-            out = [prefix + (Text(f"{hook} {self.g.fail} {note}", style="leo.warn") if failed else Text(f"{hook} {note}", style="leo.muted"))]
-            for line in body[-5:] if failed else []:
+            note = lines[0] + (f" {self.g.sep} {plural(len(body), 'line')} of output" if body else "")
+            out = [prefix + (Text(f"{hook}{self.g.fail} {note}", style="leo.warn") if failed else Text(f"{hook}{note}", style="leo.muted"))]
+            shown = body[-6:] if failed else body[-3:]  # The end of the output says how it went.
+            for line in shown:
                 out.append(prefix + Text(f"    {clip(line, 160)}", style="leo.muted"))
             return out
-        if data.get("name") == "read_file":
-            return [prefix + Text(f"{hook} {len(lines)} lines", style="leo.muted")]
-        return [prefix + Text(f"{hook} {clip(lines[0] if lines else 'done', 140)}", style="leo.muted")]
+        if name == "read_file":
+            read = [l for l in lines if l[:1].isdigit()]
+            return [prefix + Text(f"{hook}{plural(len(read), 'line') if read else clip(output, 140)}", style="leo.muted")]
+        if name == "list_files" and len(lines) > 1:
+            entries = [l for l in lines if not l.startswith("…")]
+            return [prefix + Text(f"{hook}{plural(len(entries), 'entry', 'entries')}", style="leo.muted")]
+        return [prefix + Text(f"{hook}{clip(lines[0] if lines else 'done', 140)}", style="leo.muted")]
 
     def on_todos(self, data):
         items = data.get("items") or []
@@ -364,6 +393,17 @@ def answers(approval):
     return CHOICES if remembers(approval) else {"y": "once", "n": "deny"}
 
 
+def parse_answer(text, options):
+    """The key an approval answer means: the key itself or its word ("y", "yes", "p", "project"), nothing else.
+
+    Only the whole answer counts, never its first letter: "please also run the tests", typed to steer the agent just
+    as the question appeared, must not answer "p" (yes, always in this project)."""
+    answer = text.strip().lower()
+    words = {"yes": "y", "no": "n", "session": "s", "project": "p"}
+    answer = words.get(answer, answer)
+    return answer if answer in options else None
+
+
 def choices_text(approval):
     return "  ".join(f"[{key}] {ANSWERS[decision]}" for key, decision in answers(approval).items())
 
@@ -407,6 +447,25 @@ async def choose_theme(account, console, current=None):
     account.save(theme=picked)
     console.print(theme_preview(glyphs(console).dot == UNICODE["dot"]))
     return picked
+
+
+def fit(fragments, width, style="class:tb"):
+    """prompt_toolkit fragments cut to `width` cells, ending in … when something was cut."""
+    out, used = [], 0
+    for fragment_style, text in fragments:
+        size = get_cwidth(text)
+        if used + size <= width:
+            out.append((fragment_style, text))
+            used += size
+            continue
+        room = width - used - 1
+        while text and get_cwidth(text) > room:
+            text = text[:-1]
+        if text:
+            out.append((fragment_style, text))
+        out.append((style, "…"))
+        break
+    return out
 
 
 class SlashCompleter(Completer):
@@ -492,12 +551,18 @@ class App:
                 if approval and approval["id"] not in self.notified and self.prompt and self.prompt.app.is_running:
                     # Close the prompt (keeping what was typed) so the loop can ask the question.
                     self.saved_text = self.prompt.default_buffer.text
-                    self.prompt.app.exit(result=INTERRUPTED)
+                    self.interrupt(self.prompt.app)
             except Exception as exc:  # Printing must never take the session down.
                 self.say(f"(display error: {exc})", "leo.error")
             await asyncio.sleep(0.15)
 
     # -- prompt -------------------------------------------------------------------
+
+    @staticmethod
+    def interrupt(app):
+        """Close the prompt to show something else, leaving no half-typed prompt line behind on the screen."""
+        app.erase_when_done = True
+        app.exit(result=INTERRUPTED)
 
     def busy(self):
         current = self.sessions.current
@@ -532,15 +597,20 @@ class App:
             left.append(("class:tb", "  "))
         if not self.sessions.items:
             left.append(("class:tb", "no session yet"))
-        right = [("class:tb.autorun", "autorun on") if self.sessions.policy.autorun else ("class:tb", "asks before edits"), ("class:tb", "  ")]
-        right += ([("class:tb.key", "esc"), ("class:tb", " stop  "), ("class:tb.key", "enter"), ("class:tb", " steer ")] if self.busy() else
-                  [("class:tb.key", "/help"), ("class:tb", "  "), ("class:tb.key", "tab"), ("class:tb", " complete ")])
         try:
             width = get_app().output.get_size().columns
         except Exception:
             width = shutil.get_terminal_size().columns
-        gap = width - sum(len(t) for _, t in left + right) - 1
-        return left + [("class:tb", " " * max(gap, 2))] + right
+        keys = ([("class:tb.key", "esc"), ("class:tb", " stop  "), ("class:tb.key", "enter"), ("class:tb", " steer ")] if self.busy() else
+                [("class:tb.key", "/help"), ("class:tb", "  "), ("class:tb.key", "tab"), ("class:tb", " complete ")])
+        mode = [("class:tb.autorun", "autorun on"), ("class:tb", "  ")] if self.sessions.policy.autorun else []
+        if not mode and width >= 80:
+            mode = [("class:tb", "asks before edits"), ("class:tb", "  ")]
+        right = mode + keys
+        # The sessions give way first on a narrow terminal: the keys that work now must stay visible.
+        left = fit(left, max(width - get_cwidth("".join(t for _, t in right)) - 4, 8))
+        gap = width - sum(get_cwidth(t) for _, t in left + right) - 1
+        return left + [("class:tb", " " * max(gap, 1))] + right
 
     def command_list(self):
         """Built-in commands, then your skills and command files (looked up again every few seconds)."""
@@ -559,7 +629,8 @@ class App:
                                                                           (self.sessions.current.busy or self.sessions.current.approval))))
         def _stop(event):
             self.sessions.stop(self.sessions.current)
-            event.app.exit(result=INTERRUPTED)
+            self.saved_text = event.app.current_buffer.text
+            self.interrupt(event.app)
             self.say("Stopping…", "leo.warn")
 
         @bindings.add("c-c")
@@ -603,6 +674,7 @@ class App:
                 await self.ask(current, approval)
                 continue
             text, self.saved_text = self.saved_text, ""
+            self.prompt.app.erase_when_done = False  # A sent message stays on the screen, above what it started.
             try:
                 text = await self.prompt.prompt_async(self.message, default=text)
             except EOFError:
@@ -614,11 +686,14 @@ class App:
             text = text.strip()
             if not text:
                 continue
-            if text.startswith("/"):
-                if await self.command(text) == "exit":
-                    return
-                continue
-            await self.submit(text)
+            try:
+                if text.startswith("/"):
+                    if await self.command(text) == "exit":
+                        return
+                    continue
+                await self.submit(text)
+            except Exception as exc:  # One failed command must not close the window and every session in it.
+                self.say(f"{text.split()[0] if text.startswith('/') else 'That message'} failed: {exc}", "leo.error")
 
     async def ask(self, session, approval):
         """Show an approval question and send the answer; Ctrl-C or Esc counts as no.
@@ -628,24 +703,37 @@ class App:
         self.notified.add(approval["id"])
         self.console.print(approval_view(approval, unicode=self.g.dot == UNICODE["dot"]))
         options = answers(approval)
+        labels = ANSWERS if sum(len(ANSWERS[d]) + 6 for d in options.values()) + 6 <= self.console.width else SHORT_ANSWERS
         question = [("class:muted", "  ")]
         for key, decision in options.items():
-            question += [("class:key", f" {key} "), ("", f" {ANSWERS[decision]}   ")]
+            question += [("class:key", f" {key} "), ("", f" {labels[decision]}   ")]
         question.append(("class:prompt", f"{self.g.prompt} "))
-        asker = PromptSession(style=DynamicStyle(theme.prompt_style))
+        no = KeyBindings()
+
+        @no.add("escape", eager=True)
+        def _deny(event):
+            event.app.exit(result="n")
+
+        asker = PromptSession(style=DynamicStyle(theme.prompt_style), key_bindings=no)
         while True:
             try:
-                answer = (await asker.prompt_async(question)).strip().lower()[:1]
+                typed = await asker.prompt_async(question)
             except (EOFError, KeyboardInterrupt):
-                answer = "n"
-            if answer in options:
+                typed = "n"
+            answer = parse_answer(typed, options)
+            if answer:
                 break
-            self.say(f"Type one of: {', '.join(options)}.", "leo.warn")
+            if len(typed.split()) > 1 and session.approval and session.approval["id"] == approval["id"]:
+                # A sentence is a message for the agent, typed as the question appeared: keep it, then ask again.
+                self.sessions.steer(session, typed.strip())
+                self.say("Sent to the agent; it reads your message after this question.", "leo.muted")
+            self.say(f"Answer with one of: {', '.join(options)}.", "leo.warn")
         decision, prefix = options[answer], None
         if decision in ("session", "project") and approval["kind"] == "command":
             command = approval["detail"]["command"]
+            label = "  Allow this command line " if compound(command) else "  Allow commands starting with "
             try:
-                prefix = (await asker.prompt_async([("class:muted", "  Allow commands starting with "), ("class:prompt", f"{self.g.prompt} ")],
+                prefix = (await asker.prompt_async([("class:muted", label), ("class:prompt", f"{self.g.prompt} ")],
                                                    default=suggested_prefix(command))).strip() or command
             except (EOFError, KeyboardInterrupt):
                 prefix = command
@@ -654,7 +742,9 @@ class App:
 
     async def submit(self, text):
         session = self.sessions.current or await self.sessions.open()
-        if session.busy:
+        if session.busy or session.approval:
+            # A message sent while the agent works, or just as it asks a question, steers it: it reads the message
+            # before its next step. (A new run cannot start while this one waits for an answer.)
             self.sessions.steer(session, text)
             return
         await self.sessions.send(session, text)
@@ -726,6 +816,8 @@ class App:
         self.say("Show one with /switch N.")
 
     async def cmd_switch(self, arguments):
+        if not arguments:
+            return await self.cmd_sessions(arguments)
         session = next((s for s in self.sessions.items if str(s.number) == arguments), None)
         if not session:
             self.say("Usage: /switch N (see /sessions)", "leo.error")

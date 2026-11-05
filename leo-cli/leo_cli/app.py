@@ -23,8 +23,8 @@ from rich.table import Table
 
 from . import __version__, models, theme
 from .account import Account, AccountError, SignedOut
-from .ui import (ANSWERS, TERMINAL, App, Renderer, answers, approval_view, banner, choose_theme, glyphs, home_path, key_hint,
-                 models_table, pick)
+from .ui import (ANSWERS, TERMINAL, App, Renderer, answers, approval_view, banner, choose_theme, clip_left, glyphs, home_path,
+                 key_hint, models_table, parse_answer, pick)
 
 COMMANDS = ("login", "logout", "sync", "models", "resume", "update")
 DEFAULT_SERVER = "http://localhost:8000"
@@ -218,7 +218,9 @@ def welcome(account, sessions, art=True, width=100):
     info.add_column(style="leo.muted")
     info.add_column()
     info.add_row("account", Text(f"{config['username']} · {config['server']}") if config.get("username") else Text("offline", style="leo.warn"))
-    info.add_row("project", Text(home_path(sessions.project), style="leo.accent"))
+    beside = art and width >= 96
+    # Room left for the value beside the logo and the labels; a long path keeps its end, the folder's own name.
+    info.add_row("project", Text(clip_left(home_path(sessions.project), max(width - (54 if beside else 19), 12)), style="leo.accent"))
     if sessions.items and sessions.current and sessions.current.branch:
         info.add_row("branch", Text(sessions.current.branch))
     info.add_row("models", Text(f"{count} ready", style="leo.ok" if count else "leo.warn"))
@@ -227,14 +229,15 @@ def welcome(account, sessions, art=True, width=100):
     head = Text.assemble(("L.E.O CLI", "leo.title"), (f"  v{__version__}", "leo.muted"), "\n",
                          ("multi-agent LLM Efficiency Orchestrator", "leo.muted"))
     card = Group(head, Text(""), info)
-    if art and width >= 96:  # Logo and card side by side.
+    if beside:  # Logo and card side by side.
         body = Table.grid(padding=(0, 4))
         body.add_row(banner(), card)
     elif art and width >= 40:
         body = Group(banner(), Text(""), card)
     else:
         body = card
-    tips = key_hint([("enter", "send a task"), ("/", "commands"), ("esc", "stop"), ("ctrl-c x2", "quit")])
+    tips = [("enter", "send a task"), ("/", "commands"), ("esc", "stop"), ("ctrl-c x2", "quit")]
+    tips = key_hint(tips if width >= 72 else tips[:3])  # One line, whatever the width.
     return Group(Text(""), Panel(body, box=g.box, border_style="leo.border", padding=(1, 2), expand=False), tips, Text(""))
 
 
@@ -294,10 +297,10 @@ async def ask_line(approval, stdin, err):
     while True:
         err.print(key_hint([(key, ANSWERS[decision]) for key, decision in options.items()]) + Text(f"{g.prompt} ", style="leo.accent"),
                   end="")
-        answer = (await asyncio.to_thread(stdin.readline)).strip().lower()[:1]
-        if answer in options:
+        answer = parse_answer(await asyncio.to_thread(stdin.readline), options)
+        if answer:
             return options[answer]
-        err.print(Text(f"{g.warn} Type one of: {', '.join(options)}.", style="leo.warn"))
+        err.print(Text(f"{g.warn} Answer with one of: {', '.join(options)}.", style="leo.warn"))
 
 
 if __name__ == "__main__":

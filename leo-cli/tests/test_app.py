@@ -3,6 +3,7 @@ import asyncio
 import io
 import re
 import time
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.application import create_app_session
@@ -14,7 +15,7 @@ from sqlalchemy import update
 from backend.store import runs
 from leo_cli import app
 from leo_cli.sessions import Sessions
-from leo_cli.ui import App, Renderer, approval_view, suggested_prefix
+from leo_cli.ui import App, Renderer, approval_view, parse_answer, suggested_prefix
 from test_sessions import Model, account, project, reply, writes_hello  # noqa: F401 (fixtures)
 
 
@@ -290,6 +291,35 @@ async def test_a_skill_command_starts_a_task_and_cost_reports_it(ui, project):
     assert 'write_file(hello.txt)' in out and 'Done: Wrote 12 bytes' in out and '2 calls' in out
 
 
+async def test_a_message_sent_as_an_approval_arrives_steers_instead_of_crashing(ui):
+    """Enter pressed just as the agent asks: the run waits for an answer, so the message steers it (no second run)."""
+    session = await ui.sessions.open()
+    await ui.sessions.send(session, 'Create hello.txt')
+    await session.task
+    assert session.approval
+    await ui.submit('and make it uppercase')
+    assert [e['data']['message'] for e in ui.sessions.store.events_of(session.run_id, 'steer')] == ['and make it uppercase']
+    assert session.approval, 'still waiting for the answer'
+
+
+async def test_a_failing_command_reports_instead_of_closing_the_window(ui, monkeypatch):
+    async def broken(arguments):
+        raise RuntimeError('disk full')
+
+    said = []
+    monkeypatch.setattr(ui, 'cmd_sync', broken)
+    monkeypatch.setattr(ui, 'say', lambda text, style='leo.muted': said.append(text))
+    with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
+        running = asyncio.create_task(ui.run())
+        await until(lambda: ui.prompt is not None and ui.prompt.app.is_running)
+        typed.send_text('/sync\r')
+        await until(lambda: said)
+        await until(lambda: ui.prompt.app.is_running)
+        typed.send_text('/exit\r')
+        await asyncio.wait_for(running, 10)
+    assert said == ['/sync failed: disk full']
+
+
 async def test_typing_while_the_agent_works_steers_it(ui):
     session = await ui.sessions.open()
     await ui.sessions.send(session, 'Create hello.txt')
@@ -342,6 +372,32 @@ def test_suggested_prefixes_keep_the_program_and_subcommand():
     assert suggested_prefix('npm test -- --watch=false') == 'npm test'
     assert suggested_prefix('pytest -q tests/') == 'pytest'
     assert suggested_prefix('python ./manage.py migrate') == 'python'
+    assert suggested_prefix('python3 greet.py && ls -la') == 'python3 greet.py && ls -la', 'a chained command is remembered whole'
+
+
+def test_approval_answers_are_whole_words_never_a_first_letter():
+    options = {'y': 'once', 's': 'session', 'p': 'project', 'n': 'deny'}
+    assert [parse_answer(t, options) for t in ('y', ' Y\n', 'yes', 'project', 'n', 'no')] == ['y', 'y', 'y', 'p', 'n', 'n']
+    assert parse_answer('please also run the tests', options) is None, 'a steer message typed as the question appeared'
+    assert parse_answer('yes please', options) is None and parse_answer('', options) is None
+    assert parse_answer('s', {'y': 'once', 'n': 'deny'}) is None, 'only the keys this approval offers'
+
+
+def test_parallel_results_say_which_call_they_belong_to_and_the_plan_shows_once():
+    console = Console(record=True, width=120, color_system=None)
+    renderer = Renderer(console)
+    renderer.event('agent_step', {'agent': 'main', 'tools': [{'name': 'todo_write', 'summary': '2 items'}]})
+    renderer.event('todos', {'items': [{'content': 'Read', 'status': 'in_progress'}, {'content': 'Ship', 'status': 'pending'}]})
+    renderer.event('agent_tool', {'agent': 'main', 'name': 'todo_write', 'ok': True, 'output': 'Todo list updated: 0 of 2 completed.'})
+    renderer.event('agent_step', {'agent': 'main', 'tools': [{'name': 'read_file', 'summary': 'a.py'}, {'name': 'list_files', 'summary': '.'}]})
+    renderer.event('agent_tool', {'agent': 'main', 'name': 'read_file', 'summary': 'a.py', 'ok': True, 'output': '1\tx = 1'})
+    renderer.event('agent_tool', {'agent': 'main', 'name': 'list_files', 'summary': '.', 'ok': True, 'output': 'a.py (6 bytes)\nb/'})
+    renderer.event('agent_step', {'agent': 'main', 'tools': [{'name': 'bash', 'summary': 'pytest -q'}]})
+    renderer.event('agent_tool', {'agent': 'main', 'name': 'bash', 'ok': True, 'output': 'exit code 0\n..\n\n2 passed in 0.1s'})
+    out = text_of(console)
+    assert 'todo_write' not in out and 'Todo list updated' not in out and '0/2' in out, 'the plan, not the tool call that set it'
+    assert f'{renderer.g.hook} a.py {renderer.g.sep} 1 line' in out and f'{renderer.g.hook} list_files {renderer.g.sep} 2 entries' in out
+    assert f'{renderer.g.hook} exit code 0 {renderer.g.sep} 2 lines of output' in out and '2 passed in 0.1s' in out, 'the end of a success shows'
 
 
 # -- the interactive prompt, typed into through a pipe ------------------------------------
@@ -405,7 +461,7 @@ async def test_one_shot_shows_which_keys_answer_an_approval(account, project, ca
     assert await app.one_shot(sessions, 'Create hello.txt', stdin=Answers('maybe\ny\n')) == 0
     err = capsys.readouterr().err
     assert ' y ' in err and 'yes, this session' in err and 'yes, always in this project' in err and ' n ' in err
-    assert 'Type one of: y, s, p, n.' in err, 'a wrong answer says what to type'
+    assert 'Answer with one of: y, s, p, n.' in err, 'a wrong answer says what to type'
     assert re.search(r'done . \d+ calls . ', err), 'stderr ends with what the run cost; the answer alone goes to stdout'
 
 
@@ -450,6 +506,19 @@ async def test_the_status_bar_lists_sessions_and_the_keys_that_matter(ui):
     assert 'autorun on' in bar()
 
 
+async def test_the_status_bar_fits_a_narrow_terminal(ui, monkeypatch):
+    from prompt_toolkit.utils import get_cwidth
+    from leo_cli import ui as module
+    monkeypatch.setattr(module, 'get_app', lambda: (_ for _ in ()).throw(RuntimeError()))
+    session = await ui.command('/new') or ui.sessions.current
+    session.title = 'A long title that would never fit on a narrow terminal at all'
+    for width in (50, 64, 80, 120):
+        monkeypatch.setattr(module.shutil, 'get_terminal_size', lambda width=width: SimpleNamespace(columns=width))
+        bar = ''.join(text for _, text in ui.toolbar())
+        assert get_cwidth(bar) <= width, (width, bar)
+        assert '/help' in bar and 'tab complete' in bar, 'the keys stay visible'
+
+
 def test_the_welcome_card_fits_the_terminal(account, project):
     from leo_cli import theme
     sessions = Sessions(account, project)
@@ -465,3 +534,5 @@ def test_the_welcome_card_fits_the_terminal(account, project):
     assert any(logo in line and 'project' in line for line in wide.splitlines()), 'side by side on a wide terminal'
     assert logo not in narrow and 'L.E.O CLI' in narrow, 'no logo when it would not fit'
     assert all(len(line) <= 36 for line in narrow.splitlines())
+    assert all(len(line) <= 64 for line in shown(64).splitlines()), 'the key tips stay on one line'
+    assert project.name in narrow and project.name in wide, 'a long project path keeps its folder name'

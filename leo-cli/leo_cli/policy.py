@@ -19,8 +19,19 @@ RISKY = [re.compile(p) for p in (
 )]
 
 
+# Where one command ends and the next begins (2>&1 and &> are redirections, not a background &), and substitutions that
+# run a command inside another one.
+CHAIN = re.compile(r"&&|\|\|?|;|\n|(?<!>)&(?!>)")
+SUBSTITUTION = re.compile(r"`|\$\(|[<>]\(")
+
+
 def risky(command):
     return any(p.search(command) for p in RISKY)
+
+
+def compound(command):
+    """Whether a command line runs more than one command."""
+    return bool(CHAIN.search(command) or SUBSTITUTION.search(command))
 
 
 class Policy:
@@ -53,8 +64,15 @@ class Policy:
             self.save()
 
     def command_allowed(self, command):
-        command = command.strip()
-        return any(command == p or command.startswith(p + " ") for p in self.session_commands + self.project_commands)
+        """A remembered rule covers a command it starts, and a chained command only when it covers every part of it:
+        allowing `npm test` must not allow `npm test && rm -rf src`."""
+        command, rules = command.strip(), self.session_commands + self.project_commands
+        if command in rules:
+            return True  # Exactly what was approved.
+        if SUBSTITUTION.search(command):
+            return False
+        parts = [part.strip() for part in CHAIN.split(command)]
+        return all(part and any(part == rule or part.startswith(rule + " ") for rule in rules) for part in parts)
 
     def check(self, agent, call):
         """None when the call may run; otherwise the question for the user: {kind, message, detail}."""

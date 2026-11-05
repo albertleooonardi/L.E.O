@@ -75,7 +75,11 @@ leo resume                           # continue the last session on this folder 
 | `y` | Yes, once. |
 | `s` | Yes for this session. For commands, it remembers a prefix such as `npm test`. |
 | `p` | Yes, always in this project. Saved to `.leo-cli/settings.json`. |
-| `n` | No. |
+| `n` | No. Esc also says no. |
+
+Type the key (or its word, such as `yes`) and press Enter. A remembered prefix such as `npm test` never covers a chained
+command such as `npm test && rm -rf src`: every part has to be allowed. A sentence typed while the question is shown is
+sent to the agent as a message, not read as an answer.
 
 Reading files and searching never ask. `--autorun` (or `/autorun on`) stops the questions, but these always ask, even
 with autorun, and are never remembered:

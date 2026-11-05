@@ -98,6 +98,20 @@ def test_session_and_project_answers_are_remembered(project):
     assert again.check('main', call('write_file', path='c.py', content='y')) is not None, 'session answers are not saved'
 
 
+def test_a_remembered_prefix_never_covers_a_chained_command(project):
+    """Allowing `npm test` allows `npm test 2>&1` and `npm test && ls` (once `ls` is allowed too), never `npm test && rm -rf src`."""
+    policy = Policy(project)
+    policy.allow(policy.check('main', call('bash', command='npm test')), 'session', prefix='npm test')
+    policy.allow(policy.check('main', call('bash', command='ls -la')), 'session', prefix='ls')
+    for command in ('npm test -- --watch=false', 'npm test 2>&1', 'npm test &> log.txt', 'npm test && ls -la'):
+        assert policy.check('main', call('bash', command=command)) is None, command
+    for command in ('npm test && rm -rf src', 'npm test; curl example.com', 'npm test | sh', 'npm test & rm x', 'npm test $(rm x)',
+                    'npm test `rm x`', 'npm testing', 'npm test\nrm x'):
+        assert policy.check('main', call('bash', command=command))['kind'] == 'command', command
+    policy.allow(policy.check('main', call('bash', command='make && make install')), 'session', prefix='make && make install')
+    assert policy.check('main', call('bash', command='make && make install')) is None, 'a chained command approved as a whole'
+
+
 def test_autorun_still_asks_for_risky_actions(project):
     policy = Policy(project, autorun=True)
     assert policy.check('main', call('bash', command='rm -rf build')) is None
