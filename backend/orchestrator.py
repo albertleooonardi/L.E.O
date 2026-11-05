@@ -191,11 +191,12 @@ class Orchestrator:
         return call_id
 
     async def call(self, stage, role, prompt, history=None, system=None, output_limit=None, visible=False, skill=None, difficulty=None,
-                   messages=None, tools=None):
+                   messages=None, tools=None, stream=False):
         """One model call with fallback across eligible connections; completed stages are reused on recovery.
 
         Agents pass a whole transcript as `messages` and tool schemas as `tools`; the result is then
-        {"text", "tool_calls"} instead of text."""
+        {"text", "tool_calls"} instead of text. `stream` sends the text as it is written, in `agent_text` events
+        ({stage, text}; a fallback to another model starts the stage again with {stage, reset})."""
         self.check()
         if stage in self.state["completed"]:
             return self.state["completed"][stage]
@@ -208,6 +209,7 @@ class Orchestrator:
         system = system or self.system_for(skill)
         errors = []
         queue, waited = list(choices), False
+        streamed = False  # Text of this stage already sent; a retry or fallback starts it again.
         while queue:
             provider = queue.pop(0)
             self.check()
@@ -233,6 +235,9 @@ class Orchestrator:
             if visible:
                 self.store.event(self.id, "draft_reset", {})
                 self.save(output="")
+            if streamed:
+                self.store.event(self.id, "agent_text", {"stage": stage, "reset": True})  # An earlier attempt's text was dropped.
+                streamed = False
             started, text, pending = time.monotonic(), "", ""
             last_flush = started
             input_tokens = output_tokens = None
@@ -252,9 +257,13 @@ class Orchestrator:
                             output_tokens = chunk.output_tokens
                         if chunk.finish and not (finish and chunk.finish == "stop"):
                             finish = chunk.finish  # Keep a specific reason (refusal, length) over a trailing generic stop.
-                        if visible and pending and time.monotonic() - last_flush >= 0.12:
-                            self.store.event(self.id, "token", {"text": pending})
-                            self.save(output=text)
+                        if (visible or stream) and pending and time.monotonic() - last_flush >= 0.12:
+                            if visible:
+                                self.store.event(self.id, "token", {"text": pending})
+                                self.save(output=text)
+                            else:
+                                self.store.event(self.id, "agent_text", {"stage": stage, "text": pending})
+                                streamed = True
                             pending, last_flush = "", time.monotonic()
                 tool_calls = calls.result()
                 if not text.strip() and not tool_calls:
@@ -271,6 +280,8 @@ class Orchestrator:
                     raise providers.ProviderError("Model returned no text. Select a text model or increase the output limit")
                 if visible and pending:
                     self.store.event(self.id, "token", {"text": pending})
+                elif stream and pending:
+                    self.store.event(self.id, "agent_text", {"stage": stage, "text": pending})
                 estimated = input_tokens is None or output_tokens is None
                 input_tokens = input_tokens if input_tokens is not None else token_bound(context)
                 output_tokens = output_tokens if output_tokens is not None else output_limit_for_call

@@ -69,23 +69,26 @@ the folder leo works on; `~/...` and absolute paths work too, and quote a path w
 outside the folder is attached for reading only: the agent's own tools stay inside the folder.
 
 **While the agent works:**
+- Its answer appears as it is written, a paragraph at a time; the line being written shows in the status bar.
+- The status bar shows a moving wave, what the agent is doing (thinking, running a tool, or writing), and for how long.
 - Each tool call is one line, followed by a short result.
 - Typing a message steers the agent.
 - Esc stops the current task.
 - Ctrl-C twice quits. Unfinished work keeps its progress, and `leo resume` continues it.
 
-**Approvals.** By default, leo asks before it edits a file or runs a command. Answer with one of these keys:
+**Approvals.** By default, leo asks before it edits a file or runs a command. The question is a menu: choose with
+the arrow keys and Enter, or press the option's number. Esc (or Ctrl-C) says no.
 
-| Key | Meaning |
+| Option | Meaning |
 |---|---|
-| `y` | Yes, once. |
-| `s` | Yes for this session. For commands, it remembers a prefix such as `npm test`. |
-| `p` | Yes, always in this project. Saved to `.leo-cli/settings.json`. |
-| `n` | No. Esc also says no. |
+| 1. Yes | Yes, once. |
+| 2. Yes, and allow … for the rest of this session | For commands, it remembers a prefix such as `npm test`; for edits, all edits. |
+| 3. Yes, and always allow … in this project | The same, saved to `.leo-cli/settings.json`. |
+| 4. No | The agent is told to do it differently. |
 
-Type the key (or its word, such as `yes`) and press Enter. A remembered prefix such as `npm test` never covers a chained
-command such as `npm test && rm -rf src`: every part has to be allowed. A sentence typed while the question is shown is
-sent to the agent as a message, not read as an answer.
+Keys pressed in the first moment after a question appears are ignored, so a message you were typing to steer the agent
+cannot answer it. A remembered prefix such as `npm test` never covers a chained command such as
+`npm test && rm -rf src`: every part has to be allowed. With `leo -p`, type the option's number and Enter.
 
 Reading files and searching never ask. `--autorun` (or `/autorun on`) stops the questions, but these always ask, even
 with autorun, and are never remembered:

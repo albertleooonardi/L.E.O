@@ -99,3 +99,18 @@ def prompt_style(value=None):
         "tb.ok": pt["ok"], "tb.error": pt["error"], "tb.wait": f"bold reverse {pt['warn'].replace('bold ', '')}".strip(),
         "tb.key": f"bold {pt['accent']}".strip(), "tb.autorun": pt["warn"],
     })
+
+
+def liquid(value=None):
+    """Colours for the moving parts of the status bar: (wave gradient, shimmer base, shimmer peak) as hex colours, or
+    None for themes that only use the terminal's own colours (they animate with bold instead)."""
+    spec = THEMES[name(value or _active["name"])]
+    if not all(c.startswith("#") for c in spec["banner"]):
+        return None
+    return spec["banner"], spec["pt"]["muted"], spec["pt"]["accent"]
+
+
+def mix(a, b, amount):
+    """The hex colour `amount` (0..1) of the way from a to b."""
+    x, y = (int(a[i:i + 2], 16) for i in (1, 3, 5)), (int(b[i:i + 2], 16) for i in (1, 3, 5))
+    return "#" + "".join(f"{round(p + (q - p) * amount):02x}" for p, q in zip(x, y))

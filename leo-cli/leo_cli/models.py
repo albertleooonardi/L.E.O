@@ -11,7 +11,7 @@ from backend.catalog import PRESETS
 from backend.discovery import discover
 from backend.providers import ProviderError
 
-from .account import AccountError
+from .account import AccountError, SignedOut
 from .ui import pick
 
 TYPE_ID = "\0type"  # "Type a model ID" in the model list.
@@ -79,21 +79,34 @@ async def add_model(account, console, transport=None):
     return True
 
 
-async def setup(account, console, transport=None):
-    """Shown when no model can be used: stay in leo and set one up. True once there is one; False to quit."""
+async def setup(account, console, transport=None, login=None, signed_out=False):
+    """Shown when no model can be used: stay in leo and set one up. True once there is one; False to quit.
+
+    A device the server signed out (its token revoked, or a reset server) is offered a fresh sign-in first: adding or
+    syncing models needs one. `login(account, console)` signs in through the browser."""
     while not usable(account):
-        reason = ("None of your models can call tools, which the agent needs." if account.store().list_connections(account.user_id)
-                  else "Your account has no models this computer can use yet.")
-        console.print(Text(reason, style="leo.warn"))
-        choice = await pick("How do you want to add one?", [
-            ("add", "Add a model with an API key (OpenRouter, Groq, Gemini, OpenAI, Anthropic, Ollama, …)"),
-            ("web", "Open L.E.O. Settings → Models in the browser (sign in to ChatGPT, Copilot, …)"),
-            ("sync", "Sync again (after adding models on the website)"),
-            ("quit", "Quit")])
+        signed_out = signed_out or not account.secrets.get("device-token")
+        if signed_out and login:
+            console.print(Text(f"This device is not signed in to {account.server or 'a L.E.O. server'}; sign in again to get your models.",
+                               style="leo.warn"))
+            options = [("login", f"Sign in again · opens the L.E.O. website ({account.server or 'choose a server'})"),
+                       ("quit", "Quit")]
+        else:
+            reason = ("None of your models can call tools, which the agent needs." if account.store().list_connections(account.user_id)
+                      else "Your account has no models this computer can use yet.")
+            console.print(Text(reason, style="leo.warn"))
+            options = [("add", "Add a model with an API key (OpenRouter, Groq, Gemini, OpenAI, Anthropic, Ollama, …)"),
+                       ("web", "Open L.E.O. Settings → Models in the browser (sign in to ChatGPT, Copilot, …)"),
+                       ("sync", "Sync again (after adding models on the website)"),
+                       ("quit", "Quit")]
+        choice = await pick("Sign in to continue:" if signed_out and login else "How do you want to add one?", options)
         if choice in (None, "quit"):
             return False
         try:
-            if choice == "add":
+            if choice == "login":
+                await login(account, console)
+                signed_out = False
+            elif choice == "add":
                 await add_model(account, console, transport)
             elif choice == "web":
                 webbrowser.open(f"{account.server}/?settings=models")
@@ -101,6 +114,8 @@ async def setup(account, console, transport=None):
             else:
                 summary = await account.sync()
                 console.print(Text(f"Synced {summary['models']} models.", style="leo.ok"))
+        except SignedOut:
+            signed_out = True  # The next round offers Sign in again.
         except AccountError as exc:
             console.print(Text(str(exc), style="leo.error"))
     return True

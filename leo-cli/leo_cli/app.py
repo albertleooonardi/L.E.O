@@ -197,21 +197,24 @@ async def ready(account, console, interactive=False, transport=None):
     """Fresh models before working: re-sync when the last sync is old, but keep working offline with what is here.
 
     With no usable model, an interactive leo offers to set one up right here instead of stopping."""
+    signed_out = False
     if account.secrets.get("device-token") and account.stale():
         try:
             await account.sync()
         except SignedOut as exc:
+            signed_out = True
             console.print(Text(f"{glyphs(console).warn} {exc}. Using the models already on this device.", style="leo.warn"))
         except AccountError:
             console.print(Text(f"{glyphs(console).warn} Your L.E.O. server is not reachable; using the models synced earlier.",
                                style="leo.warn"))
     if models.usable(account):
         return True
+    if interactive:
+        return await models.setup(account, console, transport, signed_out=signed_out or not signed_in(account),
+                                  login=lambda account, console: login(account, console, inside=True))
     if not signed_in(account):
         console.print(SIGN_IN_FIRST)
         return False
-    if interactive:
-        return await models.setup(account, console, transport)
     console.print("No model on this device can run the agent (it needs tool calling). Run [bold]leo[/] to add one, "
                   "or add one in L.E.O. Settings → Models and run [bold]leo sync[/].")
     return False
@@ -305,12 +308,12 @@ async def ask_line(approval, stdin, err):
         return "deny"
     options = answers(approval)
     while True:
-        err.print(key_hint([(key, ANSWERS[decision]) for key, decision in options.items()]) + Text(f"{g.prompt} ", style="leo.accent"),
-                  end="")
+        err.print(key_hint([(f"{number}", ANSWERS[decision]) for number, decision in enumerate(options.values(), 1)])
+                  + Text(f"{g.prompt} ", style="leo.accent"), end="")
         answer = parse_answer(await asyncio.to_thread(stdin.readline), options)
         if answer:
             return options[answer]
-        err.print(Text(f"{g.warn} Answer with one of: {', '.join(options)}.", style="leo.warn"))
+        err.print(Text(f"{g.warn} Answer with a number, 1 to {len(options)}.", style="leo.warn"))
 
 
 if __name__ == "__main__":

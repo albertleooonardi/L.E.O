@@ -15,7 +15,7 @@ from sqlalchemy import update
 from backend.store import runs
 from leo_cli import app
 from leo_cli.sessions import Sessions
-from leo_cli.ui import App, Renderer, approval_view, parse_answer, suggested_prefix
+from leo_cli.ui import App, Renderer, approval_view, choose_answer, parse_answer, split_blocks, suggested_prefix
 from test_sessions import Model, account, project, reply, writes_hello  # noqa: F401 (fixtures)
 
 
@@ -168,6 +168,7 @@ async def test_without_a_usable_model_leo_sets_one_up_inside(tmp_path, monkeypat
     from backend.schemas import Connection
     account = Account(tmp_path / 'home')
     account.secrets.set('device-token', 't' * 43)
+    account.save(server='http://leo.test', synced_at=time.time())
     added = []
 
     async def discover(connection, key, transport=None):
@@ -190,6 +191,39 @@ async def test_without_a_usable_model_leo_sets_one_up_inside(tmp_path, monkeypat
     [body] = added
     assert body['model'] == 'qwen3-coder' and body['tools'] is True and body['local'] is True and body['api_key'] is None
     assert 'Your account has no models this computer can use yet.' in text_of(console)
+
+
+async def test_a_signed_out_device_is_offered_a_fresh_sign_in(tmp_path, monkeypatch):
+    """The server revoked this device (or was reset): the menu offers Sign in again, not a sync that cannot work."""
+    monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
+    from backend.schemas import Connection
+    from leo_cli.account import Account, SignedOut
+    account = Account(tmp_path / 'home')
+    account.secrets.set('device-token', 't' * 43)
+    account.save(server='http://leo.test')
+    signed = []
+
+    async def sync():
+        raise SignedOut('This device was signed out')
+
+    async def login(account_, console, server=None, name=None, inside=False):
+        signed.append(inside)
+        account.save(synced_at=time.time())
+        account.store().save_connection(Connection(name='Local', base_url='http://local.test/v1', model='m', free=True, local=True,
+                                                   tools=True).model_dump(), user_id=account.user_id)
+
+    monkeypatch.setattr(account, 'sync', sync)
+    monkeypatch.setattr(app, 'login', login)
+    console = theme_console()
+    with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
+        typed.send_text(ENTER)  # Sign in again (the first option).
+        assert await asyncio.wait_for(app.ready(account, console, interactive=True), 10) is True
+    assert signed == [True] and 'sign in again to get your models' in text_of(console)
+
+
+def theme_console():
+    from leo_cli import theme
+    return theme.apply(Console(record=True, width=120, color_system=None))
 
 
 async def test_without_a_terminal_leo_says_how_to_add_a_model(tmp_path, monkeypatch, capsys):
@@ -426,7 +460,8 @@ def test_suggested_prefixes_keep_the_program_and_subcommand():
 
 def test_approval_answers_are_whole_words_never_a_first_letter():
     options = {'y': 'once', 's': 'session', 'p': 'project', 'n': 'deny'}
-    assert [parse_answer(t, options) for t in ('y', ' Y\n', 'yes', 'project', 'n', 'no')] == ['y', 'y', 'y', 'p', 'n', 'n']
+    assert [parse_answer(t, options) for t in ('y', ' Y\n', 'yes', 'project', 'n', 'no', '1', '3', '4')] == ['y', 'y', 'y', 'p', 'n', 'n', 'y', 'p', 'n']
+    assert parse_answer('5', options) is None and parse_answer('0', options) is None
     assert parse_answer('please also run the tests', options) is None, 'a steer message typed as the question appeared'
     assert parse_answer('yes please', options) is None and parse_answer('', options) is None
     assert parse_answer('s', {'y': 'once', 'n': 'deny'}) is None, 'only the keys this approval offers'
@@ -468,8 +503,8 @@ async def test_interactive_task_approval_and_exit(account, project):
         # The approval question takes over the prompt as soon as the agent asks it.
         await until(lambda: sessions.current is not None and sessions.current.approval is not None)
         await until(lambda: sessions.current.approval['id'] in ui.notified)
-        await asyncio.sleep(0.2)
-        typed.send_text('y\r')
+        await asyncio.sleep(0.6)  # Keys in the first moment of a question are ignored.
+        typed.send_text('1')  # A number chooses at once: 1. Yes.
         await until(lambda: sessions.current.status == 'completed')
         assert (project / 'hello.txt').read_text() == 'hi from leo\n'
         await until(lambda: ui.prompt.app.is_running)
@@ -507,10 +542,10 @@ async def test_help_and_model_names_keep_their_brackets(ui, account):
 
 async def test_one_shot_shows_which_keys_answer_an_approval(account, project, capsys):
     sessions = Sessions(account, project, transport=Model(writes_hello).transport)
-    assert await app.one_shot(sessions, 'Create hello.txt', stdin=Answers('maybe\ny\n')) == 0
+    assert await app.one_shot(sessions, 'Create hello.txt', stdin=Answers('maybe\n1\n')) == 0
     err = capsys.readouterr().err
-    assert ' y ' in err and 'yes, this session' in err and 'yes, always in this project' in err and ' n ' in err
-    assert 'Answer with one of: y, s, p, n.' in err, 'a wrong answer says what to type'
+    assert ' 1  yes' in err and ' 2  yes, this session' in err and ' 3  yes, always in this project' in err and ' 4  no' in err
+    assert 'Answer with a number, 1 to 4.' in err, 'a wrong answer says what to type'
     assert re.search(r'done . \d+ calls . ', err), 'stderr ends with what the run cost; the answer alone goes to stdout'
 
 
@@ -585,3 +620,74 @@ def test_the_welcome_card_fits_the_terminal(account, project):
     assert all(len(line) <= 36 for line in narrow.splitlines())
     assert all(len(line) <= 64 for line in shown(64).splitlines()), 'the key tips stay on one line'
     assert project.name in narrow and project.name in wide, 'a long project path keeps its folder name'
+
+
+# -- streaming, the live status line, and the approval menu ------------------------------------
+
+def test_streamed_markdown_is_split_only_where_it_is_safe():
+    assert split_blocks('Hello\n\nWor') == ('Hello\n\n', 'Wor')
+    assert split_blocks('a\n\n```py\nx = 1\n\ny = 2\n') == ('a\n\n', '```py\nx = 1\n\ny = 2\n'), 'never inside a code block'
+    assert split_blocks('```py\nx = 1\n```\nafter') == ('```py\nx = 1\n```\n', 'after'), 'a closed code block is finished'
+    assert split_blocks('no blank line yet\n') == ('', 'no blank line yet\n')
+
+
+def test_the_answer_streams_in_once():
+    console = Console(record=True, width=100, color_system=None)
+    renderer = Renderer(console)
+    for chunk in ('Checking the', ' tests.\n\nThey', ' pass now.'):
+        renderer.event('agent_text', {'stage': 'agent:main:1', 'text': chunk})
+    assert 'Checking the tests.' in text_of(console) and 'They pass' not in text_of(console), 'only finished blocks print'
+    assert renderer.preview == 'They pass now.' and renderer.phase == 'writing'
+    renderer.event('agent_step', {'agent': 'main', 'step': 1, 'text': 'Checking the tests.\n\nThey pass now.', 'tools': []})
+    renderer.event('done', {'status': 'completed', 'output': 'Checking the tests.\n\nThey pass now.', 'usage': {}})
+    out = text_of(console)
+    assert out.count('Checking the tests.') == 1 and out.count('They pass now.') == 1, 'streamed, never printed again'
+    assert renderer.preview == '' and renderer.answer is None
+
+
+def test_text_before_tool_calls_streams_and_a_fallback_starts_over():
+    console = Console(record=True, width=100, color_system=None)
+    renderer = Renderer(console)
+    renderer.event('agent_text', {'stage': 'agent:main:1', 'text': 'Let me look.\n\n'})
+    renderer.event('agent_text', {'stage': 'agent:main:1', 'reset': True})
+    renderer.event('agent_text', {'stage': 'agent:main:1', 'text': 'Looking now.'})
+    renderer.event('agent_step', {'agent': 'main', 'step': 1, 'text': 'Looking now.', 'tools': [{'name': 'read_file', 'summary': 'a.py'}]})
+    renderer.event('done', {'status': 'completed', 'output': 'All good.', 'usage': {}})
+    out = text_of(console)
+    assert 'another one starts the answer again' in out and out.count('Looking now.') == 1 and 'read_file(a.py)' in out
+    assert 'All good.' in out, 'an answer that did not stream is printed at the end'
+
+
+async def test_the_status_bar_shows_a_live_line_while_the_agent_works(ui, monkeypatch):
+    from leo_cli import ui as module
+    monkeypatch.setattr(module, 'get_app', lambda: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(module.shutil, 'get_terminal_size', lambda: SimpleNamespace(columns=100))
+    session = await ui.sessions.open()
+    monkeypatch.setattr(type(session), 'busy', property(lambda self: True))
+    ui.renderer.started = time.monotonic() - 5
+    ui.renderer.event('agent_text', {'stage': 'agent:main:1', 'text': 'Writing the fix'})
+    live, bar = ''.join(text for _, text in ui.toolbar()).split('\n')
+    assert 'Writing…' in live and '5s' in live and 'Writing the fix' in live and any(c in live for c in '▁▂▃▄▅▆▇█')
+    assert 'esc' in bar and 'steer' in bar
+    ui.renderer.event('agent_step', {'agent': 'main', 'step': 1, 'tools': [{'name': 'bash', 'summary': 'pytest -q'}]})
+    assert 'Running bash(pytest -q)…' in ''.join(text for _, text in ui.toolbar())
+
+
+async def test_approvals_are_a_menu_that_ignores_keys_typed_too_soon():
+    approval = {'kind': 'command', 'detail': {'command': 'npm test -- --watch'}}
+
+    async def answer(*steps):
+        """Keys typed after the given delays, from when the menu appears."""
+        with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
+            asking = asyncio.create_task(choose_answer(approval, 'npm test', guard=0.3))
+            for delay, key in steps:
+                await asyncio.sleep(delay)
+                typed.send_text(key)
+            return await asyncio.wait_for(asking, 5)
+
+    assert await answer((0.05, '\r'), (0.4, '\x1b[B'), (0.05, '\r')) == 'session', 'an Enter in the first moment does nothing'
+    assert await answer((0.05, '4'), (0.4, '3')) == 'project', 'a number chooses at once, once the moment has passed'
+    assert await answer((0.05, '\x1b')) == 'deny', 'Esc says no'
+    from leo_cli.ui import menu_labels
+    assert dict(menu_labels(approval, 'npm test'))['session'] == 'Yes, and allow commands starting with `npm test` for the rest of this session'
+    assert [d for d, _ in menu_labels({'kind': 'command', 'detail': {'command': 'sudo x', 'risky': True}})] == ['once', 'deny']

@@ -176,7 +176,7 @@ class AgentRun:
             await self.compact(name, t, tools)
             stage = f"agent:{name}:{steps + 1}"
             try:
-                result = await self.o.call(stage, role, None, messages=t, tools=tools, skill=skill, difficulty=difficulty)
+                result = await self.o.call(stage, role, None, messages=t, tools=tools, skill=skill, difficulty=difficulty, stream=name == "main")
             except BudgetExceeded as exc:
                 extensions = self.o.state.get("budget_extensions", 0)
                 if "price" in str(exc) or not self.approval(f"budget:{extensions}", "budget", f"{exc}. Give the agent another allowance of the same size?",

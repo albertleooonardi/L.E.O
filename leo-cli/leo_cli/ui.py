@@ -53,7 +53,6 @@ TERMINAL = {"completed", "failed", "cancelled"}
 INTERRUPTED = "\0interrupted"  # The prompt was closed to show an approval question.
 CHOICES = {"y": "once", "s": "session", "p": "project", "n": "deny"}
 ANSWERS = {"once": "yes", "session": "yes, this session", "project": "yes, always in this project", "deny": "no"}
-SHORT_ANSWERS = {"once": "yes", "session": "session", "project": "project", "deny": "no"}  # For a narrow terminal.
 HELP = [
     ("Sessions", [("/new [--worktree]", "start another session (in its own git worktree with --worktree)"),
                   ("/sessions", "list sessions in this window"), ("/switch N", "show session N"),
@@ -77,9 +76,9 @@ BANNER = ["██╗        ███████╗    ██████╗ ",
           "███████╗██╗███████╗██╗╚██████╔╝",
           "╚══════╝╚═╝╚══════╝╚═╝ ╚═════╝ "]
 
-UNICODE = dict(dot="●", hook="└", rail="│", agent="◆", ok="✔", fail="✗", warn="▲", info="◇", idle="○", now="▸",
+UNICODE = dict(wave="▁▂▃▄▅▆▇█▇▆▅▄▃▂", dot="●", hook="└", rail="│", agent="◆", ok="✔", fail="✗", warn="▲", info="◇", idle="○", now="▸",
                prompt="❯", sep="·", bar="━", track="─", rule="─", spinner="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", box=box.ROUNDED, ellipsis="…")
-ASCII = dict(dot="*", hook="`-", rail="|", agent="#", ok="+", fail="x", warn="!", info="-", idle="o", now=">",
+ASCII = dict(wave="_.-~'~-.", dot="*", hook="`-", rail="|", agent="#", ok="+", fail="x", warn="!", info="-", idle="o", now=">",
              prompt=">", sep="-", bar="#", track="-", rule="-", spinner="|/-\\", box=box.ASCII, ellipsis="...")
 
 
@@ -147,6 +146,26 @@ def suggested_prefix(command):
     return " ".join(keep)
 
 
+def split_blocks(text):
+    """Streamed Markdown split where it is safe to print: (finished blocks, the block still being written).
+
+    A block ends at a blank line or a closing code fence; a code block is never cut in two."""
+    cut = position = 0
+    fence = False
+    for line in text.splitlines(keepends=True):
+        position += len(line)
+        if not line.endswith("\n"):
+            break  # The line is still being written.
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            fence = not fence
+            if not fence:
+                cut = position
+        elif not stripped and not fence:
+            cut = position
+    return text[:cut], text[cut:]
+
+
 def key_hint(pairs):
     """Keys as chips, e.g. ` y  yes   n  no`, for a line printed by rich."""
     text = Text()
@@ -166,6 +185,11 @@ class Renderer:
         self.started = None  # When the current turn's first event arrived, for the elapsed time at the end.
         self.activity = None  # The latest tool call, for the status bar.
         self.parallel = {}  # agent -> how many tool calls its latest step made: their results then say which call they belong to.
+        self.pending = {}  # stage -> streamed text not printed yet (the block still being written)
+        self.streamed = {}  # stage -> all the text streamed for it
+        self.answer = None  # The lead agent's latest streamed text: the answer, when the run ends after it.
+        self.phase = None  # thinking, writing, or running, for the status bar
+        self.printed = set()  # Stages that have printed a block of their streamed text.
 
     def event(self, kind, data):
         for item in self.render(kind, data):
@@ -181,8 +205,17 @@ class Renderer:
         return show(self.short(data)) or []
 
     def reset(self):
-        self.model = self.started = self.activity = None
-        self.parallel = {}
+        self.model = self.started = self.activity = self.answer = self.phase = None
+        self.parallel, self.pending, self.streamed, self.printed = {}, {}, {}, set()
+
+    @property
+    def preview(self):
+        """The last line of the block being written, for the status bar."""
+        for text in reversed(list(self.pending.values())):
+            lines = [line for line in text.splitlines() if line.strip()]
+            if lines:
+                return lines[-1].strip()
+        return ""
 
     def short(self, value):
         """Paths inside the project as relative paths: the agent needs them absolute, a reader does not."""
@@ -217,14 +250,48 @@ class Renderer:
 
     # -- events -----------------------------------------------------------------------
 
+    def block(self, stage, text):
+        """One finished Markdown block of streamed text; blocks of the same answer keep a blank line between them."""
+        gap = [Text("")]  # Paragraphs printed one by one still read as paragraphs.
+        self.printed.add(stage)
+        return gap + [Markdown(text.strip("\n"), code_theme=theme.code())]
+
+    def on_agent_text(self, data):
+        """The lead agent's text as it is written: whole blocks are printed, the unfinished one waits in the status bar."""
+        stage = data.get("stage") or "main"
+        if data.get("reset"):
+            self.pending.pop(stage, None)
+            self.streamed.pop(stage, None)
+            if stage in self.printed:
+                self.printed.discard(stage)
+                return [self.line(self.g.info, "that model stopped; another one starts the answer again")]
+            return []
+        self.phase = "writing"
+        text = data.get("text", "")
+        self.streamed[stage] = self.streamed.get(stage, "") + text
+        ready, self.pending[stage] = split_blocks(self.pending.get(stage, "") + text)
+        return self.block(stage, ready) if ready.strip() else []
+
+    def flush(self, stage):
+        """What is left of a stage's streamed text, printed when its step ends."""
+        rest = self.pending.pop(stage, "")
+        return self.block(stage, rest) if rest.strip() else []
+
     def on_model(self, data):
+        self.phase = "thinking"
         if str(data.get("stage", "")).startswith("agent:main") and data.get("model") != self.model:
             self.model = data.get("model")
             return [Text.assemble((f"  {self.g.info} model ", "leo.muted"), (str(self.model), "leo.accent"))]
 
     def on_agent_step(self, data):
         out, agent = [], data.get("agent") or "main"
-        if agent == "main" and data.get("text") and data.get("tools"):
+        stage = f"agent:{agent}:{data.get('step')}"
+        self.phase = "running" if data.get("tools") else self.phase
+        if stage in self.streamed:  # Its text was printed as it was written: print the rest, never all of it again.
+            out += self.flush(stage)
+            self.answer = self.streamed.pop(stage)
+            self.printed.discard(stage)
+        elif agent == "main" and data.get("text") and data.get("tools"):
             # Thinking out loud between tool calls, a step back from the answer; the final answer comes with done.
             out.append(Padding(Markdown(data["text"], code_theme=theme.code(), style="leo.muted"), (0, 0, 0, 2)))
         calls = data.get("tools") or []
@@ -312,14 +379,20 @@ class Renderer:
 
     def on_done(self, data):
         status, out = data.get("status"), []
+        for stage in list(self.pending):
+            out += self.flush(stage)
         if status == "completed" and data.get("output"):
-            out += [Text(""), Markdown(data["output"], code_theme=theme.code()), Text("")]
+            if self.answer is not None and self.answer.strip() == data["output"].strip():
+                out.append(Text(""))  # It streamed in already.
+            else:
+                out += [Text(""), Markdown(data["output"], code_theme=theme.code()), Text("")]
         elif status == "failed":
             out.append(Text(f"{self.g.fail} {data.get('error') or 'The run failed'}", style="leo.error"))
         elif status == "cancelled":
             out.append(Text(f"{self.g.warn} Stopped.", style="leo.warn"))
         out.append(self.footer(data))
-        self.started = self.activity = None
+        self.started = self.activity = self.answer = self.phase = None
+        self.pending, self.streamed, self.printed = {}, {}, set()
         return out
 
     def footer(self, data):
@@ -401,9 +474,53 @@ def parse_answer(text, options):
     Only the whole answer counts, never its first letter: "please also run the tests", typed to steer the agent just
     as the question appeared, must not answer "p" (yes, always in this project)."""
     answer = text.strip().lower()
+    if answer.isdigit() and 1 <= int(answer) <= len(options):
+        return list(options)[int(answer) - 1]  # The numbers shown beside the answers.
     words = {"yes": "y", "no": "n", "session": "s", "project": "p"}
     answer = words.get(answer, answer)
     return answer if answer in options else None
+
+
+def menu_labels(approval, prefix=None):
+    """What each answer does, said in full for the menu."""
+    edits = approval.get("kind") == "edit"
+    what = "file edits" if edits else (f"commands starting with `{prefix}`" if prefix and not compound(prefix) else "this exact command")
+    labels = {"once": "Yes", "session": f"Yes, and allow {what} for the rest of this session",
+              "project": f"Yes, and always allow {what} in this project", "deny": "No, tell the agent to do it differently  (esc)"}
+    return [(decision, labels[decision]) for decision in answers(approval).values()]
+
+
+async def choose_answer(approval, prefix=None, g=None, guard=0.4):
+    """The answer to an approval, from an arrow-key menu: Up/Down or a number moves, Enter chooses, a number key
+    chooses at once, Esc or Ctrl-C says no.
+
+    For `guard` seconds after the menu appears Enter and number keys do nothing: keys typed to steer the agent just as
+    the question appeared must not answer it."""
+    g = g or glyphs()
+    options = menu_labels(approval, prefix)
+    shown = time.monotonic()
+    early = Condition(lambda: time.monotonic() - shown < guard)
+    keys = KeyBindings()
+
+    @keys.add("enter", filter=early, eager=True)
+    def _too_soon(event):
+        pass
+
+    @keys.add("escape", eager=True)
+    def _deny(event):
+        event.app.exit(result="deny")
+
+    for number, (decision, _) in enumerate(options, 1):
+        @keys.add(str(number), filter=~early, eager=True)
+        def _choose(event, decision=decision):
+            event.app.exit(result=decision)
+
+    try:
+        answer = await ChoiceInput(message=[("class:prompt", "Allow this?")], options=options, default="once", style=theme.prompt_style(),
+                                   symbol=g.prompt, key_bindings=keys).prompt_async()
+    except (EOFError, KeyboardInterrupt):
+        answer = None
+    return answer or "deny"
 
 
 def choices_text(approval):
@@ -449,6 +566,35 @@ async def choose_theme(account, console, current=None):
     account.save(theme=picked)
     console.print(theme_preview(glyphs(console).dot == UNICODE["dot"]))
     return picked
+
+
+def liquid_wave(g, frame, width=8):
+    """A wave rolling through the status bar while the agent works, coloured along the theme's gradient."""
+    colors = theme.liquid()
+    out = []
+    for i in range(width):
+        char = g.wave[(frame + i) % len(g.wave)]
+        if colors:
+            gradient = colors[0]
+            out.append((f"fg:{gradient[(i + frame // 3) % len(gradient)]}", char))
+        else:
+            out.append(("class:tb.spin", char))
+    return out
+
+
+def shimmer(text, frame):
+    """Text with a band of light sliding across it, like light on moving liquid."""
+    colors = theme.liquid()
+    span = len(text) + 12
+    peak = frame % span - 6
+    out = []
+    for i, char in enumerate(text):
+        light = max(0.0, 1 - abs(i - peak) / 5)
+        if colors:
+            out.append((f"fg:{theme.mix(colors[1], colors[2], light)}" + (" bold" if light > 0.6 else ""), char))
+        else:
+            out.append(("class:tb.spin bold" if light > 0.5 else "class:tb", char))
+    return out
 
 
 def fit(fragments, width, style="class:tb"):
@@ -590,8 +736,27 @@ class App:
             return [("class:placeholder", "type to steer the agent · Esc stops it")]
         return [("class:placeholder", "describe a task · @ attaches a file · / for commands")]
 
+    def live(self, width):
+        """While the current session works: a rolling wave, what it is doing (shimmering), how long, and the line the
+        agent is writing right now."""
+        frame, r = int(time.monotonic() * 12), self.renderer
+        seconds = time.monotonic() - r.started if r.started else 0
+        if r.phase == "writing" and r.preview:
+            label = "Writing"
+        elif r.phase == "running" and r.activity:
+            label = f"Running {clip(r.activity, 48)}"
+        else:
+            label = "Thinking"
+        line = [("", " ")] + liquid_wave(self.g, frame) + [("", "  ")] + shimmer(label + "…", frame)
+        line.append(("class:tb", f"  {duration(seconds)}" if seconds >= 1 else ""))
+        if r.phase == "writing" and r.preview:
+            line.append(("class:tb", f"  {self.g.sep}  "))
+            line.append(("class:placeholder", r.preview))
+        return fit(line, width - 1)
+
     def toolbar(self):
-        """One line: every session with its state on the left, the mode and the keys that matter now on the right."""
+        """Every session with its state on the left, the mode and the keys that matter now on the right; above them,
+        while the agent works, a live line with what it is doing."""
         g, left = self.g, [("class:tb", " ")]
         spin = g.spinner[int(time.monotonic() * 8) % len(g.spinner)]
         for session in self.sessions.items:
@@ -622,7 +787,8 @@ class App:
         # The sessions give way first on a narrow terminal: the keys that work now must stay visible.
         left = fit(left, max(width - get_cwidth("".join(t for _, t in right)) - 4, 8))
         gap = width - sum(get_cwidth(t) for _, t in left + right) - 1
-        return left + [("class:tb", " " * max(gap, 1))] + right
+        bar = left + [("class:tb", " " * max(gap, 1))] + right
+        return self.live(width) + [("", "\n")] + bar if self.busy() else bar
 
     def command_list(self):
         """Built-in commands, then your skills and command files (looked up again every few seconds)."""
@@ -666,7 +832,7 @@ class App:
             self.renderer = Renderer(self.console, self.sessions.project)
             self.sessions.notify = self.notify
             self.prompt = PromptSession(history=FileHistory(str(self.account.home / "history")), key_bindings=self.keys(),
-                                        bottom_toolbar=self.toolbar, refresh_interval=0.2, style=DynamicStyle(theme.prompt_style),
+                                        bottom_toolbar=self.toolbar, refresh_interval=0.08, style=DynamicStyle(theme.prompt_style),
                                         completer=SlashCompleter(self), complete_while_typing=True, placeholder=self.placeholder)
             watcher = asyncio.create_task(self.watch())
             try:
@@ -708,51 +874,14 @@ class App:
                 self.say(f"{text.split()[0] if text.startswith('/') else 'That message'} failed: {exc}", "leo.error")
 
     async def ask(self, session, approval):
-        """Show an approval question and send the answer; Ctrl-C or Esc counts as no.
-
-        The answer is a letter and Enter, never a single key press: text typed to steer the agent just before the
-        question appeared must not approve anything by accident."""
+        """Show an approval question as a menu (arrows or a number, then Enter; Esc says no) and send the answer."""
         self.notified.add(approval["id"])
         self.console.print(approval_view(approval, unicode=self.g.dot == UNICODE["dot"]))
-        options = answers(approval)
-        labels = ANSWERS if sum(len(ANSWERS[d]) + 6 for d in options.values()) + 6 <= self.console.width else SHORT_ANSWERS
-        question = [("class:muted", "  ")]
-        for key, decision in options.items():
-            question += [("class:key", f" {key} "), ("", f" {labels[decision]}   ")]
-        question.append(("class:prompt", f"{self.g.prompt} "))
-        no = KeyBindings()
-
-        @no.add("escape", eager=True)
-        def _deny(event):
-            event.app.exit(result="n")
-
-        asker = PromptSession(style=DynamicStyle(theme.prompt_style), key_bindings=no)
-        while True:
-            try:
-                typed = await asker.prompt_async(question)
-            except (EOFError, KeyboardInterrupt):
-                typed = "n"
-            answer = parse_answer(typed, options)
-            if answer:
-                break
-            if typed.strip().startswith("/"):
-                self.say("Answer this question first; then run the command.", "leo.muted")
-            elif len(typed.split()) > 1 and session.approval and session.approval["id"] == approval["id"]:
-                # A sentence is a message for the agent, typed as the question appeared: keep it, then ask again.
-                self.sessions.steer(session, typed.strip())
-                self.say("Sent to the agent; it reads your message after this question.", "leo.muted")
-            self.say(f"Answer with one of: {', '.join(options)}.", "leo.warn")
-        decision, prefix = options[answer], None
-        if decision in ("session", "project") and approval["kind"] == "command":
-            command = approval["detail"]["command"]
-            label = "  Allow this command line " if compound(command) else "  Allow commands starting with "
-            try:
-                prefix = (await asker.prompt_async([("class:muted", label), ("class:prompt", f"{self.g.prompt} ")],
-                                                   default=suggested_prefix(command))).strip() or command
-            except (EOFError, KeyboardInterrupt):
-                prefix = command
+        command = (approval.get("detail") or {}).get("command") if approval.get("kind") == "command" else None
+        prefix = suggested_prefix(command) if command else None
+        decision = await choose_answer(approval, prefix, self.g)
         if session.approval and session.approval["id"] == approval["id"]:
-            self.sessions.answer(session, decision, prefix)
+            self.sessions.answer(session, decision, prefix if decision in ("session", "project") else None)
 
     async def submit(self, text):
         session = self.sessions.current or await self.sessions.open()
