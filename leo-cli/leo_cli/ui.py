@@ -3,24 +3,42 @@
 Events come from the local store, the same event log the web app streams, so this module only reads and renders them.
 The prompt stays usable while sessions work: typing steers the current one, Esc stops it, a status bar lists every
 session, and an approval question takes over the prompt as soon as the current session asks one.
+
+The visual grammar, used everywhere:
+
+    ● tool(argument)              a step of the lead agent
+      └ result                    its result (✗ when it failed)
+      │ #1a2b ● tool(argument)    a step of sub-agent 1a2b, on its rail
+      ▲ warning   ◇ note   ✔ ok   ✗ error
+    ── ✔ done · 7 calls · 12.9K tokens · $0.0123 · 42s ──   the end of a turn
+
+Text that came from outside (paths, commands, model output) is always printed as Text, never as Rich markup, so a
+"[y]" or "[add]" in it shows as typed.
 """
 import asyncio
 import difflib
-import html
+import io
 import os
 import shutil
 import sys
 import time
+from types import SimpleNamespace
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.application import get_app
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts.choice_input import ChoiceInput
+from prompt_toolkit.styles import DynamicStyle
+from rich import box
 from rich.console import Console, Group
 from rich.markdown import Markdown
+from rich.padding import Padding
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -31,21 +49,40 @@ from .account import AccountError
 TERMINAL = {"completed", "failed", "cancelled"}
 INTERRUPTED = "\0interrupted"  # The prompt was closed to show an approval question.
 CHOICES = {"y": "once", "s": "session", "p": "project", "n": "deny"}
-HELP = [("/new [--worktree]", "start another session (in its own git worktree with --worktree)"),
-        ("/sessions", "list sessions in this window"), ("/switch N", "show session N"),
-        ("/resume [N]", "list earlier sessions on this folder, or reopen one"), ("/clear", "start over in this session"),
-        ("/autorun on|off [--save]", "run edits and commands without asking (risky ones still ask)"),
-        ("/models [add]", "list your models, or add one with an API key"), ("/sync", "fetch model changes made on the website"),
-        ("/cost", "tokens and cost of this session"),
-        ("/login [server]", "sign in in the browser (another account or server)"), ("/logout", "sign out and remove the synced models"),
-        ("/theme [name]", "change the colours (dark, light, contrast, terminal, mono)"),
-        ("/help", "this list"), ("/exit", "quit (Ctrl-C twice also quits)")]
+ANSWERS = {"once": "yes", "session": "yes, this session", "project": "yes, always in this project", "deny": "no"}
+HELP = [
+    ("Sessions", [("/new [--worktree]", "start another session (in its own git worktree with --worktree)"),
+                  ("/sessions", "list sessions in this window"), ("/switch N", "show session N"),
+                  ("/resume [N]", "list earlier sessions on this folder, or reopen one"),
+                  ("/clear", "start over in this session")]),
+    ("Models and account", [("/models [add]", "list your models, or add one with an API key"),
+                            ("/sync", "fetch model changes made on the website"), ("/cost", "tokens and cost of this session"),
+                            ("/login [server]", "sign in in the browser (another account or server)"),
+                            ("/logout", "sign out and remove the synced models")]),
+    ("Settings", [("/autorun on|off [--save]", "run edits and commands without asking (risky ones still ask)"),
+                  ("/theme [name]", "change the colours (dark, light, contrast, terminal, mono)")]),
+    ("L.E.O", [("/help", "this list"), ("/exit", "quit (Ctrl-C twice also quits)")]),
+]
+KEYS = [("Enter", "send a task; while the agent works, your message steers it"), ("Esc", "stop the current task"),
+        ("Tab", "complete a /command"), ("Up", "earlier messages"), ("Ctrl-C x2", "quit; unfinished sessions keep their progress")]
 BANNER = ["██╗        ███████╗    ██████╗ ",
           "██║        ██╔════╝   ██╔═══██╗",
           "██║        █████╗     ██║   ██║",
           "██║        ██╔══╝     ██║   ██║",
           "███████╗██╗███████╗██╗╚██████╔╝",
           "╚══════╝╚═╝╚══════╝╚═╝ ╚═════╝ "]
+
+UNICODE = dict(dot="●", hook="└", rail="│", agent="◆", ok="✔", fail="✗", warn="▲", info="◇", idle="○", now="▸",
+               prompt="❯", sep="·", bar="━", track="─", rule="─", spinner="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", box=box.ROUNDED, ellipsis="…")
+ASCII = dict(dot="*", hook="`-", rail="|", agent="#", ok="+", fail="x", warn="!", info="-", idle="o", now=">",
+             prompt=">", sep="-", bar="#", track="-", rule="-", spinner="|/-\\", box=box.ASCII, ellipsis="...")
+
+
+def glyphs(console=None, unicode=None):
+    """The symbols to draw with: Unicode on a UTF-8 terminal, plain ASCII elsewhere."""
+    if unicode is None:
+        unicode = "utf" in ((console.encoding if console else None) or "utf-8").lower()
+    return SimpleNamespace(**(UNICODE if unicode else ASCII))
 
 
 def banner():
@@ -62,13 +99,28 @@ def tokens(n):
     return f"{n / 1000:.1f}K" if n >= 1000 else str(n)
 
 
-def usage_line(usage, seconds=None):
+def money(cost):
+    cost = cost or 0
+    return "$0" if not cost else f"${cost:.4f}" if cost < 1 else f"${cost:.2f}"
+
+
+def duration(seconds):
+    return f"{int(seconds // 60)}m {int(seconds % 60):02d}s" if seconds >= 60 else f"{seconds:.0f}s"
+
+
+def usage_line(usage, seconds=None, sep="·"):
     total = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
     parts = [f"{usage.get('calls', 0)} calls", f"{'~' if usage.get('estimated') else ''}{tokens(total)} tokens",
-             f"${usage.get('estimated_cost') or 0:.4f}"]
+             money(usage.get("estimated_cost"))]
     if seconds is not None:
-        parts.append(f"{int(seconds // 60)}m {int(seconds % 60):02d}s" if seconds >= 60 else f"{seconds:.0f}s")
-    return " · ".join(parts)
+        parts.append(duration(seconds))
+    return f" {sep} ".join(parts)
+
+
+def home_path(path):
+    """A path with the home folder shortened to ~."""
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path and (path == home or path.startswith(home + os.sep)) else path
 
 
 def suggested_prefix(command):
@@ -80,19 +132,40 @@ def suggested_prefix(command):
     return " ".join(keep)
 
 
-class Renderer:
-    """Prints a session's events as they arrive."""
+def key_hint(pairs):
+    """Keys as chips, e.g. ` y  yes   n  no`, for a line printed by rich."""
+    text = Text()
+    for key, label in pairs:
+        text.append(f" {key} ", style="leo.key")
+        text.append(f" {label}   ")
+    return text
 
-    def __init__(self, console, root=None):
+
+class Renderer:
+    """Turns a session's events into lines on the terminal."""
+
+    def __init__(self, console, root=None, unicode=None):
         self.console, self.root = theme.apply(console), root
-        utf = "utf" in (console.encoding or "").lower()
-        self.dot, self.hook, self.sub = ("⏺", "⎿", "↳") if utf else ("*", "|", ">")
+        self.g = glyphs(console, unicode)
         self.model = None
+        self.started = None  # When the current turn's first event arrived, for the elapsed time at the end.
+        self.activity = None  # The latest tool call, for the status bar.
 
     def event(self, kind, data):
+        for item in self.render(kind, data):
+            self.console.print(item)
+
+    def render(self, kind, data):
+        """The renderables for one event (empty for events that show nothing)."""
         show = getattr(self, f"on_{kind}", None)
-        if show:
-            show(self.short(data))
+        if not show:
+            return []
+        if self.started is None and kind != "done":
+            self.started = time.monotonic()
+        return show(self.short(data)) or []
+
+    def reset(self):
+        self.model = self.started = self.activity = None
 
     def short(self, value):
         """Paths inside the project as relative paths: the agent needs them absolute, a reader does not."""
@@ -106,100 +179,179 @@ class Renderer:
             return [self.short(v) for v in value]
         return value
 
+    # -- the gutter -------------------------------------------------------------------
+
+    @staticmethod
+    def tag(agent):
+        return f"#{agent[4:8]}"
+
+    def step_prefix(self, agent):
+        if agent == "main":
+            return Text()
+        return Text.assemble((f"  {self.g.rail} ", "leo.accent"), (f"{self.tag(agent)} ", "leo.accent"))
+
+    def result_prefix(self, agent):
+        if agent == "main":
+            return Text("  ")
+        return Text.assemble((f"  {self.g.rail} ", "leo.accent"), " " * (len(self.tag(agent)) + 3))
+
+    def line(self, glyph, text, style="leo.muted", indent="  "):
+        return Text.assemble((f"{indent}{glyph} ", style), (text, style))
+
+    # -- events -----------------------------------------------------------------------
+
     def on_model(self, data):
         if str(data.get("stage", "")).startswith("agent:main") and data.get("model") != self.model:
             self.model = data.get("model")
-            self.console.print(Text(f"  model: {self.model}", style="leo.muted"))
+            return [Text.assemble((f"  {self.g.info} model ", "leo.muted"), (str(self.model), "leo.accent"))]
 
     def on_agent_step(self, data):
-        lead = data.get("agent") == "main"
-        if lead and data.get("text") and data.get("tools"):
-            self.console.print(Markdown(data["text"], code_theme=theme.code()))  # Thinking out loud between tool calls; the final answer comes with done.
+        out, agent = [], data.get("agent") or "main"
+        if agent == "main" and data.get("text") and data.get("tools"):
+            # Thinking out loud between tool calls, a step back from the answer; the final answer comes with done.
+            out.append(Padding(Markdown(data["text"], code_theme=theme.code(), style="leo.muted"), (0, 0, 0, 2)))
         for call in data.get("tools") or []:
-            line = Text()
-            if not lead:
-                line.append(f"  {self.sub} {data['agent'][4:]} ", style="leo.accent")
-            line.append(f"{self.dot} ", style="leo.lead" if lead else "leo.accent")
+            summary = f"({clip(call['summary'], 100)})" if call.get("summary") else ""
+            self.activity = call["name"] + summary
+            line = self.step_prefix(agent)
+            line.append(f"{self.g.dot} ", style="leo.lead" if agent == "main" else "leo.accent")
             line.append(call["name"], style="bold")
-            if call.get("summary"):
-                line.append(f"({clip(call['summary'], 100)})")
-            self.console.print(line)
+            line.append(summary)
+            out.append(line)
+        return out
 
     def on_agent_tool(self, data):
         output = str(data.get("output") or "")
         lines = output.splitlines()
-        indent = "    " if data.get("agent") != "main" else "  "
+        prefix = self.result_prefix(data.get("agent") or "main")
+        hook = self.g.hook
         if not data.get("ok"):
-            self.console.print(Text(f"{indent}{self.hook} {clip(output, 160)}", style="leo.error"))
-            return
+            return [prefix + Text(f"{hook} {self.g.fail} {clip(output, 160)}", style="leo.error")]
         if data.get("name") == "bash" and lines:
             body = [l for l in lines[1:] if l.strip() and l.strip() != "(no output)"]
             failed = not lines[0].startswith("exit code 0")
-            note = lines[0] + (f" · {len(body)} line{'s' if len(body) != 1 else ''} of output" if body else "")
-            self.console.print(Text(f"{indent}{self.hook} {note}", style="leo.warn" if failed else "leo.muted"))
+            note = lines[0] + (f" {self.g.sep} {len(body)} line{'s' if len(body) != 1 else ''} of output" if body else "")
+            out = [prefix + (Text(f"{hook} {self.g.fail} {note}", style="leo.warn") if failed else Text(f"{hook} {note}", style="leo.muted"))]
             for line in body[-5:] if failed else []:
-                self.console.print(Text(f"{indent}  {clip(line, 160)}", style="leo.muted"))
-        elif data.get("name") == "read_file":
-            self.console.print(Text(f"{indent}{self.hook} {len(lines)} lines", style="leo.muted"))
-        else:
-            self.console.print(Text(f"{indent}{self.hook} {clip(lines[0] if lines else 'done', 140)}", style="leo.muted"))
+                out.append(prefix + Text(f"    {clip(line, 160)}", style="leo.muted"))
+            return out
+        if data.get("name") == "read_file":
+            return [prefix + Text(f"{hook} {len(lines)} lines", style="leo.muted")]
+        return [prefix + Text(f"{hook} {clip(lines[0] if lines else 'done', 140)}", style="leo.muted")]
 
     def on_todos(self, data):
-        marks = {"completed": ("[x]", "leo.muted"), "in_progress": ("[>]", "bold"), "pending": ("[ ]", "")}
-        for item in data.get("items") or []:
-            mark, style = marks.get(item["status"], marks["pending"])
-            self.console.print(Text(f"  {mark} {item['content']}", style=style))
+        items = data.get("items") or []
+        if not items:
+            return []
+        done = sum(1 for item in items if item["status"] == "completed")
+        filled = round(20 * done / len(items))
+        out = [Text.assemble(("  Plan ", "bold"), (self.g.bar * filled, "leo.ok"), (self.g.track * (20 - filled), "leo.border"),
+                             (f" {done}/{len(items)}", "leo.muted"))]
+        for item in items:
+            if item["status"] == "completed":
+                out.append(Text(f"  {self.g.ok} {item['content']}", style="leo.muted"))
+            elif item["status"] == "in_progress":
+                out.append(Text.assemble((f"  {self.g.now} ", "leo.accent"), (item["content"], "bold")))
+            else:
+                out.append(Text(f"  {self.g.idle} {item['content']}"))
+        return out
 
     def on_subagent(self, data):
-        who = f"{data.get('skill') or 'general'} sub-agent {data['agent'][4:]}"
+        tag = self.tag(data["agent"])
         if data.get("status") == "started":
-            self.console.print(Text(f"  {self.sub} {who} started: {clip(data.get('task', ''), 120)}", style="leo.accent"))
-        else:
-            self.console.print(Text(f"  {self.sub} {who} finished: {clip(data.get('report', ''), 140)}", style="leo.accent"))
+            return [Text.assemble((f"  {self.g.agent} ", "leo.accent"), (f"{data.get('skill') or 'general'} sub-agent ", "bold"),
+                                  (tag, "leo.accent"), "  ", clip(data.get("task", ""), 120))]
+        return [Text.assemble((f"  {self.g.agent} ", "leo.accent"), (f"{tag} finished", "leo.accent"), "  ",
+                              (clip(data.get("report", ""), 140), "leo.muted"))]
 
     def on_compacted(self, data):
-        self.console.print(Text("  (older steps were summarized to save context)", style="leo.muted"))
+        return [self.line(self.g.info, "older steps were summarized to save context")]
 
     def on_warning(self, data):
-        self.console.print(Text(f"  ! {data.get('message', '')}", style="leo.warn"))
+        return [self.line(self.g.warn, str(data.get("message", "")), "leo.warn")]
 
     def on_steer(self, data):
-        self.console.print(Text(f"  you → agent: {clip(data.get('message', ''), 160)}", style="leo.muted"))
+        return [Text.assemble((f"  {self.g.prompt} you: ", "leo.accent"), (clip(data.get("message", ""), 160), "leo.muted"))]
 
     def on_approval_resolved(self, data):
-        self.console.print(Text(f"  {'approved' if data.get('approved') else 'declined'}", style="leo.muted"))
+        what = f"{data['kind']} " if data.get("kind") else ""
+        if data.get("approved"):
+            return [self.line(self.g.ok, f"{what}approved", "leo.ok")]
+        return [self.line(self.g.fail, f"{what}declined", "leo.warn")]
 
     def on_done(self, data):
-        status = data.get("status")
+        status, out = data.get("status"), []
         if status == "completed" and data.get("output"):
-            self.console.print(Markdown(data["output"], code_theme=theme.code()))
+            out += [Text(""), Markdown(data["output"], code_theme=theme.code()), Text("")]
         elif status == "failed":
-            self.console.print(Text(f"✗ {data.get('error') or 'The run failed'}", style="leo.error"))
+            out.append(Text(f"{self.g.fail} {data.get('error') or 'The run failed'}", style="leo.error"))
         elif status == "cancelled":
-            self.console.print(Text("Stopped.", style="leo.warn"))
-        if data.get("usage", {}).get("calls"):
-            self.console.print(Text(usage_line(data["usage"]), style="leo.muted"))
+            out.append(Text(f"{self.g.warn} Stopped.", style="leo.warn"))
+        out.append(self.footer(data))
+        self.started = self.activity = None
+        return out
+
+    def footer(self, data):
+        """The rule that ends a turn: how it ended, and what it cost."""
+        status = data.get("status")
+        glyph, word, style = {"completed": (self.g.ok, "done", "leo.ok"), "failed": (self.g.fail, "failed", "leo.error"),
+                              "cancelled": (self.g.warn, "stopped", "leo.warn")}.get(status, (self.g.info, str(status), "leo.muted"))
+        title = Text.assemble((f" {glyph} {word}", style))
+        seconds = time.monotonic() - self.started if self.started is not None else None
+        seconds = seconds if seconds is not None and seconds >= 1 else None  # An instant turn needs no clock.
+        if (data.get("usage") or {}).get("calls"):
+            title.append(f" {self.g.sep} {usage_line(data['usage'], seconds, self.g.sep)}", style="leo.muted")
+        elif seconds is not None:
+            title.append(f" {self.g.sep} {duration(seconds)}", style="leo.muted")
+        title.append(" ")
+        return Rule(title, align="left", style="leo.border", characters=self.g.rule)
 
 
-def approval_view(approval):
+def approval_view(approval, unicode=True):
     """The question, with what exactly would happen: the command, the change, or the push."""
+    g = glyphs(unicode=unicode)
     detail = approval.get("detail") or {}
     kind = approval.get("kind")
-    parts = [Text(approval.get("message", ""), style="bold")]
+    risky = bool(detail.get("risky"))
+    parts = [Text(approval.get("message", ""), style="bold"), Text("")]
     if kind == "command":
-        parts.append(Syntax(detail.get("command", ""), "bash", theme=theme.code(), word_wrap=True))
-        if detail.get("risky"):
-            parts.append(Text("This matches L.E.O.'s list of risky commands, so it is always asked and never remembered.", style="leo.warn"))
+        parts.append(Syntax(detail.get("command", ""), "bash", theme=theme.code(), word_wrap=True, background_color="default"))
+        if risky:
+            parts += [Text(""), Text(f"{g.warn} This matches L.E.O.'s list of risky commands, so it is always asked and never remembered.",
+                                     style="leo.error")]
     elif kind == "edit" and detail.get("old") is not None:
-        diff = difflib.unified_diff(detail["old"].splitlines(), detail.get("new", "").splitlines(), detail.get("path", ""), detail.get("path", ""), lineterm="")
-        parts.append(Syntax("\n".join(diff), "diff", theme=theme.code(), word_wrap=True))
+        path = detail.get("path", "")
+        diff = list(difflib.unified_diff(detail["old"].splitlines(), detail.get("new", "").splitlines(), path, path, lineterm=""))[2:]
+        added = sum(1 for l in diff if l.startswith("+"))
+        removed = sum(1 for l in diff if l.startswith("-"))
+        parts[-1] = Text.assemble((path, "leo.accent"), "  ", (f"+{added}", "leo.ok"), " ", (f"-{removed}", "leo.error"))
+        more = len(diff) - 60
+        body = "\n".join(diff[:60]) + (f"\n… {more} more lines" if more > 0 else "")
+        parts += [Text(""), Syntax(body, "diff", theme=theme.code(), word_wrap=True, background_color="default")]
     elif kind == "edit":
+        path = detail.get("path", "")
         preview = detail.get("new", "").splitlines()
-        more = (detail.get("lines") or len(preview)) - 20
-        parts.append(Syntax("\n".join(preview[:20]) + (f"\n… {more} more lines" if more > 0 else ""), "text", theme=theme.code(), word_wrap=True))
+        count = detail.get("lines") or len(preview)
+        parts[-1] = Text.assemble((path, "leo.accent"), (f"  new file · {count} line{'s' if count != 1 else ''}", "leo.muted"))
+        more = count - 20
+        code = "\n".join(preview[:20])
+        lexer = Syntax.guess_lexer(path, code) if path else "text"
+        parts += [Text(""), Syntax(code, lexer, theme=theme.code(), word_wrap=True, background_color="default")]
+        if more > 0:
+            parts.append(Text(f"… {more} more lines", style="leo.muted"))
     elif detail:
-        parts.append(Text("\n".join(f"{k}: {v}" for k, v in detail.items() if v not in (None, "")), style="leo.muted"))
-    return Panel(Group(*parts), border_style="leo.warn", title="Approval needed", title_align="left")
+        table = Table.grid(padding=(0, 2))
+        table.add_column(style="leo.muted")
+        table.add_column()
+        for key, value in detail.items():
+            if value not in (None, ""):
+                table.add_row(Text(str(key)), Text(str(value)))
+        parts.append(table)
+    title = Text(f"{g.warn} Risky command {g.sep} always asked" if risky else f"{g.warn} Approval needed {g.sep} {kind or 'action'}",
+                 style="leo.error" if risky else "leo.warn")
+    title.stylize("bold")
+    return Panel(Group(*parts), box=g.box, border_style="leo.error" if risky else "leo.warn", title=title, title_align="left",
+                 padding=(1, 2))
 
 
 def remembers(approval):
@@ -207,10 +359,13 @@ def remembers(approval):
     return approval.get("kind") in ("command", "edit") and not (approval.get("detail") or {}).get("risky")
 
 
+def answers(approval):
+    """The keys this approval accepts, and what each one means."""
+    return CHOICES if remembers(approval) else {"y": "once", "n": "deny"}
+
+
 def choices_text(approval):
-    if remembers(approval):
-        return "[y] yes  [s] yes, for this session  [p] yes, always in this project  [n] no"
-    return "[y] yes  [n] no"
+    return "  ".join(f"[{key}] {ANSWERS[decision]}" for key, decision in answers(approval).items())
 
 
 async def pick(message, options, default=None):
@@ -221,19 +376,24 @@ async def pick(message, options, default=None):
         return None
 
 
-def theme_preview():
-    """A few lines as the agent would print them, in the active theme."""
-    dot, hook, sub = ("⏺", "⎿", "↳")
-    diff = "--- greet.py\n+++ greet.py\n@@ -1 +1 @@\n-print('hello')\n+print('hello from leo')"
+def theme_preview(unicode=True):
+    """A few lines exactly as the agent prints them (the same renderer), in the active theme."""
+    renderer = Renderer(Console(file=io.StringIO()), unicode=unicode)
+    diff = "@@ -1 +1 @@\n-print('hello')\n+print('hello from leo')"
+    items = [*renderer.render("todos", {"items": [{"content": "Say hello", "status": "completed"},
+                                                  {"content": "Run it", "status": "in_progress"}]}),
+             *renderer.render("agent_step", {"agent": "main", "tools": [{"name": "edit_file", "summary": "greet.py"}]}),
+             Padding(Syntax(diff, "diff", theme=theme.code(), background_color="default"), (0, 0, 0, 4)),
+             *renderer.render("agent_step", {"agent": "main", "tools": [{"name": "bash", "summary": "python greet.py"}]}),
+             *renderer.render("agent_tool", {"agent": "main", "name": "bash", "ok": True, "output": "exit code 0\nhello from leo"}),
+             *renderer.render("subagent", {"agent": "sub-1a2b3c4d", "skill": "coding", "status": "finished", "report": "tests pass"}),
+             *renderer.render("warning", {"message": "Rate limited; switching to the next model"}),
+             Text(f"{renderer.g.fail} Example error", style="leo.error"),
+             renderer.footer({"status": "completed", "usage": {"calls": 3, "input_tokens": 2400, "output_tokens": 180,
+                                                               "estimated_cost": 0.0021}})]
     label = theme.THEMES[theme.current()]["label"]
-    return Panel(Group(
-        Text.assemble((f"{dot} ", "leo.lead"), ("edit_file", "bold"), "(greet.py)"),
-        Syntax(diff, "diff", theme=theme.code(), word_wrap=True),
-        Text.assemble((f"{dot} ", "leo.lead"), ("bash", "bold"), "(python greet.py)"),
-        Text(f"  {hook} exit code 0 · 1 line of output", style="leo.muted"),
-        Text(f"  {sub} coding sub-agent 1 finished: tests pass", style="leo.accent"),
-        Text("  ! Rate limited; switching to the next model", style="leo.warn"),
-        Text("✗ Example error", style="leo.error")), title=f"Theme: {label}", title_align="left", border_style="leo.brand")
+    return Panel(Group(*items), box=renderer.g.box, title=f"Theme: {label}", title_align="left", border_style="leo.brand",
+                 padding=(1, 2))
 
 
 async def choose_theme(account, console, current=None):
@@ -245,8 +405,24 @@ async def choose_theme(account, console, current=None):
         return None
     console.push_theme(theme.use(picked))
     account.save(theme=picked)
-    console.print(theme_preview())
+    console.print(theme_preview(glyphs(console).dot == UNICODE["dot"]))
     return picked
+
+
+class SlashCompleter(Completer):
+    """Completes /commands, your skills, and your command files, with what each one does."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if not text.startswith("/") or " " in text:
+            return
+        for usage, description in self.app.command_list():
+            name = usage.split()[0]
+            if name.startswith(text):
+                yield Completion(name, start_position=-len(text), display=usage, display_meta=description)
 
 
 class App:
@@ -259,15 +435,25 @@ class App:
         self.cursors, self.notified, self.saved_text, self.last_interrupt = {}, set(), "", 0.0
         self.history = []  # Earlier sessions listed by /resume, so /resume N refers to that list.
         self.prompt = None
+        self._commands = (0.0, [])
+
+    @property
+    def g(self):
+        return self.renderer.g
 
     # -- printing -----------------------------------------------------------------
 
     def say(self, text, style="leo.muted"):
-        self.console.print(Text(text, style=style))
+        """One line; ok, warning, and error lines get their symbol."""
+        glyph = {"leo.ok": self.g.ok, "leo.warn": self.g.warn, "leo.error": self.g.fail}.get(style)
+        self.console.print(Text(f"{glyph} {text}" if glyph else str(text), style=style))
 
     def notify(self, session, message):
         prefix = f"[{session.number}] " if session is not None and len(self.sessions.items) > 1 else ""
         self.say(prefix + message, "leo.warn")
+
+    def answer(self, markdown):
+        self.console.print(Markdown(markdown, code_theme=theme.code()))
 
     def follow(self, session):
         """Print new events: the current session in full, others only when they need you or finish."""
@@ -313,36 +499,68 @@ class App:
 
     # -- prompt -------------------------------------------------------------------
 
-    def message(self):
+    def busy(self):
         current = self.sessions.current
-        return HTML("<ansiyellow>steer › </ansiyellow>") if current and current.busy else HTML("<b>› </b>")
+        return bool(current and current.busy)
+
+    def message(self):
+        if self.busy():
+            return [("class:prompt.steer", f"steer {self.g.prompt} ")]
+        return [("class:prompt", f"{self.g.prompt} ")]
+
+    def placeholder(self):
+        if self.busy():
+            return [("class:placeholder", "type to steer the agent · Esc stops it")]
+        return [("class:placeholder", "describe a task, or type / for commands")]
 
     def toolbar(self):
-        parts = []
+        """One line: every session with its state on the left, the mode and the keys that matter now on the right."""
+        g, left = self.g, [("class:tb", " ")]
+        spin = g.spinner[int(time.monotonic() * 8) % len(g.spinner)]
         for session in self.sessions.items:
-            status = "needs approval" if session.approval else session.status
-            text = f"[{session.number}] {html.escape(session.title or 'new')[:24]} · {status}"
-            if session.branch:
-                text += f" · {html.escape(session.branch)}"
-            if session is self.sessions.current:
-                text = f"<b>{text}</b>"
-            elif session.approval:
-                text = f"<style bg='ansiyellow' fg='ansiblack'>{text}</style>"
-            parts.append(text)
-        autorun = "autorun on" if self.sessions.policy.autorun else "asks before edits and commands"
-        keys = "Esc stop · type to steer" if self.sessions.current and self.sessions.current.busy else "/help"
-        return HTML("  ".join(parts + [f"<i>{autorun}</i>", keys]))
+            current = session is self.sessions.current
+            if session.approval:
+                left += [("class:tb.wait", f" {g.warn} {session.number} needs approval "), ("class:tb", "  ")]
+                continue
+            icon, style = ((spin, "class:tb.spin") if session.busy else
+                           (g.ok, "class:tb.ok") if session.status == "completed" else
+                           (g.fail, "class:tb.error") if session.status in ("failed", "cancelled") else (g.idle, "class:tb"))
+            left += [(style, f"{icon} "), ("class:tb.current" if current else "class:tb", f"{session.number} {clip(session.title or 'new', 24)}")]
+            if current:
+                detail = clip(self.renderer.activity, 40) if session.busy and self.renderer.activity else session.status
+                left.append(("class:tb", f" · {detail}" + (f" · {session.branch}" if session.branch else "")))
+            left.append(("class:tb", "  "))
+        if not self.sessions.items:
+            left.append(("class:tb", "no session yet"))
+        right = [("class:tb.autorun", "autorun on") if self.sessions.policy.autorun else ("class:tb", "asks before edits"), ("class:tb", "  ")]
+        right += ([("class:tb.key", "esc"), ("class:tb", " stop  "), ("class:tb.key", "enter"), ("class:tb", " steer ")] if self.busy() else
+                  [("class:tb.key", "/help"), ("class:tb", "  "), ("class:tb.key", "tab"), ("class:tb", " complete ")])
+        try:
+            width = get_app().output.get_size().columns
+        except Exception:
+            width = shutil.get_terminal_size().columns
+        gap = width - sum(len(t) for _, t in left + right) - 1
+        return left + [("class:tb", " " * max(gap, 2))] + right
+
+    def command_list(self):
+        """Built-in commands, then your skills and command files (looked up again every few seconds)."""
+        stamp, cached = self._commands
+        if time.monotonic() - stamp > 5:
+            skills, commands = self.sessions.skills.discover(), self.sessions.skills.commands()
+            cached = [(f"/{name}", (skills.get(name) or {}).get("description") or f"command file {commands[name].name}")
+                      for name in sorted(set(skills) | set(commands))]
+            self._commands = (time.monotonic(), cached)
+        return [row for _, rows in HELP for row in rows] + cached
 
     def keys(self):
         bindings = KeyBindings()
 
-        @bindings.add("escape", eager=True)
+        @bindings.add("escape", eager=True, filter=Condition(lambda: bool(self.sessions.current and
+                                                                          (self.sessions.current.busy or self.sessions.current.approval))))
         def _stop(event):
-            current = self.sessions.current
-            if current and (current.busy or current.approval):
-                self.sessions.stop(current)
-                event.app.exit(result=INTERRUPTED)
-                self.say("Stopping…", "leo.warn")
+            self.sessions.stop(self.sessions.current)
+            event.app.exit(result=INTERRUPTED)
+            self.say("Stopping…", "leo.warn")
 
         @bindings.add("c-c")
         def _interrupt(event):
@@ -365,7 +583,8 @@ class App:
             self.renderer = Renderer(self.console, self.sessions.project)
             self.sessions.notify = self.notify
             self.prompt = PromptSession(history=FileHistory(str(self.account.home / "history")), key_bindings=self.keys(),
-                                        bottom_toolbar=self.toolbar, refresh_interval=0.5)
+                                        bottom_toolbar=self.toolbar, refresh_interval=0.2, style=DynamicStyle(theme.prompt_style),
+                                        completer=SlashCompleter(self), complete_while_typing=True, placeholder=self.placeholder)
             watcher = asyncio.create_task(self.watch())
             try:
                 await self.loop()
@@ -374,7 +593,7 @@ class App:
                 await asyncio.gather(watcher, return_exceptions=True)
                 await self.sessions.close()
         if any(s.status in ("running", "queued", "waiting") for s in self.sessions.items):
-            self.console.print(Text("Unfinished sessions keep their progress; continue with: leo resume", style="leo.muted"))
+            self.say("Unfinished sessions keep their progress; continue with: leo resume")
 
     async def loop(self):
         while True:
@@ -402,24 +621,32 @@ class App:
             await self.submit(text)
 
     async def ask(self, session, approval):
-        """Show an approval question and send the answer; Ctrl-C or Esc counts as no."""
+        """Show an approval question and send the answer; Ctrl-C or Esc counts as no.
+
+        The answer is a letter and Enter, never a single key press: text typed to steer the agent just before the
+        question appeared must not approve anything by accident."""
         self.notified.add(approval["id"])
-        self.console.print(approval_view(approval))
-        options = CHOICES if remembers(approval) else {"y": "once", "n": "deny"}
-        asker = PromptSession()
+        self.console.print(approval_view(approval, unicode=self.g.dot == UNICODE["dot"]))
+        options = answers(approval)
+        question = [("class:muted", "  ")]
+        for key, decision in options.items():
+            question += [("class:key", f" {key} "), ("", f" {ANSWERS[decision]}   ")]
+        question.append(("class:prompt", f"{self.g.prompt} "))
+        asker = PromptSession(style=DynamicStyle(theme.prompt_style))
         while True:
             try:
-                answer = (await asker.prompt_async(f"{choices_text(approval)} › ")).strip().lower()[:1]
+                answer = (await asker.prompt_async(question)).strip().lower()[:1]
             except (EOFError, KeyboardInterrupt):
                 answer = "n"
             if answer in options:
                 break
-            self.say("Type one of the letters in brackets.", "leo.warn")
+            self.say(f"Type one of: {', '.join(options)}.", "leo.warn")
         decision, prefix = options[answer], None
         if decision in ("session", "project") and approval["kind"] == "command":
             command = approval["detail"]["command"]
             try:
-                prefix = (await asker.prompt_async("Allow commands starting with: ", default=suggested_prefix(command))).strip() or command
+                prefix = (await asker.prompt_async([("class:muted", "  Allow commands starting with "), ("class:prompt", f"{self.g.prompt} ")],
+                                                   default=suggested_prefix(command))).strip() or command
             except (EOFError, KeyboardInterrupt):
                 prefix = command
         if session.approval and session.approval["id"] == approval["id"]:
@@ -447,14 +674,23 @@ class App:
         await self.submit(expanded)
 
     async def cmd_help(self, arguments):
-        table = Table(show_header=False, box=None, padding=(0, 2))
-        for command, description in HELP:
-            table.add_row(f"[bold]{command}[/]", description)
-        skills, commands = self.sessions.skills.discover(), self.sessions.skills.commands()
-        for name in sorted(set(skills) | set(commands)):
-            table.add_row(f"[bold]/{name}[/]", (skills.get(name) or {}).get("description") or f"command file {commands[name].name}")
-        self.console.print(table)
-        self.say("While the agent works: type to steer it, Esc to stop it, Ctrl-C twice to quit.")
+        def section(title, rows, key_style="leo.accent", chips=False):
+            table = Table.grid(padding=(0, 2))
+            table.add_column(min_width=26)
+            table.add_column(style="leo.muted")
+            for usage, description in rows:
+                table.add_row(Text(f" {usage} ", style="leo.key") if chips else Text(usage, style=key_style), Text(description))
+            return [Text(title, style="leo.title"), Padding(table, (0, 0, 0, 2)), Text("")]
+
+        parts = []
+        for title, rows in HELP:
+            parts += section(title, rows)
+        mine = self.command_list()[sum(len(rows) for _, rows in HELP):]
+        if mine:
+            parts += section("Your skills and commands", mine)
+        parts += section("Keys", KEYS, chips=True)
+        self.console.print(Panel(Group(*parts[:-1]), box=self.g.box, border_style="leo.border", title="L.E.O CLI · help",
+                                 title_align="left", padding=(1, 2)))
 
     async def cmd_exit(self, arguments):
         return "exit"
@@ -463,15 +699,31 @@ class App:
 
     async def cmd_new(self, arguments):
         session = await self.sessions.open(worktree="--worktree" in arguments)
+        self.renderer.reset()
         where = f" on branch {session.branch} in {session.root}" if session.branch else ""
         self.say(f"Session {session.number}{where}. Earlier sessions keep running; /sessions lists them.", "leo.ok")
+
+    def status_cell(self, session):
+        if session.approval:
+            return Text(f"{self.g.warn} needs approval", style="leo.warn")
+        glyph, style = {"completed": (self.g.ok, "leo.ok"), "failed": (self.g.fail, "leo.error"), "cancelled": (self.g.warn, "leo.warn"),
+                        "idle": (self.g.idle, "leo.muted")}.get(session.status, (self.g.dot, "leo.accent"))
+        return Text(f"{glyph} {session.status}", style=style)
 
     async def cmd_sessions(self, arguments):
         if not self.sessions.items:
             self.say("No sessions yet: type a task to start one.")
+            return
+        table = Table(box=box.SIMPLE_HEAD, header_style="leo.muted", border_style="leo.border", pad_edge=False, show_edge=False)
+        for column in ("", "#", "Session", "Status", "Branch"):
+            table.add_column(column)
         for session in self.sessions.items:
-            marker = "›" if session is self.sessions.current else " "
-            self.console.print(Text(f"{marker} {session.label()}" + ("  · needs approval" if session.approval else "")))
+            current = session is self.sessions.current
+            table.add_row(Text(self.g.prompt if current else " ", style="leo.accent"), str(session.number),
+                          Text(session.title or "new session", style="bold" if current else ""), self.status_cell(session),
+                          Text(session.branch or "", style="leo.muted"))
+        self.console.print(table)
+        self.say("Show one with /switch N.")
 
     async def cmd_switch(self, arguments):
         session = next((s for s in self.sessions.items if str(s.number) == arguments), None)
@@ -479,21 +731,26 @@ class App:
             self.say("Usage: /switch N (see /sessions)", "leo.error")
             return
         self.sessions.current = session
+        self.renderer.reset()
         self.say(session.label(), "leo.ok")
         run = session.run
         if run and run["status"] in TERMINAL and run.get("output"):
-            self.console.print(Markdown(run["output"]))  # Its events went by while another session was shown.
+            self.answer(run["output"])  # Its events went by while another session was shown.
 
     async def cmd_resume(self, arguments):
         if not arguments:
             self.history = self.sessions.history()
             if not self.history:
                 self.say("No earlier sessions on this folder.")
+                return
+            table = Table(box=box.SIMPLE_HEAD, header_style="leo.muted", border_style="leo.border", pad_edge=False, show_edge=False)
+            for column in ("#", "Session", "Last active"):
+                table.add_column(column)
             for number, item in enumerate(self.history[:20], 1):
-                when = time.strftime("%d %b %H:%M", time.localtime(item["updated_at"]))
-                self.console.print(Text(f"  {number}. {item['title']}  ({when})"))
-            if self.history:
-                self.say("Reopen one with /resume N.")
+                table.add_row(Text(str(number), style="leo.accent"), Text(item["title"] or "untitled"),
+                              Text(time.strftime("%d %b %H:%M", time.localtime(item["updated_at"])), style="leo.muted"))
+            self.console.print(table)
+            self.say("Reopen one with /resume N.")
             return
         if not self.history:
             self.history = self.sessions.history()
@@ -511,11 +768,12 @@ class App:
         else:
             session = self.sessions.resume(conversation_id)
             self.skip_history(session)
+        self.renderer.reset()
         conversation = self.sessions.store.conversation(conversation_id, self.sessions.uid)
         last = next((m for m in reversed(conversation["messages"]) if m["role"] == "assistant"), None) if conversation else None
         self.say(f"Resumed: {session.title}", "leo.ok")
         if last:
-            self.console.print(Markdown(last["content"]))
+            self.answer(last["content"])
         if session.busy:
             self.say("Its last task was interrupted and continues now.", "leo.warn")
 
@@ -527,6 +785,7 @@ class App:
         if current:
             current.id = current.run_id = current.title = None
             current.written = set()
+        self.renderer.reset()
         self.say("Started over: the next message begins a new conversation.", "leo.ok")
 
     async def cmd_autorun(self, arguments):
@@ -547,7 +806,7 @@ class App:
         if arguments:
             self.say("Use /models to list your models, /models add to add one, or /sync to fetch changes from the website.", "leo.warn")
             return
-        self.console.print(models_table(self.sessions.store, self.sessions.uid))
+        self.console.print(models_table(self.sessions.store, self.sessions.uid, self.g))
 
     async def cmd_sync(self, arguments):
         try:
@@ -573,7 +832,7 @@ class App:
         if arguments:
             self.console.push_theme(theme.use(arguments))
             self.account.save(theme=arguments)
-            self.console.print(theme_preview())
+            self.console.print(theme_preview(self.g.dot == UNICODE["dot"]))
         else:
             await choose_theme(self.account, self.console)
 
@@ -587,18 +846,29 @@ class App:
         if not totals or not totals.get("calls"):
             self.say("No model calls in this session yet.")
             return
-        self.say(usage_line({"calls": totals["calls"], "input_tokens": totals["input_tokens"], "output_tokens": totals["output_tokens"],
-                             "estimated_cost": totals["cost"], "estimated": totals["estimated"]}), "default")
+        self.console.print(Text.assemble(("Session cost  ", "bold"), usage_line(
+            {"calls": totals["calls"], "input_tokens": totals["input_tokens"], "output_tokens": totals["output_tokens"],
+             "estimated_cost": totals["cost"], "estimated": totals["estimated"]})))
+        self.say(f"  {tokens(totals['input_tokens'])} in · {tokens(totals['output_tokens'])} out"
+                 + (" · estimated (the model did not report usage)" if totals.get("estimated") else ""))
 
 
-def models_table(store, uid):
-    table = Table(title="Models synced from your L.E.O. server", title_justify="left")
+def models_table(store, uid, g=None):
+    g = g or glyphs()
+    table = Table(title=Text("Models synced from your L.E.O. server", style="leo.title"), title_justify="left", box=g.box,
+                  border_style="leo.border", header_style="leo.muted")
     for column in ("Model", "Strength", "Skills", "Tool calling", "Cost"):
         table.add_column(column)
     for connection in sorted(store.list_connections(uid), key=lambda c: (not c["enabled"], c["name"])):
-        tools = {True: "yes", False: "no", None: "untried"}[connection.get("tools")]
+        tools = {True: Text(f"{g.ok} yes", style="leo.ok"), False: Text(f"{g.fail} no", style="leo.error"),
+                 None: Text("? untried", style="leo.muted")}[connection.get("tools")]
         cost = "free" if connection["free"] or connection["local"] else f"${connection.get('input_price') or 0}/{connection.get('output_price') or 0} per 1M"
-        via = " · via your L.E.O. server" if "/api/cli/relay/" in connection["base_url"] else ""
-        table.add_row(connection["name"] + via + ("" if connection["enabled"] else " (off)"), connection.get("tier", ""),
-                      ", ".join(connection.get("skills") or []) or "any", tools, cost)
+        name = Text.assemble((f"{g.dot if connection['enabled'] else g.idle} ", "leo.ok" if connection["enabled"] else "leo.muted"),
+                             (connection["name"], "" if connection["enabled"] else "leo.muted"))
+        if "/api/cli/relay/" in connection["base_url"]:
+            name.append(" · via your L.E.O. server", style="leo.muted")
+        if not connection["enabled"]:
+            name.append(" (off)", style="leo.muted")
+        table.add_row(name, Text(connection.get("tier", "")), Text(", ".join(connection.get("skills") or []) or "any", style="leo.muted"),
+                      tools, Text(cost, style="leo.ok" if cost == "free" else ""))
     return table

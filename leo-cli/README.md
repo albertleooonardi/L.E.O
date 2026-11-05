@@ -85,7 +85,8 @@ with autorun, and are never remembered:
 - `git push`;
 - installing skills.
 
-**Commands in a session:**
+**Commands in a session.** Type `/` to see them as you type; Tab completes a command, your skills, and your command
+files. The status bar at the bottom shows every session, what the current one is doing, and the keys that work now.
 
 | Command | What it does |
 |---|---|

@@ -13,30 +13,36 @@ THEMES = {
         "banner": ["#7dd3fc", "#67c6f9", "#5ab8f5", "#60a5fa", "#818cf8", "#a78bfa"],
         "accent": "#67c6f9", "muted": "grey58", "ok": "#4ade80", "warn": "#facc15", "error": "#f87171", "brand": "#60a5fa",
         "code": "monokai", "select": "#67c6f9 bold",
+        "pt": {"accent": "#67c6f9", "muted": "#8a8a8a", "ok": "#4ade80", "warn": "#facc15", "error": "#f87171"},
     },
     "light": {
         "label": "Light", "description": "deeper blues and violet, for a light terminal",
         "banner": ["#0369a1", "#0b5fa5", "#1d4ed8", "#3730a3", "#4c1d95", "#6d28d9"],
         "accent": "#0e7490", "muted": "grey42", "ok": "#15803d", "warn": "#a16207", "error": "#b91c1c", "brand": "#1d4ed8",
         "code": "friendly", "select": "#1d4ed8 bold",
+        "pt": {"accent": "#0e7490", "muted": "#6b6b6b", "ok": "#15803d", "warn": "#a16207", "error": "#b91c1c"},
     },
     "contrast": {
         "label": "High contrast", "description": "bright, bold colours that are easy to tell apart",
         "banner": ["bright_white"] * 3 + ["bright_cyan"] * 3,
         "accent": "bold bright_cyan", "muted": "white", "ok": "bold bright_green", "warn": "bold bright_yellow",
         "error": "bold bright_red", "brand": "bold bright_white", "code": "native", "select": "bold ansibrightcyan",
+        "pt": {"accent": "bold ansibrightcyan", "muted": "ansiwhite", "ok": "bold ansibrightgreen", "warn": "bold ansibrightyellow",
+               "error": "bold ansibrightred"},
     },
     "terminal": {
         "label": "Terminal colours", "description": "only the 16 colours of your terminal's own palette",
         "banner": ["cyan"] * 3 + ["blue"] * 3,
         "accent": "cyan", "muted": "dim", "ok": "green", "warn": "yellow", "error": "red", "brand": "blue",
         "code": "ansi_dark", "select": "ansicyan bold",
+        "pt": {"accent": "ansicyan", "muted": "ansibrightblack", "ok": "ansigreen", "warn": "ansiyellow", "error": "ansired"},
     },
     "mono": {
         "label": "No colour", "description": "plain text with bold and dim only",
         "banner": ["bold"] * 6,
         "accent": "bold", "muted": "dim", "ok": "bold", "warn": "bold", "error": "bold reverse", "brand": "default",
         "code": "bw", "select": "bold reverse",
+        "pt": {"accent": "bold", "muted": "", "ok": "bold", "warn": "bold", "error": "bold reverse"},
     },
 }
 DEFAULT = "dark"
@@ -69,6 +75,9 @@ def rich_theme(value):
     styles = {f"leo.{key}": spec[key] for key in STYLES}
     styles.update({f"leo.banner{i}": f"bold {color}" if color != "bold" else "bold" for i, color in enumerate(spec["banner"])})
     styles["leo.lead"] = f"bold {spec['ok']}" if not spec["ok"].startswith("bold") else spec["ok"]
+    styles["leo.key"] = "bold reverse" if value == "mono" else f"bold reverse {spec['accent'].replace('bold ', '')}"  # A key chip: [ y ].
+    styles["leo.border"] = spec["muted"]
+    styles["leo.title"] = f"bold {spec['brand']}" if spec["brand"] != "default" else "bold"
     return Theme(styles)
 
 
@@ -78,6 +87,15 @@ def code():
 
 
 def prompt_style(value=None):
-    """prompt_toolkit's colours for menus: the selected line in the theme's accent."""
+    """prompt_toolkit's colours: menus, the prompt, the status bar, and key chips, in the theme's palette."""
     spec = THEMES[name(value or _active["name"])]
-    return Style.from_dict({"selected-option": spec["select"], "number": "", "frame.border": "", "input-selection": spec["select"]})
+    pt = spec["pt"]
+    key = "bold reverse" if not pt["accent"] or pt["accent"] == "bold" else f"bold reverse {pt['accent'].replace('bold ', '')}"
+    return Style.from_dict({
+        "selected-option": spec["select"], "number": "", "frame.border": "", "input-selection": spec["select"],
+        "prompt": f"bold {pt['accent']}".strip(), "prompt.steer": f"bold {pt['warn']}".strip(),
+        "placeholder": f"italic {pt['muted']}".strip(), "key": key, "muted": pt["muted"],
+        "bottom-toolbar": "noreverse", "tb": pt["muted"], "tb.current": "bold", "tb.spin": pt["accent"],
+        "tb.ok": pt["ok"], "tb.error": pt["error"], "tb.wait": f"bold reverse {pt['warn'].replace('bold ', '')}".strip(),
+        "tb.key": f"bold {pt['accent']}".strip(), "tb.autorun": pt["warn"],
+    })

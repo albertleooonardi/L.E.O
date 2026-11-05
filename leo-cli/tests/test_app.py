@@ -1,6 +1,7 @@
 """The `leo` command and its terminal UI: one-shot runs, approvals, slash commands, and event rendering."""
 import asyncio
 import io
+import re
 import time
 
 import pytest
@@ -266,7 +267,9 @@ async def test_autorun_new_sessions_and_unknown_commands(ui, project):
     await ui.command('/sessions')
     await ui.command('/nonsense')
     out = text_of(ui.console)
-    assert '[1] new session' in out and '› [2] new session' in out and 'Unknown command /nonsense' in out
+    rows = [line.split() for line in out.splitlines() if 'new session' in line]
+    assert rows == [['1', 'new', 'session', ui.g.idle, 'idle'], [ui.g.prompt, '2', 'new', 'session', ui.g.idle, 'idle']], 'the current one is marked'
+    assert 'Unknown command /nonsense' in out
     assert await ui.command('/exit') == 'exit'
 
 
@@ -303,7 +306,8 @@ async def test_resume_lists_and_reopens_earlier_sessions(ui, account, project):
     await ui.command('/resume')
     await ui.command('/resume 1')
     out = text_of(ui.console)
-    assert '1. Create hello.txt' in out and 'Resumed: Create hello.txt' in out and 'Done: Wrote' in out
+    assert re.search(r'^1\s+Create hello\.txt\s+\d\d \w{3} \d\d:\d\d', out, re.M), 'numbered, with when it was last active'
+    assert 'Resumed: Create hello.txt' in out and 'Done: Wrote' in out
     assert ui.sessions.current.id == earlier.id
 
 
@@ -320,8 +324,8 @@ def test_events_render_as_one_line_per_tool_call():
     renderer.event('done', {'status': 'failed', 'error': 'Model call limit reached', 'usage': {'calls': 3, 'input_tokens': 1500, 'output_tokens': 200}})
     out = text_of(console)
     assert 'bash(pytest -q)' in out and 'exit code 1 · 3 lines of output' in out and 'FAILED test_x' in out
-    assert '1a2b3c4d' in out and 'read_file(app.py)' in out and 'No such file' in out
-    assert '[>] Fix test' in out and '[ ] Ship' in out
+    assert f'{renderer.g.rail} #1a2b {renderer.g.dot} read_file(app.py)' in out and 'No such file' in out, 'sub-agent steps sit on its rail'
+    assert f'{renderer.g.now} Fix test' in out and f'{renderer.g.idle} Ship' in out and '0/2' in out
     assert 'Model call limit reached' in out and '3 calls · 1.7K tokens' in out
 
 
@@ -378,3 +382,86 @@ def test_update_upgrades_both_packages_with_uv(monkeypatch):
     assert 'up to date' in text_of(console)
     monkeypatch.setattr(update, 'find_uv', lambda: None)
     assert update.update(console, run=lambda command: 0) == 1 and 'npm install -g leo-orchestrator' in text_of(console)
+
+
+# -- the redesigned screens -------------------------------------------------------------
+
+async def test_help_and_model_names_keep_their_brackets(ui, account):
+    """Text from commands and models is never read as rich markup: "[add]" and "[local]" show as typed."""
+    from backend.schemas import Connection
+    account.store().save_connection(Connection(name='Ollama · qwen3 [local]', protocol='openai', base_url='http://localhost:11434/v1',
+                                               model='qwen3', local=True, free=True).model_dump(), user_id=account.user_id)
+    await ui.command('/help')
+    await ui.command('/models')
+    out = text_of(ui.console)
+    for usage in ('/models [add]', '/login [server]', '/new [--worktree]', '/theme [name]', '/autorun on|off [--save]'):
+        assert usage in out, usage
+    assert 'Sessions' in out and 'Keys' in out, 'grouped'
+    assert 'Ollama · qwen3 [local]' in out
+
+
+async def test_one_shot_shows_which_keys_answer_an_approval(account, project, capsys):
+    sessions = Sessions(account, project, transport=Model(writes_hello).transport)
+    assert await app.one_shot(sessions, 'Create hello.txt', stdin=Answers('maybe\ny\n')) == 0
+    err = capsys.readouterr().err
+    assert ' y ' in err and 'yes, this session' in err and 'yes, always in this project' in err and ' n ' in err
+    assert 'Type one of: y, s, p, n.' in err, 'a wrong answer says what to type'
+    assert re.search(r'done . \d+ calls . ', err), 'stderr ends with what the run cost; the answer alone goes to stdout'
+
+
+def test_without_unicode_everything_is_plain_ascii():
+    console = Console(record=True, width=100, color_system=None)
+    renderer = Renderer(console, unicode=False)
+    renderer.event('todos', {'items': [{'content': 'A', 'status': 'completed'}, {'content': 'B', 'status': 'in_progress'}]})
+    renderer.event('agent_step', {'agent': 'main', 'tools': [{'name': 'bash', 'summary': 'ls'}]})
+    renderer.event('agent_tool', {'agent': 'main', 'name': 'bash', 'ok': False, 'output': 'boom'})
+    renderer.event('agent_step', {'agent': 'sub-1a2b3c4d', 'tools': [{'name': 'read_file', 'summary': 'a.py'}]})
+    renderer.event('warning', {'message': 'slow'})
+    renderer.event('done', {'status': 'completed', 'output': 'ok', 'usage': {'calls': 1, 'input_tokens': 5, 'output_tokens': 5}})
+    console.print(approval_view({'kind': 'command', 'message': 'Run?', 'detail': {'command': 'ls'}}, unicode=False))
+    out = text_of(console)
+    assert out.isascii(), [c for c in out if not c.isascii()]
+    assert '* bash(ls)' in out and '| #1a2b * read_file(a.py)' in out and '! slow' in out
+
+
+def test_slash_commands_complete_with_what_they_do(ui, project):
+    from prompt_toolkit.document import Document
+    from leo_cli.ui import SlashCompleter
+    folder = project / '.leo-cli' / 'skills' / 'greet'
+    folder.mkdir(parents=True)
+    (folder / 'SKILL.md').write_text('---\nname: greet\ndescription: Say hello\n---\nWrite hello.txt.\n')
+
+    def complete(text):
+        return [(c.text, c.display_meta_text) for c in SlashCompleter(ui).get_completions(Document(text), None)]
+
+    assert ('/models', 'list your models, or add one with an API key') in complete('/mo')
+    assert complete('/gr') == [('/greet', 'Say hello')], 'your skills complete too'
+    assert complete('fix the tests') == [] and complete('/models a') == [], 'only the command name, only at the start'
+
+
+async def test_the_status_bar_lists_sessions_and_the_keys_that_matter(ui):
+    def bar():
+        return ''.join(text for _, text in ui.toolbar())
+
+    assert 'no session yet' in bar() and '/help' in bar()
+    await ui.command('/new')
+    assert f'{ui.g.idle} 1 new · idle' in bar() and 'asks before edits' in bar()
+    ui.sessions.policy.set_autorun(True)
+    assert 'autorun on' in bar()
+
+
+def test_the_welcome_card_fits_the_terminal(account, project):
+    from leo_cli import theme
+    sessions = Sessions(account, project)
+
+    def shown(width):
+        console = theme.apply(Console(record=True, width=width, color_system=None))
+        console.print(app.welcome(account, sessions, width=width))
+        return text_of(console)
+
+    wide, narrow = shown(120), shown(36)
+    logo = '███████╗██╗███████╗██╗╚██████╔╝'
+    assert logo in wide and 'project' in wide and 'models' in wide and 'mode' in wide
+    assert any(logo in line and 'project' in line for line in wide.splitlines()), 'side by side on a wide terminal'
+    assert logo not in narrow and 'L.E.O CLI' in narrow, 'no logo when it would not fit'
+    assert all(len(line) <= 36 for line in narrow.splitlines())
