@@ -1,8 +1,8 @@
 """What the agent may do on the user's machine without asking.
 
-Reading is always free. In ask mode (the default) edits and commands need an answer: once, for this session, always in
-this project (saved to .leo-cli/settings.json), or no. Autorun skips the questions, except for actions that are never
-automatic: installing a skill, pushing, and commands that match the risk list.
+Reading is always free. In ask mode (the default) edits, commands, and MCP tools that change things need an answer: once,
+for this session, always in this project (saved to .leo-cli/settings.json), or no. Autorun skips the questions, except
+for actions that are never automatic: installing a skill, pushing, and commands that match the risk list.
 """
 import json
 import re
@@ -42,7 +42,9 @@ class Policy:
         self.autorun = saved.get("autorun", False) if autorun is None else autorun
         self.project_commands = list(saved.get("allow", {}).get("commands", []))
         self.project_edits = bool(saved.get("allow", {}).get("edits", False))
-        self.session_commands, self.session_edits = [], False
+        self.project_tools = list(saved.get("allow", {}).get("mcp", []))
+        self.session_commands, self.session_edits, self.session_tools = [], False, []
+        self.external = None  # name -> {server, tool, read_only, allowed} for MCP tools, set by the session's MCP servers.
 
     def load(self):
         try:
@@ -54,7 +56,7 @@ class Policy:
     def save(self):
         settings = self.load()
         settings["autorun"] = self.autorun
-        settings["allow"] = {"commands": self.project_commands, "edits": self.project_edits}
+        settings["allow"] = {"commands": self.project_commands, "edits": self.project_edits, "mcp": self.project_tools}
         self.settings_path.parent.mkdir(parents=True, exist_ok=True)
         self.settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 
@@ -77,6 +79,14 @@ class Policy:
     def check(self, agent, call):
         """None when the call may run; otherwise the question for the user: {kind, message, detail}."""
         name, args = call["name"], call.get("arguments") or {}
+        tool = self.external(name) if self.external and name not in GUARDED else None
+        if tool:
+            # An MCP tool: one that only reads, or that L.E.O Chat's settings allow, runs; the others ask first.
+            if tool["read_only"] or tool["allowed"] or self.autorun or name in self.session_tools + self.project_tools:
+                return None
+            shown = json.dumps({k: v for k, v in args.items() if k != "_invalid_json"}, indent=2, ensure_ascii=False)
+            return {"kind": "mcp", "message": f"Use {tool['tool']} from the {tool['server']} MCP server?",
+                    "detail": {"name": name, "server": tool["server"], "tool": tool["tool"], "arguments": shown[:4000]}}
         if name not in GUARDED:
             return None
         if name == "install_skill":
@@ -101,9 +111,11 @@ class Policy:
 
     def allow(self, question, scope, prefix=None):
         """Remember a yes beyond this one call: scope is "session" or "project"; commands remember `prefix` (default: the command)."""
-        if scope not in ("session", "project") or question["kind"] not in ("command", "edit") or question["detail"].get("risky"):
+        if scope not in ("session", "project") or question["kind"] not in ("command", "edit", "mcp") or question["detail"].get("risky"):
             return
-        if question["kind"] == "edit":
+        if question["kind"] == "mcp":
+            (self.session_tools if scope == "session" else self.project_tools).append(question["detail"]["name"])
+        elif question["kind"] == "edit":
             if scope == "session":
                 self.session_edits = True
             else:

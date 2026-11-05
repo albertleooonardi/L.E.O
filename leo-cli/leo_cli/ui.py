@@ -52,6 +52,7 @@ from .policy import compound
 TERMINAL = {"completed", "failed", "cancelled"}
 INTERRUPTED = "\0interrupted"  # The prompt was closed to show an approval question.
 CHOICES = {"y": "once", "s": "session", "p": "project", "n": "deny"}
+KINDS = {"mcp": "MCP tool", "git_push": "push", "install_skill": "skill install"}  # What an approval is for, in words.
 ANSWERS = {"once": "yes", "session": "yes, this session", "project": "yes, always in this project", "deny": "no"}
 HELP = [
     ("Sessions", [("/new [--worktree]", "start another session (in its own git worktree with --worktree)"),
@@ -60,6 +61,9 @@ HELP = [
                   ("/cd PATH", "work on another folder in this window"), ("/clear", "start over in this session")]),
     ("Models and account", [("/models [add]", "list your models, or add one with an API key"),
                             ("/sync", "fetch model changes made on the website"), ("/cost", "tokens and cost of this session"),
+                            ("/usage", "calls, tokens, and cost of every model on this device"),
+                            ("/context", "how full the agent's context window is, and with what"),
+                            ("/mcp", "MCP servers: L.E.O Chat's connectors and the CLI's own"),
                             ("/login [server]", "sign in in the browser (another account or server)"),
                             ("/logout", "sign out and remove the synced models")]),
     ("Settings", [("/autorun on|off [--save]", "run edits and commands without asking (risky ones still ask)"),
@@ -332,6 +336,8 @@ class Renderer:
         if name == "read_file":
             read = [l for l in lines if l[:1].isdigit()]
             return [prefix + Text(f"{hook}{plural(len(read), 'line') if read else clip(output, 140)}", style="leo.muted")]
+        if lines and lines[0].startswith("[MCP result from"):  # The note for the model, not for you.
+            lines = lines[1:]
         if name == "list_files" and len(lines) > 1:
             entries = [l for l in lines if not l.startswith("…")]
             return [prefix + Text(f"{hook}{plural(len(entries), 'entry', 'entries')}", style="leo.muted")]
@@ -372,7 +378,8 @@ class Renderer:
         return [Text.assemble((f"  {self.g.prompt} you: ", "leo.accent"), (clip(data.get("message", ""), 160), "leo.muted"))]
 
     def on_approval_resolved(self, data):
-        what = f"{data['kind']} " if data.get("kind") else ""
+        kind = data.get("kind")
+        what = f"{KINDS.get(kind, kind)} " if kind else ""
         if data.get("approved"):
             return [self.line(self.g.ok, f"{what}approved", "leo.ok")]
         return [self.line(self.g.fail, f"{what}declined", "leo.warn")]
@@ -443,6 +450,8 @@ def approval_view(approval, unicode=True):
         parts += [Text(""), Syntax(code, lexer, theme=theme.code(), word_wrap=True, background_color="default")]
         if more > 0:
             parts.append(Text(f"… {more} more lines", style="leo.muted"))
+    elif kind == "mcp":
+        parts += [Syntax(detail.get("arguments") or "{}", "json", theme=theme.code(), word_wrap=True, background_color="default")]
     elif detail:
         table = Table.grid(padding=(0, 2))
         table.add_column(style="leo.muted")
@@ -451,7 +460,8 @@ def approval_view(approval, unicode=True):
             if value not in (None, ""):
                 table.add_row(Text(str(key)), Text(str(value)))
         parts.append(table)
-    title = Text(f"{g.warn} Risky command {g.sep} always asked" if risky else f"{g.warn} Approval needed {g.sep} {kind or 'action'}",
+    what = KINDS.get(kind, kind or "action")
+    title = Text(f"{g.warn} Risky command {g.sep} always asked" if risky else f"{g.warn} Approval needed {g.sep} {what}",
                  style="leo.error" if risky else "leo.warn")
     title.stylize("bold")
     return Panel(Group(*parts), box=g.box, border_style="leo.error" if risky else "leo.warn", title=title, title_align="left",
@@ -460,7 +470,7 @@ def approval_view(approval, unicode=True):
 
 def remembers(approval):
     """Whether "this session" and "always in this project" are offered (never for risky commands, pushes, or installs)."""
-    return approval.get("kind") in ("command", "edit") and not (approval.get("detail") or {}).get("risky")
+    return approval.get("kind") in ("command", "edit", "mcp") and not (approval.get("detail") or {}).get("risky")
 
 
 def answers(approval):
@@ -483,8 +493,13 @@ def parse_answer(text, options):
 
 def menu_labels(approval, prefix=None):
     """What each answer does, said in full for the menu."""
-    edits = approval.get("kind") == "edit"
-    what = "file edits" if edits else (f"commands starting with `{prefix}`" if prefix and not compound(prefix) else "this exact command")
+    kind, detail = approval.get("kind"), approval.get("detail") or {}
+    if kind == "mcp":
+        what = f"{detail.get('tool')} from {detail.get('server')}"
+    elif kind == "edit":
+        what = "file edits"
+    else:
+        what = f"commands starting with `{prefix}`" if prefix and not compound(prefix) else "this exact command"
     labels = {"once": "Yes", "session": f"Yes, and allow {what} for the rest of this session",
               "project": f"Yes, and always allow {what} in this project", "deny": "No, tell the agent to do it differently  (esc)"}
     return [(decision, labels[decision]) for decision in answers(approval).values()]
@@ -1101,6 +1116,28 @@ class App:
     async def cmd_logout(self, arguments):
         await self.account.logout()
         self.say("Signed out; the models and API keys synced to this device were removed. /login signs in again.", "leo.ok")
+
+    async def cmd_usage(self, arguments):
+        from .panels import usage_view  # Imports the engine's agent module; loaded when first asked for.
+        current = self.sessions.current
+        self.console.print(usage_view(self.sessions.store, self.sessions.uid, current.id if current else None,
+                                      [c["id"] for c in self.sessions.history()], self.g))
+
+    async def cmd_context(self, arguments):
+        from .panels import context_view
+        current = self.sessions.current
+        self.console.print(Panel(context_view(current.run if current else None, self.sessions.store, self.sessions.uid,
+                                              self.renderer.model, self.g),
+                                 box=self.g.box, border_style="leo.border", padding=(1, 2), expand=False))
+
+    async def cmd_mcp(self, arguments):
+        from . import mcp
+        servers = mcp.configured(self.sessions.project, self.account.home)
+        if servers:
+            self.say(f"Checking {plural(len(servers), 'MCP server')}…")
+        results = await asyncio.gather(*(mcp.check(server) for server in servers))
+        self.console.print(mcp.view(mcp.chat_connectors(self.account.home), servers, results, self.g, self.account.home,
+                                    self.sessions.project))
 
     async def cmd_cost(self, arguments):
         current = self.sessions.current

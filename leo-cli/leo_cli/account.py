@@ -254,8 +254,33 @@ class Account:
         for role in ("generator_id", "planner_id", "reviewer_id"):
             preferences[role] = ids.get(preferences.get(role))
         store.set_preferences(preferences)
+        listed = self.home / "chat-connectors.json"  # For /mcp; an older server sends none.
+        if "connectors" in data:
+            listed.write_text(json.dumps(data["connectors"], indent=2) + "\n")
+        else:
+            listed.unlink(missing_ok=True)
         self.save(username=data["user"]["username"], device_name=data["device"]["name"], synced_at=time.time(), relayed=len(relayed))
         return {"models": len(data["connections"]) + len(relayed), "relayed": len(relayed), "username": data["user"]["username"]}
+
+    async def call_connector(self, connector_id, tool, arguments):
+        """Run a tool of a L.E.O Chat connector through the server, which holds its sign-in: {text, is_error}."""
+        from backend.mcp_client import MCPError  # Only the agent's MCP tools need it.
+        token = self.secrets.get("device-token")
+        if not token:
+            raise MCPError("this device is not signed in; run leo login")
+        async with self.client(token) as http:
+            http.timeout = httpx.Timeout(150, connect=15)
+            try:
+                response = await http.post(f"/api/cli/connectors/{connector_id}/call", json={"tool": tool, "arguments": arguments or {}})
+            except httpx.HTTPError as exc:
+                raise MCPError(f"cannot reach {self.server}: {type(exc).__name__}") from exc
+        if not response.is_success:
+            try:
+                detail = response.json().get("detail")
+            except ValueError:
+                detail = None
+            raise MCPError(str(detail or f"the L.E.O. server answered HTTP {response.status_code}"))
+        return response.json()
 
     async def add_connection(self, connection):
         """Save a model on the account (as Settings → Models does), then sync it down."""
@@ -287,6 +312,7 @@ class Account:
         for old in store.list_connections(self.user_id):
             store.delete_connection(old["id"], self.user_id)  # Keys leave the laptop with the token.
         self.secrets.delete("device-token")
+        (self.home / "chat-connectors.json").unlink(missing_ok=True)
         self.save(synced_at=None)
 
     def stale(self, hours=1):

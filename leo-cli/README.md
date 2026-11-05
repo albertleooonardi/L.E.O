@@ -113,6 +113,9 @@ files, and `@` paths. The status bar at the bottom shows every session, what the
 | `/models [add]` | List your models, or add one with an API key (saved on your L.E.O. account). |
 | `/sync` | Fetch model changes made on the website. |
 | `/cost` | Show tokens and cost for this session. |
+| `/usage` | Calls, tokens, cost, and share of tokens for every model on this device; totals for this session, folder, and device. |
+| `/context` | How full the agent's context window is: system prompt, your messages, replies, tool results, tool definitions. |
+| `/mcp` | MCP servers: the connectors added in L.E.O Chat, and the ones set up for the CLI, with their tools. |
 | `/login [server]` | Sign in in the browser, to another account or server. |
 | `/logout` | Sign out and remove the synced models and keys. |
 | `/theme [name]` | Change the colours: `dark`, `light`, `contrast`, `terminal`, or `mono`. |
@@ -125,6 +128,24 @@ files, and `@` paths. The status bar at the bottom shows every session, what the
   The agent loads a skill when the work needs it, and `/name args` asks for it directly.
 - **Command files.** `.leo-cli/commands/<name>.md` holds a prompt template for `/name`. `$ARGUMENTS` is replaced with
   what you type after the command.
+
+**MCP servers.** `/mcp` lists two kinds:
+- **From L.E.O Chat:** the connectors under Settings → Connectors on the website. Sync brings their names, state, and
+  tools down; their sign-ins and tokens stay on the server, which makes each call for leo. Tools denied there stay off.
+- **Set up for the CLI:** servers in `~/.config/leo-cli/mcp.json` (yours everywhere), `.leo-cli/mcp.json`, or
+  `.mcp.json` (this project; it wins on a name clash). Local servers start in the project folder when the first task
+  begins and run until leo closes; `/mcp` checks each one and lists its tools.
+
+```json
+{"mcpServers": {
+  "files":  {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]},
+  "linear": {"url": "https://mcp.linear.app/mcp", "headers": {"Authorization": "Bearer ..."}}
+}}
+```
+
+The agent gets the tools of every working server, named `<server>__<tool>`. A tool that only reads (or that L.E.O Chat
+allows) runs freely; the others ask first, with the menu above, and "this session" or "always in this project"
+remembers that tool. A server that fails to start is left out; `/mcp` says why.
 
 ## Where things are stored
 

@@ -11,6 +11,7 @@ import uuid
 from backend.schemas import RunInput
 from backend.worker import process_one
 
+from .mcp import Servers
 from .policy import Policy
 from .skills import Skills
 from .workspace import LocalWorkspace
@@ -24,7 +25,7 @@ class Session:
     def __init__(self, sessions, number, root, branch=None, conversation_id=None):
         self.sessions, self.number, self.root, self.branch = sessions, number, root, branch
         self.id, self.run_id, self.task, self.title, self.written = conversation_id, None, None, None, set()
-        self.workspace = LocalWorkspace(root, sessions.policy, sessions.skills, on_write=self.wrote)
+        self.workspace = LocalWorkspace(root, sessions.policy, sessions.skills, on_write=self.wrote, mcp=sessions.mcp)
 
     def wrote(self, path):
         self.written.add(path)
@@ -59,6 +60,8 @@ class Sessions:
         self.project = os.path.realpath(project)
         self.policy = Policy(self.project, autorun)
         self.skills = Skills(self.project, account.home)
+        self.mcp = Servers(self.project, account.home, account)  # Started when the first task needs the agent's tools.
+        self.policy.external = self.mcp.describe
         self.transport, self.notify = transport, notify or (lambda session, message: None)
         self.owner = f"leo-cli-{uuid.uuid4().hex[:8]}"
         self.items, self.current = [], None
@@ -127,6 +130,7 @@ class Sessions:
 
     async def drive(self, session, lease_wait=LEASE_WAIT):
         waited = 0
+        await self.mcp.start()  # Once per window; a server that fails is left out, and /mcp says why.
         while True:
             claimed = await process_one(self.store, self.owner, self.transport, session.workspace, run_id=session.run_id)
             if claimed:
@@ -186,3 +190,4 @@ class Sessions:
             if session.task and not session.task.done():
                 session.task.cancel()
         await asyncio.gather(*(s.task for s in self.items if s.task), return_exceptions=True)
+        await self.mcp.close()

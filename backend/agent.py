@@ -93,6 +93,9 @@ def summary(call):
         return f"{args.get('agent', '')}: {str(args.get('task', ''))[:200]}"
     if call["name"] == "todo_write":
         return f"{len(args.get('todos') or [])} items"
+    if not key and call["name"] not in SCHEMAS and isinstance(args, dict):  # A tool the workspace adds, such as an MCP tool.
+        return ", ".join(f"{k}={v if isinstance(v, (int, float, bool)) else json.dumps(v, ensure_ascii=False)}"
+                         for k, v in args.items() if k != "_invalid_json")[:300]
     return str(args.get(key, "") if key else "")[:300]
 
 
@@ -107,6 +110,8 @@ class AgentRun:
         self.where = getattr(self.sandbox, "resolve", workspace_path)
         self.policy = getattr(self.sandbox, "policy", None)
         self.agent_skills = getattr(self.sandbox, "skills", None)
+        # Tools of the workspace's own (L.E.O CLI: the user's MCP servers): extra_tools() lists them, call_tool runs one.
+        self.extra_tools = getattr(self.sandbox, "extra_tools", None)
         self.ws = orchestrator.run["conversation_id"]
         self.prefs = orchestrator.prefs
         self.state = orchestrator.state.setdefault("agent", {"transcripts": {}, "tasks": {}, "steps": {}, "todos": [], "steer_cursor": 0,
@@ -226,11 +231,14 @@ class AgentRun:
             return f"Error: there is no tool called {call['name']}."
         if "_invalid_json" in args:
             return "Error: the arguments were not valid JSON. Call the tool again with a JSON object."
-        handler = getattr(self, f"tool_{call['name']}")
-        try:
-            inspect.signature(handler).bind(name, call, **args)
-        except TypeError as exc:
-            return f"Error: invalid arguments for {call['name']}: {exc}"
+        handler = getattr(self, f"tool_{call['name']}", None)
+        if handler is None:  # One of the workspace's own tools: the tool itself checks its arguments.
+            handler = lambda name, call, **arguments: self.sandbox.call_tool(call["name"], arguments)  # noqa: E731
+        else:
+            try:
+                inspect.signature(handler).bind(name, call, **args)
+            except TypeError as exc:
+                return f"Error: invalid arguments for {call['name']}: {exc}"
         question = self.policy.check(name, call) if self.policy else None
         if question and not self.approval(f"{question['kind']}:{name}:{call['id']}", question["kind"], question["message"], question["detail"]):
             return "Error: the user declined this. Do not try it another way; continue without it, or explain what you need."
@@ -299,6 +307,10 @@ When finished, reply without calling a tool, with a short report: what you did, 
             if self.agent_skills:
                 names.append("install_skill")
                 tools.append(SCHEMAS["install_skill"])
+        if self.extra_tools:
+            extra = [spec for spec in self.extra_tools() if spec["name"] not in SCHEMAS and spec["name"] != "delegate"]
+            names += [spec["name"] for spec in extra]
+            tools += extra
         self.allowed[name] = set(names)
         return tools
 

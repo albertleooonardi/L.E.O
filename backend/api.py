@@ -57,6 +57,8 @@ PUBLIC_API_PATHS = {
 CLI_DEVICE_PATHS = {"/api/cli/sync", "/api/cli/usage", "/api/cli/logout", "/api/cli/connections"}
 # The CLI reaches models on the user's 9Router (on the server's network only) through the server: model calls only.
 CLI_RELAY_PREFIX = "/api/cli/relay/"
+# The CLI calls the tools of the user's L.E.O Chat connectors through the server, which keeps their sign-ins.
+CLI_CONNECTOR_PREFIX = "/api/cli/connectors/"
 RELAY_PATHS = {"chat/completions", "responses", "models"}
 MAX_RELAY_BYTES = 32 * 1024 * 1024
 LEGACY_ROUTER = "http://9router:20128"  # The shared 9router service of earlier versions (one per server, not per user).
@@ -165,7 +167,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
 
             # Auth: session cookie or bearer token (LEO_API_TOKEN for admin/MCP). CORS preflights carry no credentials.
             public = request.url.path in PUBLIC_API_PATHS or request.url.path.startswith(PUBLIC_API_PREFIXES)
-            device_path = request.url.path in CLI_DEVICE_PATHS or request.url.path.startswith(CLI_RELAY_PREFIX)
+            device_path = request.url.path in CLI_DEVICE_PATHS or request.url.path.startswith((CLI_RELAY_PREFIX, CLI_CONNECTOR_PREFIX))
             if device_path and request.method != "OPTIONS":
                 device = await run_in_threadpool(store.cli_device, request.headers.get("authorization", "").removeprefix("Bearer ").strip())
                 owner = device and await run_in_threadpool(store.get_user, device["user_id"])
@@ -840,8 +842,16 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
                 relayed.append({k: v for k, v in fields.items() if k != "base_url"})
                 continue
             models.append({**fields, "api_key": store.decrypt(c) or None})
+        # Chat connectors, for the CLI's /mcp and its agent; their sign-ins and tokens stay on the server, which makes
+        # each tool call (CLI_CONNECTOR_PREFIX).
+        listed = []
+        for c in store.list_connectors(user.id):
+            shown = public_connector(c)
+            listed.append({key: shown[key] for key in ("id", "name", "url", "enabled", "auth", "status", "error", "signed_in", "tools",
+                                                       "permissions")})
         return {"device": {"id": device["id"], "name": device["name"]}, "user": {"username": user.username},
-                "connections": models, "relayed": relayed, "chat_only": [], "preferences": store.preferences(), "skills": store.list_skills()}
+                "connections": models, "relayed": relayed, "chat_only": [], "preferences": store.preferences(), "skills": store.list_skills(),
+                "connectors": listed}
 
     @app.api_route(CLI_RELAY_PREFIX + "{connection_id}/{path:path}", methods=["GET", "POST"])
     async def cli_relay(connection_id: str, path: str, request: Request):
@@ -875,6 +885,25 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
                 await client.aclose()
 
         return StreamingResponse(answer(), status_code=upstream.status_code, media_type=upstream.headers.get("content-type"))
+
+    class ConnectorCall(BaseModel):
+        tool: str = Field(min_length=1, max_length=128)
+        arguments: dict = Field(default_factory=dict)
+
+    @app.post(CLI_CONNECTOR_PREFIX + "{connector_id}/call")
+    async def cli_connector_call(connector_id: str, body: ConnectorCall, request: Request):
+        """Run one tool of the user's Chat connector for the CLI, which asked the user first when the tool needs it."""
+        found = store.get_connector(connector_id, request.state.user.id)
+        if not found or not found.get("enabled", True):
+            raise HTTPException(404, "This connector is not in L.E.O Chat any more; run leo sync")
+        if not any(tool["name"] == body.tool for tool in found.get("tools") or []) or (found.get("permissions") or {}).get(body.tool) == "deny":
+            raise HTTPException(403, "This tool is not allowed in L.E.O Chat's connector settings")
+        try:
+            return await connectors.call(found, body.tool, body.arguments)
+        except NeedsAuth as exc:
+            raise HTTPException(409, "Sign in to this connector again in L.E.O Chat → Settings → Connectors") from exc
+        except MCPError as exc:
+            raise HTTPException(502, str(exc)) from exc
 
     @app.post("/api/cli/connections", status_code=201)
     def cli_add_connection(body: Connection, request: Request):

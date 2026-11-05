@@ -66,11 +66,20 @@ def kill_tree(pid):
 
 
 class LocalWorkspace:
-    def __init__(self, root, policy=None, skills=None, on_write=None):
+    def __init__(self, root, policy=None, skills=None, on_write=None, mcp=None):
         self.root = os.path.realpath(root)
         self.place = f"the user's own computer, in the project folder {self.root}"
         self.environment = environment()
-        self.policy, self.skills, self.on_write = policy, skills, on_write
+        self.policy, self.skills, self.on_write, self.mcp = policy, skills, on_write, mcp
+
+    def extra_tools(self):
+        """The tools of the user's MCP servers, for the agent (empty until the session has started them)."""
+        return list(self.mcp.specs) if self.mcp else []
+
+    async def call_tool(self, name, arguments):
+        if not self.mcp:
+            return f"Error: there is no tool called {name}."
+        return await self.mcp.call(name, arguments)
 
     def resolve(self, path):
         """The real path for an agent-given path; refused unless it stays inside the project folder."""

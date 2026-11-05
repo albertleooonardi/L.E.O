@@ -1,5 +1,6 @@
 """L.E.O CLI's account against the real server app, in-process: device login, sync, usage reports, sign-out."""
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -76,6 +77,48 @@ async def test_login_syncs_models_keys_and_preferences(account, server):
         assert (account.home / 'secrets.json').stat().st_mode & 0o777 == 0o600
     database = (account.home / 'leo.db').read_bytes().decode('latin-1')
     assert 'sk-or-1' not in database and 'sk-9r' not in database, 'keys are encrypted at rest; the router key never comes down'
+
+
+async def test_chat_connectors_come_down_and_run_through_the_server(tmp_path, monkeypatch, server):
+    """Chat's connectors: their tools come down for the CLI's agent and /mcp; each call is made by the server, which keeps
+    the sign-in. Tokens never reach the laptop, and a tool Chat denies cannot be called."""
+    import socket
+    from backend.mcp_client import MCPError
+    from leo_cli.mcp import chat_connectors
+    monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
+    monkeypatch.setattr(socket, 'getaddrinfo', lambda host, port, *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 0))])
+    seen = []
+
+    def linear(request):
+        body = json.loads(request.content)
+        if 'id' not in body:
+            return httpx.Response(202)
+        if body['method'] == 'initialize':
+            result = {'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}}}
+        else:
+            seen.append((body['params']['name'], body['params']['arguments'], request.headers['authorization']))
+            result = {'content': [{'type': 'text', 'text': 'Created LIN-7'}]}
+        return httpx.Response(200, json={'jsonrpc': '2.0', 'id': body['id'], 'result': result})
+
+    schema = {'type': 'object', 'properties': {'title': {'type': 'string'}}}
+    server['store'].create_connector(server['user']['id'], {
+        'name': 'Linear', 'url': 'https://mcp.linear.example/mcp', 'enabled': True, 'auth': 'token', 'status': 'connected',
+        'tools': [{'name': 'create_issue', 'description': 'New issue', 'input_schema': schema, 'read_only': False},
+                  {'name': 'delete_all', 'description': 'Delete everything', 'input_schema': schema, 'read_only': False}],
+        'permissions': {'create_issue': 'ask', 'delete_all': 'deny'}}, secret={'token': 'lin-secret-token'})
+    app = create_app(server['store'].config, server['store'], mcp_transport=httpx.MockTransport(linear))
+    account = Account(tmp_path / 'cli-home-2', transport=httpx.ASGITransport(app=app))
+    await account.login('http://testserver', show=approver(server), sleep=no_wait)
+    [found] = chat_connectors(account.home)
+    assert found['name'] == 'Linear' and found['status'] == 'connected' and found['signed_in'] is True
+    assert [t['name'] for t in found['tools']] == ['create_issue', 'delete_all'] and found['tools'][0]['input_schema'] == schema
+    assert 'lin-secret-token' not in (account.home / 'chat-connectors.json').read_text()
+    assert await account.call_connector(found['id'], 'create_issue', {'title': 'Bug'}) == {'text': 'Created LIN-7', 'is_error': False}
+    assert seen == [('create_issue', {'title': 'Bug'}, 'Bearer lin-secret-token')], 'the server signs the call'
+    with pytest.raises(MCPError, match='not allowed'):
+        await account.call_connector(found['id'], 'delete_all', {})
+    await account.logout()
+    assert chat_connectors(account.home) is None, 'signing out removes them'
 
 
 async def test_chatgpt_models_on_the_server_work_through_the_relay(account, server):
