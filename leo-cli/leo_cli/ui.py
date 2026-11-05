@@ -46,6 +46,7 @@ from rich.text import Text
 
 from . import theme
 from .account import AccountError
+from .mentions import attach, complete
 from .policy import compound
 
 TERMINAL = {"completed", "failed", "cancelled"}
@@ -57,7 +58,7 @@ HELP = [
     ("Sessions", [("/new [--worktree]", "start another session (in its own git worktree with --worktree)"),
                   ("/sessions", "list sessions in this window"), ("/switch N", "show session N"),
                   ("/resume [N]", "list earlier sessions on this folder, or reopen one"),
-                  ("/clear", "start over in this session")]),
+                  ("/cd PATH", "work on another folder in this window"), ("/clear", "start over in this session")]),
     ("Models and account", [("/models [add]", "list your models, or add one with an API key"),
                             ("/sync", "fetch model changes made on the website"), ("/cost", "tokens and cost of this session"),
                             ("/login [server]", "sign in in the browser (another account or server)"),
@@ -67,7 +68,8 @@ HELP = [
     ("L.E.O", [("/help", "this list"), ("/exit", "quit (Ctrl-C twice also quits)")]),
 ]
 KEYS = [("Enter", "send a task; while the agent works, your message steers it"), ("Esc", "stop the current task"),
-        ("Tab", "complete a /command"), ("Up", "earlier messages"), ("Ctrl-C x2", "quit; unfinished sessions keep their progress")]
+        ("@path", "attach a file's text or a folder's listing to your message, e.g. @src/app.py"),
+        ("Tab", "complete a /command or an @path"), ("Up", "earlier messages"), ("Ctrl-C x2", "quit; unfinished sessions keep their progress")]
 BANNER = ["██╗        ███████╗    ██████╗ ",
           "██║        ██╔════╝   ██╔═══██╗",
           "██║        █████╗     ██║   ██║",
@@ -469,13 +471,18 @@ def fit(fragments, width, style="class:tb"):
 
 
 class SlashCompleter(Completer):
-    """Completes /commands, your skills, and your command files, with what each one does."""
+    """Completes /commands, your skills, and your command files, with what each one does; and @paths to attach."""
 
     def __init__(self, app):
         self.app = app
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
+        word = text.split()[-1] if text and not text[-1].isspace() else ""
+        if word.startswith("@"):
+            for replacement, label in complete(word, self.app.root()):
+                yield Completion(replacement, start_position=-len(word), display=label)
+            return
         if not text.startswith("/") or " " in text:
             return
         for usage, description in self.app.command_list():
@@ -499,6 +506,11 @@ class App:
     @property
     def g(self):
         return self.renderer.g
+
+    def root(self):
+        """The folder the current session works in (its worktree, if it has one)."""
+        current = self.sessions.current
+        return current.root if current else self.sessions.project
 
     # -- printing -----------------------------------------------------------------
 
@@ -576,7 +588,7 @@ class App:
     def placeholder(self):
         if self.busy():
             return [("class:placeholder", "type to steer the agent · Esc stops it")]
-        return [("class:placeholder", "describe a task, or type / for commands")]
+        return [("class:placeholder", "describe a task · @ attaches a file · / for commands")]
 
     def toolbar(self):
         """One line: every session with its state on the left, the mode and the keys that matter now on the right."""
@@ -723,7 +735,9 @@ class App:
             answer = parse_answer(typed, options)
             if answer:
                 break
-            if len(typed.split()) > 1 and session.approval and session.approval["id"] == approval["id"]:
+            if typed.strip().startswith("/"):
+                self.say("Answer this question first; then run the command.", "leo.muted")
+            elif len(typed.split()) > 1 and session.approval and session.approval["id"] == approval["id"]:
                 # A sentence is a message for the agent, typed as the question appeared: keep it, then ask again.
                 self.sessions.steer(session, typed.strip())
                 self.say("Sent to the agent; it reads your message after this question.", "leo.muted")
@@ -742,6 +756,9 @@ class App:
 
     async def submit(self, text):
         session = self.sessions.current or await self.sessions.open()
+        text, notes = attach(text, session.root)
+        for note in notes:
+            self.console.print(self.renderer.line(self.g.info, f"attached {note}"))
         if session.busy or session.approval:
             # A message sent while the agent works, or just as it asks a question, steers it: it reads the message
             # before its next step. (A new run cannot start while this one waits for an answer.)
@@ -868,6 +885,30 @@ class App:
             self.answer(last["content"])
         if session.busy:
             self.say("Its last task was interrupted and continues now.", "leo.warn")
+
+    async def cmd_cd(self, arguments):
+        """Move this window to another folder: new sessions work there, with that folder's own rules and skills."""
+        if not arguments:
+            self.say(f"Working in {home_path(self.sessions.project)}. Usage: /cd PATH")
+            return
+        folder = os.path.expanduser(arguments.strip().strip('"'))
+        folder = os.path.realpath(folder if os.path.isabs(folder) else os.path.join(self.root(), folder))
+        if not os.path.isdir(folder):
+            self.say(f"No such folder: {home_path(folder)}", "leo.error")
+            return
+        if any(s.busy or s.approval for s in self.sessions.items):
+            self.say("A session is still working; stop it with Esc (or wait for it) before changing folders.", "leo.error")
+            return
+        from .sessions import Sessions  # sessions imports the engine; this module stays light.
+        old = self.sessions
+        await old.close()
+        self.sessions = Sessions(self.account, folder, transport=old.transport, notify=old.notify)
+        self.renderer = Renderer(self.console, folder)
+        self.cursors, self.history, self._commands = {}, [], (0.0, [])
+        mode = "autorun on" if self.sessions.policy.autorun else "asks before edits and commands"
+        self.say(f"Now working in {home_path(folder)} ({mode}).", "leo.ok")
+        if old.items:
+            self.say(f"Sessions on {home_path(old.project)} are saved; /cd back and /resume to reopen them.")
 
     async def cmd_clear(self, arguments):
         current = self.sessions.current

@@ -1,6 +1,6 @@
 """The `leo` command.
 
-    leo                          work with the agent on this folder (signs in through the browser the first time)
+    leo [FOLDER]                 work with the agent on this folder, or on FOLDER (signs in through the browser the first time)
     leo login [--server URL]     sign in again, or to another server
     leo -p "task"                one task, then print the answer (exit code 1 if it failed)
     leo resume [N]               continue an earlier session on this folder
@@ -23,6 +23,7 @@ from rich.table import Table
 
 from . import __version__, models, theme
 from .account import Account, AccountError, SignedOut
+from .mentions import attach
 from .ui import (ANSWERS, TERMINAL, App, Renderer, answers, approval_view, banner, choose_theme, clip_left, glyphs, home_path,
                  key_hint, models_table, parse_answer, pick)
 
@@ -32,8 +33,10 @@ SIGN_IN_FIRST = "Not signed in yet. Run [bold]leo[/] in a terminal to sign in (o
 
 
 def parser():
-    p = argparse.ArgumentParser(prog="leo", description="L.E.O CLI: the multi-agent LLM Efficiency Orchestrator in your terminal.",
-                                epilog="Commands: login, logout, sync, models, resume [N], update. With no command, leo works on the current folder.")
+    p = argparse.ArgumentParser(prog="leo", usage="leo [FOLDER] [options]  |  leo COMMAND",
+                                description="L.E.O CLI: the multi-agent LLM Efficiency Orchestrator in your terminal.",
+                                epilog="Commands: login, logout, sync, models, resume [N], update. With no command, leo works on FOLDER, "
+                                       "or on the current folder. In a message, @path attaches a file or folder.")
     p.add_argument("command", nargs="*", help=argparse.SUPPRESS)
     p.add_argument("-p", "--print", dest="task", metavar="TASK", help="run one task, print the answer, and exit")
     p.add_argument("--autorun", action="store_true", help="edit files and run commands without asking (risky ones still ask)")
@@ -49,7 +52,11 @@ def main(argv=None):
     p = parser()
     args = p.parse_args(argv)
     if args.command and args.command[0] not in COMMANDS:
-        p.error(f"unknown command {args.command[0]!r}; give a task with -p \"...\" or start leo with no command")
+        folder = os.path.expanduser(args.command[0])
+        if not os.path.isdir(folder) or len(args.command) > 1:
+            p.error(f"unknown command or folder {args.command[0]!r}; give a task with -p \"...\", a folder to work on, "
+                    "or start leo with no command")
+        args.project, args.command = folder, []  # `leo ~/my-project`: work on that folder.
     if os.name == "nt" and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Code and box drawing in a legacy console code page.
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -258,7 +265,10 @@ async def one_shot(sessions, task, worktree=False, transport=None, stdin=None):
             renderer.event(event["kind"], event["data"])
     session = await sessions.open(worktree=worktree)
     expanded = sessions.skills.expand(task[1:].partition(" ")[0], task[1:].partition(" ")[2].strip()) if task.startswith("/") else None
-    await sessions.send(session, expanded or task)
+    task, notes = attach(expanded or task, session.root)
+    for note in notes:
+        err.print(renderer.line(renderer.g.info, f"attached {note}"))
+    await sessions.send(session, task)
     cursor = 0
     try:
         while True:

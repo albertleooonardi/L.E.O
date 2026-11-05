@@ -56,11 +56,17 @@ them for a lost laptop.
 ```bash
 cd my-project
 leo                                  # interactive session on this folder
+leo ~/code/my-app                    # ...or on another folder
 leo -p "fix the failing tests"       # one task; the answer goes to stdout, exit code 1 if it failed
 leo -p "..." --autorun               # unattended: no questions, except for risky actions
 leo --worktree                       # work in a new git worktree and branch, leaving your folder alone
 leo resume                           # continue the last session on this folder (leo resume 2: the one before)
 ```
+
+**Attach files with @.** In a message, `@path` attaches a file's current text (`fix the bug in @src/app.py`) or a
+folder's listing (`@src/`), so the agent starts with it. Tab completes paths as you type after `@`. Paths are relative to
+the folder leo works on; `~/...` and absolute paths work too, and quote a path with spaces: `@"my notes.md"`. A file
+outside the folder is attached for reading only: the agent's own tools stay inside the folder.
 
 **While the agent works:**
 - Each tool call is one line, followed by a short result.
@@ -89,8 +95,8 @@ with autorun, and are never remembered:
 - `git push`;
 - installing skills.
 
-**Commands in a session.** Type `/` to see them as you type; Tab completes a command, your skills, and your command
-files. The status bar at the bottom shows every session, what the current one is doing, and the keys that work now.
+**Commands in a session.** Type `/` to see them as you type; Tab completes a command, your skills, your command
+files, and `@` paths. The status bar at the bottom shows every session, what the current one is doing, and the keys that work now.
 
 | Command | What it does |
 |---|---|
@@ -98,6 +104,7 @@ files. The status bar at the bottom shows every session, what the current one is
 | `/sessions` | List the sessions in this window. |
 | `/switch N` | Show session N. |
 | `/resume [N]` | List earlier sessions on this folder, or reopen one. |
+| `/cd PATH` | Work on another folder in this window (its own rules, skills, and sessions). |
 | `/clear` | Start over in this session. |
 | `/autorun on\|off [--save]` | Turn the approval questions off or on. |
 | `/models [add]` | List your models, or add one with an API key (saved on your L.E.O. account). |

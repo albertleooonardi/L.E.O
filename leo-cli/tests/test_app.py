@@ -46,6 +46,20 @@ def test_unknown_commands_are_refused_not_run_as_tasks(capsys):
     assert stop.value.code == 2 and 'unknown command' in capsys.readouterr().err
 
 
+def test_a_folder_argument_is_the_project(tmp_path, monkeypatch):
+    seen = []
+
+    async def dispatch(arguments, account=None, transport=None):
+        seen.append((arguments.project, arguments.command))
+        return 0
+
+    monkeypatch.setattr(app, 'dispatch', dispatch)
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / 'proj').mkdir()
+    assert app.main([str(tmp_path / 'proj')]) == 0 and app.main(['~/proj', '--autorun']) == 0
+    assert seen == [(str(tmp_path / 'proj'), []), (str(tmp_path / 'proj'), [])]
+
+
 async def test_no_models_means_sign_in_first(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
     from leo_cli.account import Account
@@ -318,6 +332,41 @@ async def test_a_failing_command_reports_instead_of_closing_the_window(ui, monke
         typed.send_text('/exit\r')
         await asyncio.wait_for(running, 10)
     assert said == ['/sync failed: disk full']
+
+
+async def test_a_message_attaches_the_files_it_mentions(ui, project):
+    (project / 'notes.md').write_text('use uppercase')
+    await ui.submit('Create hello.txt as @notes.md says')
+    session = ui.sessions.current
+    await session.task
+    assert '<file path="notes.md">\nuse uppercase' in session.run['prompt']
+    assert 'attached notes.md · 1 line' in text_of(ui.console)
+    assert session.title == 'Create hello.txt as @notes.md says', 'the title is what was typed'
+    await ui.sessions.close()
+
+
+async def test_cd_moves_the_window_to_another_folder(ui, project, tmp_path):
+    other = tmp_path / 'other'
+    other.mkdir()
+    (other / 'readme.md').write_text('hi')
+    await ui.command('/new')
+    await ui.command('/cd ../nowhere')
+    await ui.command('/cd ../other')
+    out = text_of(ui.console).replace('\n', '')  # Long temporary paths wrap.
+    assert 'No such folder' in out and f'Now working in {other.resolve()}' in out
+    assert ui.sessions.project == str(other.resolve()) and ui.sessions.items == [] and ui.root() == str(other.resolve())
+    from prompt_toolkit.document import Document
+    from leo_cli.ui import SlashCompleter
+    assert [c.text for c in SlashCompleter(ui).get_completions(Document('look at @re'), None)] == ['@readme.md'], '@paths complete in the new folder'
+
+
+async def test_cd_waits_for_working_sessions(ui, project, tmp_path):
+    session = await ui.sessions.open()
+    await ui.sessions.send(session, 'Create hello.txt')
+    await session.task
+    await ui.command(f'/cd {tmp_path}')
+    assert 'still working' in text_of(ui.console) and ui.sessions.project == str(project.resolve())
+    await ui.sessions.close()
 
 
 async def test_typing_while_the_agent_works_steers_it(ui):
