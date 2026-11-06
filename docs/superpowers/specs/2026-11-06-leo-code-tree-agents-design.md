@@ -1,7 +1,7 @@
 # L.E.O.C.O.D.E: tree agents, where parents review their children
 
 **Date:** 6 November 2026  
-**Status:** design, waiting for review  
+**Status:** implemented (6 November 2026), on branch `leocode-tree`. The cost goal in section 1 is not measured yet: it spends real quota.  
 **Replaces in the CLI:** the flat "lead agent plus sub-agents" of [agent mode](2026-11-04-agent-mode-design.md).
 **Renames:** [L.E.O CLI](2026-11-04-leo-cli-design.md) to L.E.O.C.O.D.E.
 

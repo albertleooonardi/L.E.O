@@ -141,15 +141,15 @@ flowchart LR
 
 `POST /api/route` (and the MCP tool `leo_route`) previews the decision for any prompt without calling a model.
 
-## L.E.O Chat and L.E.O CLI
+## L.E.O Chat and L.E.O.C.O.D.E
 
 L.E.O. is becoming two products on one account:
 
 - **L.E.O Chat** (this web app): the LLM Efficiency Orchestrator. HEAD routes every request across all your models.
   Deep mode plans tasks for sub-agents, and Reviewed and Deep check the answer. It can search the web and use the
   tools of your own **connectors**, which are remote MCP servers such as Linear or Notion, or your own.
-- **L.E.O CLI**: the multi-agent orchestrator, a terminal agent in the spirit of Claude Code and Codex. It works on your
-  machine and signs in with the same account. `leo login --server …` downloads your models and keys, and `leo` then
+- **L.E.O.C.O.D.E**: the multi-agent orchestrator, a terminal agent in the spirit of Claude Code and Codex. It works on your
+  machine and signs in with the same account. `leocode login --server …` downloads your models and keys, and `leo` then
   calls the models directly from your laptop. Code and transcripts stay local; only usage totals go back to the
   server. Install it with `uv tool install ./leo-cli`; see [leo-cli/README.md](leo-cli/README.md).
 
@@ -166,9 +166,9 @@ L.E.O. is becoming two products on one account:
 5. **Safety:** connectors are per user and their tokens are stored encrypted. Addresses must be public HTTPS unless
    `LEO_MCP_ALLOW_PRIVATE=1`. A resumed run never calls a tool twice.
 
-## Agent mode: multi-agent work in a sandbox (moving to L.E.O CLI)
+## Agent mode: multi-agent work in a sandbox (moving to L.E.O.C.O.D.E)
 
-Agent work is moving to L.E.O CLI, so the web app hides it unless the server sets `LEO_SERVER_AGENT=1`. With that set,
+Agent work is moving to L.E.O.C.O.D.E, so the web app hides it unless the server sets `LEO_SERVER_AGENT=1`. With that set,
 pick **Agent** in the composer (or **New agent workspace** in the sidebar) and L.E.O. works like a coding agent: it gets
 a Linux sandbox for the chat, plans with a todo list, edits files, runs commands and tests, and keeps going until the
 task is done, for many steps.

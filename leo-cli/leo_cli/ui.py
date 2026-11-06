@@ -833,6 +833,10 @@ class App:
         current = self.sessions.current
         return bool(current and current.busy)
 
+    def completes_while_typing(self):
+        """Not while the agent works (Tab still completes): the room that keeps free for the menu is the tree's."""
+        return not self.busy()
+
     def size(self):
         """The terminal's columns and rows."""
         try:
@@ -961,7 +965,8 @@ class App:
             self.sessions.notify = self.notify
             self.prompt = PromptSession(history=FileHistory(str(self.account.home / "history")), key_bindings=self.keys(),
                                         bottom_toolbar=self.toolbar, refresh_interval=0.08, style=DynamicStyle(theme.prompt_style),
-                                        completer=SlashCompleter(self), complete_while_typing=True, placeholder=self.placeholder)
+                                        completer=SlashCompleter(self), complete_while_typing=Condition(self.completes_while_typing),
+                                        placeholder=self.placeholder)
             watcher = asyncio.create_task(self.watch())
             try:
                 await self.loop()

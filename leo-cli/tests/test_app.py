@@ -913,3 +913,11 @@ def test_nothing_says_the_old_name():
     for path in files:
         assert 'L.E.O CLI' not in path.read_text(), path
     assert 'Soon' not in (ROOT / 'frontend/src/components/AuthPage.astro').read_text()
+
+
+async def test_the_completion_menu_keeps_no_room_while_the_agent_works(ui, monkeypatch):
+    """prompt_toolkit keeps 8 rows free while it completes as you type, which on a short terminal would clip the tree."""
+    session = await ui.sessions.open()
+    assert ui.completes_while_typing() is True
+    monkeypatch.setattr(type(session), 'busy', property(lambda self: True))
+    assert ui.completes_while_typing() is False

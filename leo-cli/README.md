@@ -1,17 +1,17 @@
-# L.E.O CLI
+# L.E.O.C.O.D.E
 
-The multi-agent LLM Efficiency Orchestrator in your terminal. `leo` works on the folder you start it in: it plans
-with a todo list, reads and edits files, runs commands and tests, and hands focused subtasks to sub-agents. Every step
-is routed to the cheapest capable model you have connected.
+The multi-agent LLM Efficiency Orchestrator in your terminal. `leocode` (or just `leo`) works on the folder you start it
+in: it plans with a todo list, reads and edits files, runs commands and tests, and splits big tasks down a tree of
+agents, where your strongest model directs and reviews, and your cheaper models do the volume.
 
 It signs in to your L.E.O. server and downloads your models and API keys. After that it runs on your own machine: it
 calls API-key models directly, and your code, prompts, and transcripts stay on your computer. Only usage totals (calls,
 tokens, cost per model) go back to the server, for the Usage page.
 
 **Subscription models** (ChatGPT, Copilot, and others you signed in to on the website) live on your own 9Router, which
-only the L.E.O. server can reach. leo calls them **through your L.E.O. server**, so prompts for those models pass
+only the L.E.O. server can reach. leocode calls them **through your L.E.O. server**, so prompts for those models pass
 through it on the way (it stores nothing). `/models` marks them "via your L.E.O. server". The router's key never leaves
-the server; leo signs those calls with its device token.
+the server; leocode signs those calls with its device token.
 
 ## Install
 
@@ -26,12 +26,12 @@ uv tool install ./leo-cli          # from a checkout of this repository
 ```
 
 The npm package is a small launcher: it installs [uv](https://docs.astral.sh/uv/) if you do not have it, installs
-L.E.O CLI with uv on first use (uv brings Python too), and runs it. **`leo update`** upgrades L.E.O CLI in place,
+L.E.O.C.O.D.E with uv on first use (uv brings Python too), and runs it. **`leocode update`** upgrades L.E.O.C.O.D.E in place,
 however you installed it.
 
 ## Sign in
 
-Run `leo`. The first time, it shows the L.E.O welcome screen:
+Run `leocode`. The first time, it shows the L.E.O welcome screen:
 
 1. **Choose a theme** with the arrow keys and Enter: Dark, Light, High contrast, Terminal colours (your terminal's own
    16 colours), or No colour. A preview shows how the agent's output looks. Change it any time with `/theme`.
@@ -39,15 +39,15 @@ Run `leo`. The first time, it shows the L.E.O welcome screen:
    another server (or pass `--server`).
 3. **Sign in on the L.E.O. website**, which opens in your browser. Sign in or create an account (with a password or
    with Google or GitHub, as on the website), then click **Allow** for this device.
-4. The browser comes back to `leo` and the session starts. Your models download to this computer, and API keys go in
+4. The browser comes back to `leocode` and the session starts. Your models download to this computer, and API keys go in
    the OS keychain (Windows Credential Manager, macOS Keychain, or Secret Service).
 
-If no browser can open (for example over SSH), `leo` prints the link; open it on any device, and `leo` carries on once
+If no browser can open (for example over SSH), `leocode` prints the link; open it on any device, and `leocode` carries on once
 you click Allow.
 
 In a session, `/login [server]` signs in again (another account or server) and `/logout` signs out. From a script,
-use `leo login [--server URL]`, `leo sync` (leo also syncs on its own when the models are more than an hour old),
-`leo models`, and `leo logout`. You can sign a lost device out under
+use `leocode login [--server URL]`, `leocode sync` (leocode also syncs on its own when the models are more than an hour old),
+`leocode models`, and `leocode logout`. You can sign a lost device out under
 **Settings → Account → CLI devices**. Keys that were already downloaded still work until you rotate them, so rotate
 them for a lost laptop.
 
@@ -55,17 +55,17 @@ them for a lost laptop.
 
 ```bash
 cd my-project
-leo                                  # interactive session on this folder
-leo ~/code/my-app                    # ...or on another folder
-leo -p "fix the failing tests"       # one task; the answer goes to stdout, exit code 1 if it failed
-leo -p "..." --autorun               # unattended: no questions, except for risky actions
-leo --worktree                       # work in a new git worktree and branch, leaving your folder alone
-leo resume                           # continue the last session on this folder (leo resume 2: the one before)
+leocode                                  # interactive session on this folder
+leocode ~/code/my-app                    # ...or on another folder
+leocode -p "fix the failing tests"       # one task; the answer goes to stdout, exit code 1 if it failed
+leocode -p "..." --autorun               # unattended: no questions, except for risky actions
+leocode --worktree                       # work in a new git worktree and branch, leaving your folder alone
+leocode resume                           # continue the last session on this folder (leocode resume 2: the one before)
 ```
 
 **Attach files with @.** In a message, `@path` attaches a file's current text (`fix the bug in @src/app.py`) or a
 folder's listing (`@src/`), so the agent starts with it. Tab completes paths as you type after `@`. Paths are relative to
-the folder leo works on; `~/...` and absolute paths work too, and quote a path with spaces: `@"my notes.md"`. A file
+the folder leocode works on; `~/...` and absolute paths work too, and quote a path with spaces: `@"my notes.md"`. A file
 outside the folder is attached for reading only: the agent's own tools stay inside the folder.
 
 **While the agent works:**
@@ -74,9 +74,9 @@ outside the folder is attached for reading only: the agent's own tools stay insi
 - Each tool call is one line, followed by a short result.
 - Typing a message steers the agent.
 - Esc stops the current task.
-- Ctrl-C twice quits. Unfinished work keeps its progress, and `leo resume` continues it.
+- Ctrl-C twice quits. Unfinished work keeps its progress, and `leocode resume` continues it.
 
-**Approvals.** By default, leo asks before it edits a file or runs a command. The question is a menu: choose with
+**Approvals.** By default, leocode asks before it edits a file or runs a command. The question is a menu: choose with
 the arrow keys and Enter, or press the option's number. Esc (or Ctrl-C) says no.
 
 | Option | Meaning |
@@ -88,7 +88,7 @@ the arrow keys and Enter, or press the option's number. Esc (or Ctrl-C) says no.
 
 Keys pressed in the first moment after a question appears are ignored, so a message you were typing to steer the agent
 cannot answer it. A remembered prefix such as `npm test` never covers a chained command such as
-`npm test && rm -rf src`: every part has to be allowed. With `leo -p`, type the option's number and Enter.
+`npm test && rm -rf src`: every part has to be allowed. With `leocode -p`, type the option's number and Enter.
 
 Reading files and searching never ask. `--autorun` (or `/autorun on`) stops the questions, but these always ask, even
 with autorun, and are never remembered:
@@ -129,10 +129,10 @@ files, and `@` paths. The status bar at the bottom shows every session, what the
 - **Command files.** `.leo-cli/commands/<name>.md` holds a prompt template for `/name`. `$ARGUMENTS` is replaced with
   what you type after the command.
 
-**Adding models.** `/models add` (or `leo models add`) has the ways in of Settings → Models:
+**Adding models.** `/models add` (or `leocode models add`) has the ways in of Settings → Models:
 - **Sign in with an account:** ChatGPT, GitHub Copilot, Kiro, Kimi, Kilo Code, Qoder, Grok CLI, or Z.ai GLM Coding. Your
-  browser opens the sign-in page, and leo shows the code when the page asks for one. The account's models then come down.
-  This needs a server started with Docker Compose, which runs the sign-ins; leo says so otherwise.
+  browser opens the sign-in page, and leocode shows the code when the page asks for one. The account's models then come down.
+  This needs a server started with Docker Compose, which runs the sign-ins; leocode says so otherwise.
 - **More models from a provider you already use:** picks up its saved key, so you type nothing again.
 - **A provider with an API key:** OpenRouter, Gemini, OpenAI, Anthropic, Ollama, and others.
 
@@ -141,10 +141,10 @@ known to call tools come first, because the agent needs them. To remove a model 
 
 **MCP servers.** `/mcp` lists two kinds:
 - **From L.E.O Chat:** the connectors under Settings → Connectors on the website. Sync brings their names, state, and
-  tools down; their sign-ins and tokens stay on the server, which makes each call for leo. Tools denied there stay off.
+  tools down; their sign-ins and tokens stay on the server, which makes each call for leocode. Tools denied there stay off.
 - **Set up for the CLI:** servers in `~/.config/leo-cli/mcp.json` (yours everywhere), `.leo-cli/mcp.json`, or
   `.mcp.json` (this project; it wins on a name clash). Local servers start in the project folder when the first task
-  begins and run until leo closes; `/mcp` checks each one and lists its tools.
+  begins and run until leocode closes; `/mcp` checks each one and lists its tools.
 
 ```json
 {"mcpServers": {
@@ -156,6 +156,27 @@ known to call tools come first, because the agent needs them. To remove a model 
 The agent gets the tools of every working server, named `<server>__<tool>`. A tool that only reads (or that L.E.O Chat
 allows) runs freely; the others ask first, with the menu above, and "this session" or "always in this project"
 remembers that tool. A server that fails to start is left out; `/mcp` says why.
+
+## How the tree of agents works
+
+Your models have a strength: strong, standard, or light (Settings → Models). Each level of the tree uses one strength, so
+a tree has at most 3 levels. A strength you have no model for is skipped.
+
+| Agent | Model | What it does |
+|---|---|---|
+| Root | strongest | Reads the project and decides: answer, do an easy task itself, or split the task. Writes the final answer. |
+| Manager | middle | Only on 3 levels, for a subtask the root thinks is too large for one worker. Splits it and reviews its workers. |
+| Worker | weakest on its branch | The only agents that edit files and run commands. |
+
+**Review.** Each parent reviews each child, on evidence leocode collects itself (files changed, commands run, and their exit
+codes), not only on the child's report. Rejected work gets one more try with the feedback, then one try on a stronger
+model. After that it counts as failed, and the final answer ends with a **Not finished** list.
+
+**Limits.** A run has at most 12 agents below the root, and at most 3 workers run at once (`agent_parallel`). Your budgets
+apply to the whole tree. An approval from any worker pauses the whole tree, and answering resumes it.
+
+**Seeing it.** While a tree works, it shows above the prompt, cut down to fit your terminal. `/usage` then shows the latest
+tree in full, with each agent's calls, tokens, and cost, and `leocode -p` prints it to stderr when it ends.
 
 ## Where things are stored
 
