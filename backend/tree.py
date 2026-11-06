@@ -4,15 +4,22 @@ The root reads the project, then answers, does an easy task itself, or splits it
 edits files and runs commands; parents read, split, and review. Each level uses one strength of model (strong, standard,
 light), so a tree has at most 3 levels, and the root decides for each subtask whether it splits again.
 
+A parent reviews what its children did, on evidence the engine collects itself: rejected work gets one more try, then
+one try on a stronger model, then the failure goes up, and the final answer lists whatever was not finished.
+
 A workspace asks for this with `tree = True` (L.E.O CLI does); the server's agent stays flat.
 """
 import contextlib
 import hashlib
+import os
 
 from .agent import STRING, SUB_MAX_STEPS, WORKSPACE, AgentRun, schema, SCHEMAS
 from .router import TIERS
 
 MAX_AGENTS = 12  # Children in one run, not counting the root or retries.
+MAX_ATTEMPTS = 3
+MAX_REMINDERS = 2  # Replies to a parent that tries to finish with unreviewed children, before the run carries on without.
+EVIDENCE_CHARS = 4000
 PRIVATE = {"files", "commands", "collisions", "reviews", "nudges"}  # A node's working notes, not for the display.
 
 
@@ -62,8 +69,12 @@ class TreeRun(AgentRun):
             self.add_node("main", None, "root", 0, self.o.run["prompt"])
         self.update("main", status="planning")
         answer = await super().run()
-        if answer is not None:
-            self.update("main", status="done")
+        if answer is None:
+            return None  # Paused for an approval.
+        self.update("main", status="done")
+        unfinished = [node for node in self.tree["nodes"].values() if node["status"] in ("failed", "not_reviewed")]
+        if unfinished:
+            answer += "\n\n**Not finished:**\n" + "\n".join(f"- {node['task']} ({node['status']})" for node in unfinished)
         return answer
 
     def call_options(self, name):
@@ -78,6 +89,72 @@ class TreeRun(AgentRun):
     def slot(self):
         return contextlib.nullcontext()  # A parent waiting for its children must not hold a worker's place.
 
+    def finish_blocked(self, name, t):
+        node = self.tree["nodes"][name]
+        unreviewed = [n for n in self.tree["nodes"].values() if n["parent"] == name and n["status"] == "in_review"]
+        if not unreviewed:
+            return False
+        if node["nudges"] < MAX_REMINDERS:
+            node["nudges"] += 1
+            t.append({"role": "user", "content": "You cannot finish yet. Review each child's work with review_work first:\n"
+                                                 + "\n".join(f"- {n['id']}: {n['task']}" for n in unreviewed)})
+            self.o.save()
+            return True
+        for child in unreviewed:
+            self.update(child["id"], status="not_reviewed")
+            self.store.event(self.o.id, "warning", {"message": f"The work on \"{child['task'][:80]}\" was not reviewed."})
+        return False
+
+    def record(self, name, t, call, output):
+        super().record(name, t, call, output)
+        if output.startswith("Error"):
+            return
+        node, args = self.tree["nodes"][name], call["arguments"]
+        if call["name"] in ("write_file", "edit_file"):
+            path = os.path.relpath(self.where(args["path"]), self.root)
+            if path not in node["files"]:
+                node["files"].append(path)
+            others = [n for n in self.tree["nodes"].values() if n["id"] != name and path in n["files"]]
+            if others and path not in node["collisions"]:
+                for other in [node, *others]:
+                    other["collisions"].append(path)
+                self.store.event(self.o.id, "warning", {"message": f"Two agents changed {path}."})
+        elif call["name"] == "bash":
+            lines = output.splitlines()
+            node["commands"].append({"command": str(args.get("command", ""))[:300], "exit": lines[0] if lines else "",
+                                     "tail": [line[:200] for line in lines[1:] if line.strip()][-3:]})
+        else:
+            return
+        self.o.save()
+
+    def evidence(self, node_id):
+        """What this agent and the children it accepted really did, from the tool calls and not from their reports."""
+        node, lines = self.tree["nodes"][node_id], []
+
+        def collect(item, indent=""):
+            if item["collisions"]:
+                lines.append(f"{indent}Changed by another agent too: {', '.join(item['collisions'])}")
+            if item["files"]:
+                lines.append(f"{indent}Files changed: {', '.join(item['files'])}")
+            for run in item["commands"]:
+                lines.append(f"{indent}Ran `{run['command']}`: {run['exit']}")
+                lines.extend(f"{indent}    {line}" for line in run["tail"])
+            for child in self.tree["nodes"].values():
+                if child["parent"] == item["id"] and child["status"] == "accepted":
+                    lines.append(f"{indent}From {child['id']}:")
+                    collect(child, indent + "  ")
+
+        collect(node)
+        text = "\n".join(lines) or "No files changed and no commands run."
+        return text if len(text) <= EVIDENCE_CHARS else text[:EVIDENCE_CHARS] + "\n… (evidence cut; read the files to check more)"
+
+    def reported(self, node_id, report):
+        """A finished child, as its parent sees it."""
+        if report.startswith("Error: this subtask failed"):
+            return report
+        return (f"Report from {node_id}:\n{report}\n\nEvidence the engine collected:\n{self.evidence(node_id)}\n\n"
+                f"Review it: call review_work with agent {node_id!r}, verdict accept or reject (with feedback). Trust the evidence over the report.")
+
     def toolset(self, name, lead):
         node = self.tree["nodes"][name]
         if self.works(name):
@@ -91,8 +168,13 @@ class TreeRun(AgentRun):
             return tools
         names = ["read_file", "list_files", "read_url"] + (["web_search"] if self.prefs.get("search_url") else []) + (["use_skill"] if self.agent_skills else [])
         tools = [{**SCHEMAS[n], "description": SCHEMAS[n]["description"].replace(WORKSPACE, self.root)} for n in names]
-        names += ["todo_write", "delegate"]
-        tools += [SCHEMAS["todo_write"], self.delegate_schema(node)]
+        names += ["todo_write", "delegate", "review_work"]
+        tools += [SCHEMAS["todo_write"], self.delegate_schema(node),
+                  schema("review_work", "Give your verdict on a child's work. accept keeps it. reject sends it back with your feedback; that gives the child "
+                                        "one more try, then one try on a stronger model, then it counts as failed.",
+                         {"agent": {"type": "string", "description": "The child's ID, from its report"},
+                          "verdict": {"type": "string", "enum": ["accept", "reject"]},
+                          "feedback": {"type": "string", "description": "What is wrong and what to do; required with reject"}}, ["agent", "verdict"])]
         if node["kind"] == "root":
             names.append("do_it_myself")
             tools.append(schema("do_it_myself", "The task is easy: do it yourself instead of splitting it. You get the tools that edit files and run "
@@ -121,7 +203,8 @@ class TreeRun(AgentRun):
         return """- Give each child a self-contained subtask: what to do, which files, and how to verify it. Children see nothing else.
 - Never give two children the same files; children running at once share this folder.
 - You cannot edit files or run commands: read to understand, delegate the changes.
-- Several delegate calls in one turn run in parallel, and each costs model calls, so split only as far as the work needs."""
+- Several delegate calls in one turn run in parallel, and each costs model calls, so split only as far as the work needs.
+- Every child's work comes back to you with evidence of what it really did. Review each one with review_work, and accept it only on the evidence. If you want a check run, ask for it in your feedback."""
 
     def lead_system(self):
         catalog = self.agent_skills.catalog() if self.agent_skills else ""
@@ -194,6 +277,35 @@ How to work:
         self.update(node_id, status="in_review")
         return report
 
+    async def tool_review_work(self, name, call, agent, verdict, feedback=""):
+        node = self.tree["nodes"].get(agent)
+        if not node or node["parent"] != name:
+            return f"Error: {agent!r} is not one of your children."
+        if verdict not in ("accept", "reject"):
+            return "Error: the verdict must be accept or reject."
+        if call["id"] not in node["reviews"]:  # Not when a resumed run makes this same call again.
+            if node["status"] != "in_review":
+                return f"Error: {agent} is {node['status']}, so there is nothing to review now."
+            if verdict == "reject" and not str(feedback).strip():
+                return "Error: say what is wrong: a reject needs feedback."
+            node["reviews"].append(call["id"])
+            if verdict == "accept":
+                self.update(agent, status="accepted")
+                return f"Accepted the work of {agent}."
+            if node["attempt"] >= MAX_ATTEMPTS:
+                self.update(agent, status="failed")
+                return f"{agent} has no attempts left, so this subtask counts as failed. Carry on without it, and report it as not done."
+            attempt = node["attempt"] + 1
+            self.state["transcripts"][agent].append({"role": "user", "content": f"Your parent reviewed your work and sent it back:\n{feedback}"})
+            self.state["steps"][agent] = 0
+            # The last try goes to the next stronger model, with the same conversation.
+            self.update(agent, attempt=attempt, status="retrying", tier=self.levels()[node["level"] - 1] if attempt == MAX_ATTEMPTS else node["tier"])
+        elif verdict == "accept":
+            return f"Accepted the work of {agent}."
+        elif node["status"] == "failed":
+            return f"{agent} has no attempts left, so this subtask counts as failed. Carry on without it, and report it as not done."
+        return self.reported(agent, await self.run_child(agent))
+
     async def tool_delegate(self, name, call, agent, task, kind="worker"):
         parent = self.tree["nodes"][name]
         skills = [s["id"] for s in self.skills]
@@ -210,4 +322,4 @@ How to work:
                         "or report it as not done.")
             self.add_node(node_id, name, kind, parent["level"] + 1, task, agent)
             self.o.save()
-        return await self.run_child(node_id)
+        return self.reported(node_id, await self.run_child(node_id))
