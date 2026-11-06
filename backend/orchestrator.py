@@ -80,8 +80,10 @@ class Orchestrator:
                 "review_passed": self.state.get("review_passed"), "static_checks": self.state.get("checks", []),
                 "route": self.state.get("route")}
 
-    def candidates(self, role, skill=None, difficulty=None, tools=False):
-        """Eligible connections in the order to try them, and why the first was chosen."""
+    def candidates(self, role, skill=None, difficulty=None, tools=False, tier=None):
+        """Eligible connections in the order to try them, and why the first was chosen.
+
+        With a `tier`, models of that strength come first, then stronger ones (nearest first), then weaker ones."""
         selected = self.prefs.get(f"{role}_id")
         choices = [{"skills": [], "tier": "standard", "reasoning": False, **p} for p in self.state["providers"]
                    if p["enabled"] and (p["free"] or self.prefs["allow_paid"])]
@@ -114,7 +116,12 @@ class Orchestrator:
             ordered = free[:FREE_ATTEMPTS] + paid + free[FREE_ATTEMPTS:]
             if ordered and not ordered[0]["free"]:
                 reason += "; no free model available, using a paid backup"
-        if tools:
+        if tier:
+            def strength(p):
+                gap = TIERS.get(p.get("tier", "standard"), 1) - TIERS.get(tier, 1)
+                return 0 if gap == 0 else gap if gap > 0 else len(TIERS) - gap
+            ordered = sorted(ordered, key=lambda p: (strength(p), tools and p.get("tools") is not True))
+        elif tools:
             ordered = sorted(ordered, key=lambda p: p.get("tools") is not True)
         return ordered, reason
 
@@ -191,16 +198,16 @@ class Orchestrator:
         return call_id
 
     async def call(self, stage, role, prompt, history=None, system=None, output_limit=None, visible=False, skill=None, difficulty=None,
-                   messages=None, tools=None, stream=False):
+                   messages=None, tools=None, stream=False, tier=None):
         """One model call with fallback across eligible connections; completed stages are reused on recovery.
 
         Agents pass a whole transcript as `messages` and tool schemas as `tools`; the result is then
         {"text", "tool_calls"} instead of text. `stream` sends the text as it is written, in `agent_text` events
-        ({stage, text}; a fallback to another model starts the stage again with {stage, reset})."""
+        ({stage, text}; a fallback to another model starts the stage again with {stage, reset}). `tier` prefers models of that strength (see candidates)."""
         self.check()
         if stage in self.state["completed"]:
             return self.state["completed"][stage]
-        choices, reason = self.candidates(role, skill, difficulty, bool(tools))
+        choices, reason = self.candidates(role, skill, difficulty, bool(tools), tier)
         tool_bytes = len(json.dumps(tools)) // 3 if tools else 0
         # Match thinking effort to the task: simple work should not run at full effort.
         effort = EFFORT.get(difficulty or "light") if self.prefs.get("smart_routing", True) else None
@@ -347,7 +354,8 @@ class Orchestrator:
             self.check()
             if self.agent:
                 from .agent import AgentRun  # Imported here: the agent module builds on this one.
-                answer = await AgentRun(self).run()
+                from .tree import TreeRun
+                answer = await (TreeRun if getattr(self.sandbox, "tree", False) else AgentRun)(self).run()
                 if answer is not None:  # None: paused for the owner's approval.
                     self.store.finish(self.id, self.owner, "completed", answer, usage=self.usage())
                 return

@@ -100,6 +100,8 @@ def summary(call):
 
 
 class AgentRun:
+    PARALLEL = {"delegate"}  # Tools that run_tools runs at the same time, after the turn's ordinary tools.
+
     def __init__(self, orchestrator):
         self.o, self.store, self.sandbox = orchestrator, orchestrator.store, orchestrator.sandbox
         # A workspace can describe itself, check actions before they happen, and offer agent skills. The server's sandbox
@@ -163,6 +165,8 @@ class AgentRun:
             if last["role"] == "assistant" and not last.get("tool_calls"):
                 if name == "main" and self.steering(t):
                     continue  # The user wrote while the agent was finishing: answer that first.
+                if self.finish_blocked(name, t):
+                    continue
                 return last["content"]
             if name == "main":
                 self.steering(t)
@@ -178,10 +182,12 @@ class AgentRun:
                 self.state["step_limit"] = limit + more
                 self.o.save()
                 continue
+            tools = self.current_tools(name, tools)
             await self.compact(name, t, tools)
             stage = f"agent:{name}:{steps + 1}"
             try:
-                result = await self.o.call(stage, role, None, messages=t, tools=tools, skill=skill, difficulty=difficulty, stream=name == "main")
+                result = await self.o.call(stage, role, None, messages=t, tools=tools, skill=skill, difficulty=difficulty, stream=name == "main",
+                                           **self.call_options(name))
             except BudgetExceeded as exc:
                 extensions = self.o.state.get("budget_extensions", 0)
                 if "price" in str(exc) or not self.approval(f"budget:{extensions}", "budget", f"{exc}. Give the agent another allowance of the same size?",
@@ -197,18 +203,36 @@ class AgentRun:
             self.store.event(self.o.id, "agent_step", {"agent": name, "step": steps + 1, "model": result.get("model"),
                                                        "text": clip(result["text"], EVENT_CHARS),
                                                        "tools": [{"id": c["id"], "name": c["name"], "summary": summary(c)} for c in result["tool_calls"]]})
+            self.after_step(name, result)
+
+    # What a tree of agents (backend/tree.py) changes about the loop; here, nothing.
+
+    def call_options(self, name):
+        return {}
+
+    def current_tools(self, name, tools):
+        return tools
+
+    def finish_blocked(self, name, t):
+        return False
+
+    def after_step(self, name, result):
+        pass
+
+    def slot(self):
+        return self.gate
 
     async def run_tools(self, name, t, calls):
         """Run one turn's tool calls: ordinary tools in order, then delegations in parallel."""
-        delegations = [c for c in calls if c["name"] == "delegate"]
+        delegations = [c for c in calls if c["name"] in self.PARALLEL]
         for call in calls:
-            if call["name"] != "delegate":
+            if call["name"] not in self.PARALLEL:
                 self.record(name, t, call, await self.execute(name, call))
         if not delegations:
             return
 
         async def delegate(call):
-            async with self.gate:
+            async with self.slot():
                 self.record(name, t, call, await self.execute(name, call))
 
         try:

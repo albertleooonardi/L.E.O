@@ -164,3 +164,19 @@ async def test_connections_report_calls_and_average_tokens(store):
     rows = {c['id']: c for c in store.with_usage(store.list_connections(store.user_id))}
     assert rows[provider['id']]['calls'] == 1 and rows[provider['id']]['avg_output_tokens'] is not None
     assert rows[unused['id']]['calls'] == 0 and rows[unused['id']]['avg_output_tokens'] is None
+
+
+def test_a_tier_orders_candidates_by_strength_then_stronger_then_weaker(store):
+    from backend.orchestrator import Orchestrator
+    for name, tier, tools in (('strong-a', 'strong', True), ('standard-untried', 'standard', None), ('standard-a', 'standard', True), ('light-a', 'light', True)):
+        store.save_connection(Connection(name=name, base_url=f'http://{name}.test/v1', model=name, free=True, tier=tier, tools=tools).model_dump(),
+                              user_id=store.user_id)
+    run = make_run(store)
+    engine = Orchestrator(store, store.get_run(run['id'], store.user_id, True), 'test-worker')
+
+    def names(tier):
+        return [c['model'] for c in engine.candidates('subagent', tools=True, tier=tier)[0]]
+
+    assert names(tier='standard') == ['standard-a', 'standard-untried', 'strong-a', 'light-a']
+    assert names(tier='light') == ['light-a', 'standard-a', 'standard-untried', 'strong-a']
+    assert names(tier='strong') == ['strong-a', 'standard-a', 'standard-untried', 'light-a']
