@@ -65,7 +65,10 @@ A child is always one level below its parent. Whether it is a manager or a worke
 
 The root first reads what it needs, then does one of three things:
 - **Answers:** a question that needs no changes gets a reply. The run ends.
-- **`do_it_myself`:** the task is easy. The root gets worker tools (and keeps `todo_write`) for the rest of the run, a
+- **Superseded after QA on real models (6 November):** the root no longer does easy tasks itself. It gives them to one
+  worker with `size="small"`, on the cheapest level, and reviews it, because it kept doing whole apps on the strong model. It
+  works alone only with one strength of model, or when too few requests are left for a tree.
+- **`do_it_myself` (removed):** the task is easy. The root gets worker tools (and keeps `todo_write`) for the rest of the run, a
   1-level tree, and can no longer delegate. This keeps "only the bottom level works" true.
 - **`delegate`:** the task is split. For each subtask the root chooses `kind`: `worker` or, on a 3-level tree, `manager`.
   So one tree can be deep in one branch and shallow in another.

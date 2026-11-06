@@ -22,6 +22,8 @@ connections = Table("connections", metadata,
     Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True), Column("config", JSON, nullable=False),
     Column("secret", Text), Column("cooldown_until", Float, default=0, nullable=False))
 settings = Table("settings", metadata, Column("id", Integer, primary_key=True), Column("config", JSON, nullable=False))
+# Limits shared by many models (providers.quota_group), as learned when they were hit: requests allowed, and when it lifts.
+quotas = Table("quotas", metadata, Column("name", String(200), primary_key=True), Column("request_limit", Integer), Column("reset_at", Float, nullable=False))
 conversations = Table("conversations", metadata,
     Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True), Column("title", Text, nullable=False),
     Column("updated_at", Float, nullable=False), Column("active_run", String(36)))
@@ -561,6 +563,38 @@ class Store:
     def cooldown(self, connection_id, seconds):
         with self.engine.begin() as db:
             db.execute(update(connections).where(connections.c.id == connection_id).values(cooldown_until=time.time() + seconds))
+
+    def note_quota(self, name, limit, reset_at):
+        with self.engine.begin() as db:
+            known = db.execute(select(quotas).where(quotas.c.name == name)).mappings().first()
+            if known:
+                db.execute(update(quotas).where(quotas.c.name == name).values(reset_at=reset_at, request_limit=limit or known["request_limit"]))
+            else:
+                db.execute(insert(quotas).values(name=name, request_limit=limit, reset_at=reset_at))
+
+    def blocked_quotas(self):
+        """Limits in force now: {name: when it lifts}."""
+        with self.engine.connect() as db:
+            return dict(db.execute(select(quotas.c.name, quotas.c.reset_at).where(quotas.c.reset_at > time.time())).all())
+
+    def quota_limit(self, name):
+        with self.engine.connect() as db:
+            return db.execute(select(quotas.c.request_limit).where(quotas.c.name == name)).scalar()
+
+    def requests_since(self, models, since, user_id=None):
+        """Model calls that reached these models since a moment, on this store."""
+        query = select(func.count()).select_from(calls.join(runs, runs.c.id == calls.c.run_id)).where(
+            calls.c.model.in_(models), calls.c.status == "completed", calls.c.created_at >= since)
+        if user_id:
+            query = query.where(runs.c.user_id == user_id)
+        with self.engine.connect() as db:
+            return db.execute(query).scalar()
+
+    def rerank(self, connection_id, **values):
+        """Change a connection's routing profile (tier, tools, priority), and nothing else."""
+        with self.engine.begin() as db:
+            config = db.execute(select(connections.c.config).where(connections.c.id == connection_id)).scalar()
+            db.execute(update(connections).where(connections.c.id == connection_id).values(config={**config, **values}))
 
     def mark_reasoning(self, connection_id):
         """Record that a model thinks before answering, so later calls send it an effort limit."""

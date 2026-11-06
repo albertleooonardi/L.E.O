@@ -1,24 +1,32 @@
 """A tree of agents: the strongest model is the root, and each level down is weaker.
 
-The root reads the project, then answers, does an easy task itself, or splits it. Only the bottom level of a branch
-edits files and runs commands; parents read, split, and review. Each level uses one strength of model (strong, standard,
-light), so a tree has at most 3 levels, and the root decides for each subtask whether it splits again.
+The root reads the project, then answers or splits the task; an easy task goes to one small worker on the cheapest level.
+Only the bottom level of a branch edits files and runs commands; parents read, split, and review. Each level uses one
+strength of model (strong, standard, light), so a tree has at most 3 levels, and the root decides for each subtask whether
+it splits again. A root works alone only with one strength of model, or when too few requests are left for a tree.
 
 A parent reviews what its children did, on evidence the engine collects itself: rejected work gets one more try, then
-one try on a stronger model, then the failure goes up, and the final answer lists whatever was not finished.
+one try on a stronger model, then the failure goes up, and the final answer lists whatever was not finished. Work that was
+done is kept even if no model can write the final message.
 
 A workspace asks for this with `tree = True` (L.E.O.C.O.D.E does); the server's agent stays flat.
 """
+import asyncio
 import contextlib
 import hashlib
 import os
 
 from .agent import EVENT_CHARS, SCHEMAS, STRING, SUB_MAX_STEPS, WORKSPACE, AgentRun, clip, schema
+from .orchestrator import BudgetExceeded
 from .router import TIERS
 
 MAX_AGENTS = 12  # Children in one run, not counting the root or retries.
 MAX_ATTEMPTS = 3
 MAX_REMINDERS = 2  # Replies to a parent that tries to finish with unreviewed children, before the run carries on without.
+# Requests a tree needs: a child costs at least a few, and a review more. Below these, there is no room for one.
+QUOTA_FOR_A_TREE = 15
+QUOTA_FOR_A_CHILD = 5
+ROOT_RETRY_SECONDS = 35  # A model that timed out cools down for 30 seconds; try the final message once more after that.
 EVIDENCE_CHARS = 4000
 EVIDENCE_CUT = "… (evidence cut; read the files to check more)"
 PRIVATE = {"files", "commands", "collisions", "reviews", "nudges"}  # A node's working notes, not for the display.
@@ -60,6 +68,28 @@ class TreeRun(AgentRun):
             self.o.save()
             self.publish(node_id)
 
+    def requests_left(self):
+        """Requests left on the shared limit of the root's first-choice model, as far as this device knows; None if unknown."""
+        choices = self.o.candidates("agent", tools=True, tier=self.tree["nodes"]["main"]["tier"])[0]
+        return self.o.requests_left(choices[0]) if choices else None
+
+    def work_done(self):
+        return any(node["files"] or node["commands"] or node["id"] != "main" for node in self.tree["nodes"].values())
+
+    def without_final_message(self, exc):
+        """No model can write the root's last message, but work was done. All of it accepted: say so, and the run completed.
+        Anything else: the run failed, and its error says what exists."""
+        self.close_reviews("main")
+        children = [node for node in self.tree["nodes"].values() if node["id"] != "main"]
+        done = "\n".join(f"- {' '.join(node['task'].split())[:120]} ({node['status']})" for node in children)
+        files = [path for node in self.tree["nodes"].values() for path in node["files"]]
+        record = (done + "\n" if done else "") + (f"Files changed: {', '.join(dict.fromkeys(files))[:400]}" if files else "")
+        reason = clip(str(exc), 240)
+        if children and all(node["status"] == "accepted" for node in children):
+            return (f"L.E.O. could not write the final message, because no model answered ({reason}). All the work handed out was accepted. "
+                    f"Check that nothing else was planned.\n\n{record}")
+        raise ValueError(f"No model could finish this ({reason}). What exists so far:\n{record}")
+
     def works(self, node_id):
         """Whether this node has the tools that change things: a worker, or a root with nobody below it."""
         node = self.tree["nodes"][node_id]
@@ -69,10 +99,24 @@ class TreeRun(AgentRun):
 
     async def run(self):
         if "main" not in self.tree["nodes"]:
-            self.levels()
+            levels = self.levels()
             self.add_node("main", None, "root", 0, self.o.run["prompt"])
+            left = self.requests_left()
+            if len(levels) > 1 and left is not None and left < QUOTA_FOR_A_TREE:
+                self.tree["solo"] = True
+                self.store.event(self.o.id, "warning", {"message": f"About {left} requests are left today on these models, too few for a tree, so the root works alone."})
         self.update("main", status="working" if self.works("main") else "planning")
-        answer = await super().run()
+        for attempt in (1, 2):
+            try:
+                answer = await super().run()
+                break
+            except ValueError as exc:  # No model could answer the root.
+                if not self.work_done():
+                    raise
+                if attempt == 2 or isinstance(exc, BudgetExceeded):
+                    answer = self.without_final_message(exc)
+                    break
+                await asyncio.sleep(ROOT_RETRY_SECONDS)
         if answer is None:
             return None  # Paused for an approval.
         self.close_reviews("main")
@@ -86,7 +130,7 @@ class TreeRun(AgentRun):
         return {"tier": self.tree["nodes"][name]["tier"]}
 
     def current_tools(self, name, tools):
-        return self.toolset(name, lead=name == "main")  # do_it_myself changes them.
+        return self.toolset(name, lead=name == "main")  # Running low on requests can change them.
 
     def after_step(self, name, result):
         self.update(name, model=result.get("model"))
@@ -188,10 +232,6 @@ class TreeRun(AgentRun):
                          {"agent": {"type": "string", "description": "The child's ID, from its report"},
                           "verdict": {"type": "string", "enum": ["accept", "reject"]},
                           "feedback": {"type": "string", "description": "What is wrong and what to do; required with reject"}}, ["agent", "verdict"])]
-        if node["kind"] == "root":
-            names.append("do_it_myself")
-            tools.append(schema("do_it_myself", "The task is easy: do it yourself instead of splitting it. You get the tools that edit files and run "
-                                                "commands, and you can no longer delegate.", {}))
         read_only = getattr(self.sandbox, "extra_read_tools", None)
         extra = [spec for spec in read_only() if spec["name"] not in SCHEMAS] if read_only else []
         names += [spec["name"] for spec in extra]
@@ -207,7 +247,9 @@ class TreeRun(AgentRun):
                                   f"run in parallel. Skills: {catalog}",
                       {"agent": {"type": "string", "enum": skills, "description": "The skill the subtask needs"}, "task": STRING,
                        "kind": {"type": "string", "enum": kinds, "description": "worker: does the subtask itself. manager: splits it further and reviews "
-                                                                                "its own workers; only for a subtask too large for one worker."}},
+                                                                                "its own workers; only for a subtask too large for one worker."},
+                       "size": {"type": "string", "enum": ["small", "normal"], "description": "small: simple, clear work for the cheapest model. normal: work that "
+                                                                                              "needs some judgment."}},
                       ["agent", "task"])
 
     # -- prompts ----------------------------------------------------------
@@ -219,6 +261,10 @@ class TreeRun(AgentRun):
 - Several delegate calls in one turn run in parallel, and each costs model calls, so split only as far as the work needs.
 - Every child's work comes back to you with evidence of what it really did. Review each one with review_work, and accept it only on the evidence. If you want a check run, ask for it in your feedback."""
 
+    def quota_line(self):
+        left = self.requests_left()
+        return f"\n- About {left} requests are left today on these models. A child costs at least 4, so keep the tree small." if left is not None else ""
+
     def lead_system(self):
         catalog = self.agent_skills.catalog() if self.agent_skills else ""
         skills = f"\n\nAgent skills (load one with use_skill before work it covers):\n{catalog}" if catalog else ""
@@ -229,7 +275,7 @@ Workspace: {self.root} (relative paths start there). It persists between message
 {self.environment}{search}{skills}
 """
         finish = """- When the task is done, reply without calling a tool: what was done, how it was verified, and what is not done. Never claim something works unless it was run."""
-        if len(self.levels()) == 1:
+        if self.works("main"):
             return head + f"""
 How to work:
 - Explore the workspace first when it has files. For multi-step work, keep a todo list with todo_write and update it as you go.
@@ -238,10 +284,11 @@ How to work:
 {finish}"""
         return head + f"""
 How to work:
-- Read what you need first, then decide. If no change is needed, answer. If the task is easy, call do_it_myself and do it. Otherwise split it with delegate.
+- Read what you need first, then decide. If no change is needed, answer. You never do the work yourself: your tokens are the most expensive, so you decide and review.
+- If the task is easy, delegate all of it to one worker with size="small". Otherwise split it, and give each child the size of its work.
 {self.split_rules()}
 - Choose kind="manager" only for a subtask large enough to split again.
-- After do_it_myself: change files with write_file and edit_file, and verify by running with bash. Commands stop after {self.prefs['agent_command_timeout']} seconds.
+- If review_work or delegate says too few requests are left, follow what it says.{self.quota_line()}
 {finish}"""
 
     def sub_system(self, skill):
@@ -259,14 +306,6 @@ How to work:
 - When finished, reply without calling a tool, with a short report: what was done, how it was verified, and what is not done. Your parent sees only this report and what the agents really did."""
 
     # -- tools ------------------------------------------------------------
-
-    async def tool_do_it_myself(self, name, call):
-        if any(node["parent"] == name for node in self.tree["nodes"].values()):
-            return "Error: you have already delegated subtasks; carry on with those."
-        self.tree["solo"] = True
-        self.update(name, status="working")
-        self.o.save()
-        return "You now have bash, write_file, and edit_file, and can no longer delegate. Do the task, and verify it by running it."
 
     def fail(self, node_id, reason):
         self.update(node_id, status="failed")
@@ -322,21 +361,32 @@ How to work:
             return f"{agent} has no attempts left, so this subtask counts as failed. Carry on without it, and report it as not done."
         return self.reported(agent, await self.run_child(agent))
 
-    async def tool_delegate(self, name, call, agent, task, kind="worker"):
+    async def tool_delegate(self, name, call, agent, task, kind="worker", size="normal"):
         parent = self.tree["nodes"][name]
         skills = [s["id"] for s in self.skills]
         if not isinstance(task, str) or not task.strip():
             return "Error: give the child a task to do, as text."
         if kind not in ("worker", "manager") or (kind == "manager" and (name != "main" or len(self.levels()) != 3)):
             return f"Error: kind must be one of the kinds listed for delegate here, not {kind!r}."
+        if size not in ("small", "normal"):
+            return f"Error: size must be small or normal, not {size!r}."
         if skills and agent not in skills:
             return f"Error: there is no skill called {agent!r}. Use one of: {', '.join(skills)}."
         node_id = "sub-" + hashlib.sha1(call["id"].encode()).hexdigest()[:8]
         if node_id not in self.tree["nodes"]:
+            left = self.requests_left()
+            if left is not None and left < QUOTA_FOR_A_CHILD:
+                if name != "main":
+                    return f"Error: only about {left} requests are left today, too few for another child. Report what is not done."
+                self.tree["solo"] = True
+                self.update("main", status="working")
+                return (f"Error: only about {left} requests are left today, too few for another child. You now have bash, write_file, and edit_file, "
+                        "and can no longer delegate: finish the rest yourself, and verify it by running it.")
             if len(self.tree["nodes"]) - 1 >= MAX_AGENTS:
                 return (f"Error: this run has reached its limit of {MAX_AGENTS} agents. Give the remaining work to the agents you have, "
                         "or report it as not done.")
-            self.add_node(node_id, name, kind, parent["level"] + 1, task, agent)
+            small = size == "small" and kind == "worker"
+            self.add_node(node_id, name, kind, len(self.levels()) - 1 if small else parent["level"] + 1, task, agent)
             self.store.event(self.o.id, "subagent", {"agent": node_id, "skill": agent, "task": clip(task, EVENT_CHARS), "status": "started"})
             self.o.save()
         return self.reported(node_id, await self.run_child(node_id))

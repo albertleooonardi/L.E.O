@@ -294,6 +294,9 @@ class Renderer:
 
     def on_model(self, data):
         self.phase = "thinking"
+        parts = str(data.get("stage", "")).split(":")
+        if len(parts) > 1 and parts[1] in self.tree:
+            self.tree[parts[1]]["model"] = data.get("model")
         if str(data.get("stage", "")).startswith("agent:main") and data.get("model") != self.model:
             self.model = data.get("model")
             return [Text.assemble((f"  {self.g.info} model ", "leo.muted"), (str(self.model), "leo.accent"))]
@@ -712,8 +715,8 @@ def fit(fragments, width, style="class:tb"):
     return out
 
 
-SUBCOMMANDS = {"/models": [("add", "sign in with an account, or add models with an API key")],
-               "/model": [("add", "sign in with an account, or add models with an API key")],
+SUBCOMMANDS = {"/models": [("add", "sign in with an account, or add models with an API key"), ("rerank", "rank the models of signed-in accounts again")],
+               "/model": [("add", "sign in with an account, or add models with an API key"), ("rerank", "rank the models of signed-in accounts again")],
                "/autorun": [("on", "run edits and commands without asking"), ("off", "ask before edits and commands")]}
 
 
@@ -1207,8 +1210,16 @@ class App:
             except AccountError as exc:
                 self.say(str(exc), "leo.error")
             return
+        if arguments == "rerank":
+            try:
+                changed = (await self.account.rerank_models())["changed"]
+            except AccountError as exc:
+                self.say(str(exc), "leo.error")
+                return
+            self.say(f"Ranked {plural(changed, 'model')} of your signed-in accounts again." if changed else "The ranks of your signed-in accounts are up to date.", "leo.ok")
+            return
         if arguments:
-            self.say("Use /models to list your models, /models add to add some, or /sync to fetch changes from the website.", "leo.warn")
+            self.say("Use /models to list your models, /models add to add some, /models rerank to rank signed-in accounts again, or /sync to fetch changes from the website.", "leo.warn")
             return
         self.console.print(models_table(self.sessions.store, self.sessions.uid, self.g))
         self.say("Add more with /models add: sign in with ChatGPT, Copilot, and others, or use an API key.")

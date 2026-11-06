@@ -1,16 +1,45 @@
 """Small protocol adapters; all routing and retry policy lives in the orchestrator."""
 import json
 import re
+import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import httpx
 
 
+# A limit on the whole account, not on the one model that happened to hit it.
+SHARED_LIMIT = re.compile(r"free-models-per-day|usage limit has been reached", re.I)
+
+
 class ProviderError(Exception):
-    def __init__(self, message, retryable=False, retry_after=0):
+    def __init__(self, message, retryable=False, retry_after=0, shared_seconds=None, limit=None):
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
+        self.shared_seconds = shared_seconds  # A SHARED_LIMIT: seconds until it comes back.
+        self.limit = limit  # Requests that limit allows, when the provider says.
+
+
+def quota_group(provider):
+    """The name of the limit this model shares with others, or None. OpenRouter counts every `:free` model of a key
+    together, and a router's models with one prefix (`cx/`) are one signed-in account."""
+    host, model = urlsplit(provider["base_url"]).netloc, provider["model"]
+    if model.endswith(":free"):
+        return f"{host}:free"
+    return f"{host}:{model.split('/', 1)[0]}" if "/" in model else None
+
+
+def shared_reset(response, detail):
+    """Seconds until a shared limit comes back: from the provider's reset time or its message, else an hour."""
+    stamp = response.headers.get("x-ratelimit-reset", "")
+    if stamp.isdigit():
+        moment = int(stamp) / (1000 if int(stamp) > 10**11 else 1)
+        return max(moment - time.time(), 60)
+    said = re.search(r"reset after (?:(\d+)h\s*)?(?:(\d+)m\s*)?(?:(\d+)s)?", detail)
+    if said and any(said.groups()):
+        return max(int(said.group(1) or 0) * 3600 + int(said.group(2) or 0) * 60 + int(said.group(3) or 0), 60)
+    return 3600
 
 
 @dataclass
@@ -191,8 +220,9 @@ def check_status(response):
         hint = "Provider quota reached; free-tier quotas reset over time"
     elif re.search(r"credit balance|insufficient (credits|funds|quota)|billing", detail, re.I):
         hint = "Provider credits or billing are exhausted; add credits in the provider's console"
-    raise ProviderError(f"{hint} (HTTP {code}){': ' + detail if detail else ''}",
-                        code in {408, 429} or code >= 500, retry_after)
+    shared, limit = (shared_reset(response, detail), response.headers.get("x-ratelimit-limit", "")) if SHARED_LIMIT.search(detail) else (None, "")
+    raise ProviderError(f"{hint} (HTTP {code}){': ' + detail if detail else ''}", code in {408, 429} or code >= 500, retry_after, shared,
+                        int(limit) if limit.isdigit() else None)
 
 
 def usage_chunk(usage):

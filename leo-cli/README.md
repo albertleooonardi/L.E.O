@@ -165,16 +165,21 @@ a tree has at most 3 levels. A strength you have no model for is skipped.
 
 | Agent | Model | What it does |
 |---|---|---|
-| Root | strongest | Reads the project and decides: answer, do an easy task itself, or split the task. Writes the final answer. |
+| Root | strongest | Reads the project and decides: answer, give an easy task to one small worker, or split the task. Reviews, and writes the final answer. |
 | Manager | middle | Only on 3 levels, for a subtask the root thinks is too large for one worker. Splits it and reviews its workers. |
-| Worker | weakest on its branch | The only agents that edit files and run commands. |
+| Worker | weakest on its branch, or the cheapest level for small work | The only agents that edit files and run commands. |
+
+The root works alone only if you have one strength of model, or too few requests are left today for a tree. Strengths are
+set per model (Settings → Models); `/models rerank` ranks the models of signed-in accounts again with the current rules.
 
 **Review.** Each parent reviews each child, on evidence leocode collects itself (files changed, commands run, and their exit
 codes), not only on the child's report. Rejected work gets one more try with the feedback, then one try on a stronger
 model. After that it counts as failed, and the final answer ends with a **Not finished** list.
 
 **Limits.** A run has at most 12 agents below the root, and at most 3 workers run at once (`agent_parallel`). Your budgets
-apply to the whole tree. An approval from any worker pauses the whole tree, and answering resumes it.
+apply to the whole tree. When a provider says an account's limit is used up (such as OpenRouter's free requests a day, or a
+ChatGPT plan), leocode skips all that account's models until it lifts, and counts its requests from then on, so the tree
+stays small when few are left. If no model can write the last message, the work is kept and the answer says what was done. An approval from any worker pauses the whole tree, and answering resumes it.
 
 **Seeing it.** While the agent works, the tree shows above the prompt, cut down to fit your terminal. When a task that split
 ends, it is drawn as an ASCII graph, with each agent's state, model, tokens, calls, and cost. `/tree` draws the latest one

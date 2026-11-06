@@ -4,11 +4,12 @@ import hashlib
 import itertools
 import json
 import re
+import time
 
 import httpx
 import pytest
 
-from backend.schemas import Connection
+from backend.schemas import Connection, RunInput
 from leo_cli.account import Account
 from leo_cli.sessions import Sessions
 from test_sessions import project, reply  # noqa: F401 (fixtures)
@@ -31,8 +32,8 @@ class Team:
     """Answers each request by its task: a script is a list of turns. A string is a final message; a list of
     (tool, arguments) is a turn of tool calls. When a script runs out, the agent reports `finished`."""
 
-    def __init__(self, scripts, fail_models=(), fail_tasks=(), hook=None, plain_ids=False, fail_status=500):
-        self.scripts, self.hook = {key: list(steps) for key, steps in scripts.items()}, hook
+    def __init__(self, scripts, fail_models=(), fail_tasks=(), hook=None, plain_ids=False, fail_status=500, limited=()):
+        self.scripts, self.hook, self.limited = {key: list(steps) for key, steps in scripts.items()}, hook, set(limited)
         self.plain_ids, self.fail_status = plain_ids, fail_status  # plain_ids: every turn's first call is call_0, as without provider IDs.
         self.fail_models, self.fail_tasks, self.calls, self.ids = fail_models, fail_tasks, [], itertools.count(1)
         self.children = {}
@@ -49,6 +50,9 @@ class Team:
         self.calls.append({'model': model, 'task': task, 'tools': [t['function']['name'] for t in body.get('tools') or []], 'body': body})
         if self.hook:
             self.hook(self.calls[-1])
+        if model in self.limited:
+            return httpx.Response(429, json={'error': {'message': 'Rate limit exceeded: free-models-per-day.'}},
+                                  headers={'x-ratelimit-limit': '50', 'x-ratelimit-reset': str(int((time.time() + 3600) * 1000))})
         if model in self.fail_models:
             return httpx.Response(self.fail_status, text='this model is broken')
         if any(key in task for key in self.fail_tasks):
@@ -72,8 +76,8 @@ class Team:
         return next(c['tools'] for c in self.calls if task in c['task'])
 
 
-def delegate(task, kind='worker', agent='coding'):
-    return ('delegate', {'agent': agent, 'task': task, 'kind': kind})
+def delegate(task, kind='worker', agent='coding', size='normal'):
+    return ('delegate', {'agent': agent, 'task': task, 'kind': kind, 'size': size})
 
 
 def write(path):
@@ -84,11 +88,11 @@ def write(path):
 def members(tmp_path, monkeypatch):
     monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
 
-    def make(models=ALL, **preferences):
+    def make(models=ALL, shared_host=False, **preferences):
         account = Account(tmp_path / 'home')
         store = account.store()
         for model in models:
-            store.save_connection(Connection(name=model, base_url=f'http://{model}.test/v1', model=model, free=True, tools=True,
+            store.save_connection(Connection(name=model, base_url='http://one.test/v1' if shared_host else f'http://{model}.test/v1', model=model, free=True, tools=True,
                                              tier=model.split('-')[0]).model_dump(), user_id=account.user_id)
         store.set_preferences({**store.preferences(), **preferences})
         return account
@@ -118,13 +122,13 @@ async def test_a_question_gets_an_answer_and_no_tree(members, project):
     assert list(nodes(session)) == ['main'] and nodes(session)['main']['status'] == 'done' and team.models_of('ROOT') == ['strong-m']
 
 
-async def test_do_it_myself_gives_the_root_worker_tools(members, project):
-    team = Team({'ROOT': [[('do_it_myself', {})], [write('hello.txt')], 'Done.']})
+async def test_an_easy_task_goes_to_the_cheapest_level(members, project):
+    team = Team({'ROOT': [[delegate('easy part', size='small')], [accept('easy part')], 'Done.'], 'easy part': [[write('hello.txt')], 'wrote it']})
     _, session = await run(members(), project, team)
-    first, second = [c['tools'] for c in team.calls][:2]
-    assert 'write_file' not in first and 'bash' not in first and 'do_it_myself' in first
-    assert 'write_file' in second and 'bash' in second and 'delegate' not in second and 'do_it_myself' not in second
-    assert (project / 'hello.txt').exists() and set(team.models_of('ROOT')) == {'strong-m'} and session.status == 'completed'
+    root = team.tools_of('ROOT')
+    assert 'write_file' not in root and 'bash' not in root and 'do_it_myself' not in root
+    assert set(team.models_of('easy part')) == {'light-m'} and (project / 'hello.txt').exists() and session.status == 'completed'
+    assert by_task(session, 'easy part')['parent'] == 'main' and by_task(session, 'easy part')['kind'] == 'worker'
 
 
 async def test_two_levels_when_two_strengths_exist(members, project):
@@ -468,9 +472,8 @@ async def test_a_manager_with_the_same_call_id_as_its_parent_does_not_hang(membe
 
 @pytest.mark.parametrize('tree', [True, False])
 async def test_a_once_approval_does_not_cover_a_later_call_with_the_same_id(members, project, tree):
-    team = Team({'ROOT': [[('do_it_myself', {})], [write('first.txt')], [write('second.txt')], 'Done.'] if tree else [[write('first.txt')], [write('second.txt')], 'Done.']},
-                plain_ids=True)
-    sessions = Sessions(members(), project, transport=team.transport)
+    team = Team({'ROOT': [[write('first.txt')], [write('second.txt')], 'Done.']}, plain_ids=True)
+    sessions = Sessions(members(('strong-m',)) if tree else members(), project, transport=team.transport)
     session = await sessions.open()
     session.workspace.tree = tree
     await sessions.send(session, 'ROOT task')
@@ -550,3 +553,142 @@ async def test_free_first_keeps_paid_models_as_a_backup(members, project):
     team = Team({'ROOT': [[delegate('child work')], [accept('child work')], 'Done.'], 'child work': ['ok']})
     _, session = await run(account, project, team)
     assert 'strong-paid' not in [c['model'] for c in team.calls] and team.models_of('ROOT')[0] == 'standard-m' and team.models_of('child work')[0] == 'light-m'
+
+
+# -- found by the QA on real models -------------------------------------------------------------
+
+@pytest.fixture
+def no_waiting(monkeypatch):
+    from backend import tree
+    monkeypatch.setattr(tree, 'ROOT_RETRY_SECONDS', 0)
+
+
+def root_fails_after(team, marker, recover_after=None):
+    """From the request whose last message holds `marker`, the root's calls fail; optionally they come back."""
+    seen = []
+
+    def hook(call):
+        last = call['body']['messages'][-1].get('content') or ''
+        if 'ROOT' in call['task'] and marker in last:
+            seen.append(call)
+            team.fail_tasks = {} if recover_after and len(seen) > recover_after else {'ROOT'}
+    team.hook = hook
+
+
+async def test_finished_work_survives_a_final_message_that_fails(members, project, no_waiting):
+    team = Team({'ROOT': [[delegate('child work')], [accept('child work')], 'never written'], 'child work': [[write('a.txt')], 'wrote it']})
+    root_fails_after(team, 'Accepted the work')
+    _, session = await run(members(), project, team)
+    output = session.run['output']
+    assert session.status == 'completed' and (project / 'a.txt').exists()
+    assert 'could not write' in output and 'child work' in output and 'a.txt' in output and 'Check' in output and len(output) < 1500
+
+
+async def test_the_final_message_is_tried_again_first(members, project, no_waiting):
+    team = Team({'ROOT': [[delegate('child work')], [accept('child work')], 'The real answer.'], 'child work': ['ok']})
+    root_fails_after(team, 'Accepted the work', recover_after=3)
+    _, session = await run(members(), project, team)
+    assert session.status == 'completed' and session.run['output'] == 'The real answer.'
+
+
+async def test_unreviewed_work_is_kept_but_the_run_says_it_failed(members, project, no_waiting):
+    team = Team({'ROOT': [[delegate('child work')], 'never written'], 'child work': [[write('a.txt')], 'wrote it']})
+    root_fails_after(team, 'Report from')
+    _, session = await run(members(), project, team)
+    assert session.status == 'failed' and 'child work' in session.run['error'] and 'a.txt' in session.run['error']
+    assert len(session.run['error']) < 1500 and by_task(session, 'child work')['status'] == 'not_reviewed'
+
+
+async def test_a_root_that_did_nothing_fails_with_a_short_error(members, project, no_waiting):
+    team = Team({'ROOT': ['never']}, fail_tasks={'ROOT'})
+    _, session = await run(members(), project, team)
+    assert session.status == 'failed' and len(session.run['error']) < 700
+    assert len(team.calls) <= 6, 'one more pass over the models, no more'
+
+
+async def test_an_account_limit_stops_every_model_on_it_at_once(members, project):
+    free = ('strong-a:free', 'strong-b:free', 'standard-a:free', 'light-a:free')
+    team = Team({'ROOT': ['Answered by the other one.']}, limited=free)
+    account = members((*free, 'standard-other'), shared_host=True)
+    sessions, session = await run(account, project, team)
+    assert session.run['output'] == 'Answered by the other one.'
+    assert sum(c['model'] in free for c in team.calls) == 1, 'one refusal is enough to know'
+    warnings = [e['data']['message'] for e in sessions.store.events_of(session.run_id, 'warning')]
+    assert len(warnings) == 1 and '3 other models' in warnings[0] and '60 minutes' in warnings[0]
+    before = len(team.calls)
+    await sessions.send(session, 'ROOT again')
+    await asyncio.wait_for(session.task, 30)
+    assert all(c['model'] == 'standard-other' for c in team.calls[before:]), 'the next task does not try them either'
+
+
+async def test_an_account_limit_comes_back_at_its_time(members, project):
+    team = Team({'ROOT': ['ok']}, limited={'strong-a:free'})
+    account = members(('strong-a:free', 'standard-other'), shared_host=True)
+    sessions, session = await run(account, project, team)
+    assert sessions.store.blocked_quotas()
+    from sqlalchemy import update
+    from backend.store import quotas
+    with sessions.store.engine.begin() as db:
+        db.execute(update(quotas).values(reset_at=0))
+    assert not sessions.store.blocked_quotas()
+
+
+async def test_all_models_at_their_limits_gives_one_short_error(members, project):
+    free = ('strong-a:free', 'standard-a:free', 'light-a:free')
+    team = Team({'ROOT': ['never']}, limited=free)
+    _, session = await run(members(free, shared_host=True), project, team)
+    assert session.status == 'failed' and 'limit' in session.run['error'] and len(session.run['error']) < 400
+
+
+async def test_many_failing_models_give_a_short_error(members, project):
+    many = tuple(f'standard-{n}' for n in range(12))
+    team = Team({'ROOT': ['never']}, fail_models=set(many), fail_status=400)
+    _, session = await run(members(many), project, team)
+    assert session.status == 'failed' and len(session.run['error']) < 900 and 'and 9 more' in session.run['error']
+
+
+def quota(account, used, limit=50):
+    """This account has hit the free limit before, and has made `used` requests today."""
+    from sqlalchemy import insert
+    from backend.store import calls
+    import uuid
+    store = account.store()
+    store.note_quota('one.test:free', limit, 0)
+    run = store.create_run(RunInput(prompt='earlier', mode='quick', request_id=str(uuid.uuid4())), account.user_id)
+    with store.engine.begin() as db:
+        for _ in range(used):
+            db.execute(insert(calls).values(id=str(uuid.uuid4()), run_id=run['id'], stage='generating', provider='x', model='strong-a:free', status='completed',
+                                            input_tokens=1, output_tokens=1, reserved_tokens=0, reserved_cost=0, cost=0, estimated=False, created_at=time.time(), elapsed_ms=1))
+    store.cancel(run['id'], account.user_id)
+
+
+FREE = ('strong-a:free', 'standard-a:free', 'light-a:free')
+
+
+async def test_with_little_quota_left_the_root_works_alone(members, project):
+    account = members(FREE, shared_host=True)
+    quota(account, used=40)
+    team = Team({'ROOT': [[write('a.txt')], 'Done.']})
+    sessions, session = await run(account, project, team)
+    assert 'write_file' in team.tools_of('ROOT') and 'delegate' not in team.tools_of('ROOT') and (project / 'a.txt').exists()
+    assert list(nodes(session)) == ['main']
+    assert any('10' in e['data']['message'] and 'alone' in e['data']['message'] for e in sessions.store.events_of(session.run_id, 'warning'))
+
+
+async def test_with_plenty_of_quota_the_tree_is_normal_and_the_root_knows(members, project):
+    account = members(FREE, shared_host=True)
+    quota(account, used=5)
+    team = Team({'ROOT': ['Nothing to do.']})
+    await run(account, project, team)
+    assert 'delegate' in team.tools_of('ROOT')
+    assert 'About 45' in team.calls[0]['body']['messages'][0]['content']
+
+
+async def test_quota_running_out_mid_tree_stops_new_children(members, project):
+    account = members(FREE, shared_host=True)
+    quota(account, used=30)
+    team = Team({'ROOT': [[delegate('first part')], [accept('first part')], [delegate('second part')], [write('b.txt')], 'Done.'],
+                 'first part': [[('list_files', {})]] * 14 + ['done']})
+    _, session = await run(account, project, team)
+    refused = [r for r in results(team) if r.startswith('Error') and 'requests' in r]
+    assert refused and 'second part' not in [n['task'] for n in nodes(session).values()] and (project / 'b.txt').exists()

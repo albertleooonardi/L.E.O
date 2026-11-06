@@ -146,3 +146,12 @@ async def test_anthropic_discovery_profiles_claude_with_suggested_prices():
     assert by_id['claude-haiku-5-5']['reasoning'] is True and by_id['claude-haiku-4-5']['reasoning'] is False, 'effort only from 4.6 on'
     assert all(m['free'] is False for m in found['models']) and [s['model'] for s in found['skipped']] == ['claude-3-haiku']
     assert all(m['tools'] is True for m in found['models'])
+
+
+def test_current_gpt_generations_rank_as_strong():
+    from backend.discovery import profile
+    for model in ('cx/gpt-6-sol', 'cx/gpt-6.1-terra', 'cx/gpt-5.6-luna', 'cx/gpt-6-sol[1m]', 'gpt-5.5'):
+        assert profile(model)['tier'] == 'strong', model
+    assert profile('cx/gpt-5.5-mini')['tier'] == 'light', 'a small model stays small'
+    for model in ('gh/gpt-4.1', 'cx/gpt-reserve', 'cx/gpt-5.6-luna-review', 'cx/codex-auto-review'):
+        assert profile(model)['tier'] == 'standard', model

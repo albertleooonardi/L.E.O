@@ -1,8 +1,10 @@
 import json
+import time
 
 import httpx
 import pytest
 
+from backend import providers
 from backend.context import prepare_context, static_review, token_bound
 from backend.providers import make_request, stream
 from .conftest import sse_response
@@ -119,3 +121,32 @@ async def test_free_tier_quota_is_not_reported_as_billing():
     with pytest.raises(ProviderError, match='quota reached') as caught:
         [c async for c in stream(provider, 'k', [{'role': 'user', 'content': 'Hi'}], 64, 10, httpx.MockTransport(lambda r: httpx.Response(429, json=body)))]
     assert caught.value.retryable and caught.value.retry_after == 41
+
+
+def limited(status, text, **headers):
+    request = httpx.Request('POST', 'http://x.test')
+    return httpx.Response(status, text=text, headers=headers, request=request)
+
+
+def test_a_limit_shared_by_many_models_says_when_it_comes_back():
+    day = limited(429, '{"error":{"message":"Rate limit exceeded: free-models-per-day. Add 10 credits"}}', **{'x-ratelimit-limit': '50', 'x-ratelimit-reset': str(int((time.time() + 7200) * 1000))})
+    with pytest.raises(providers.ProviderError) as found:
+        providers.check_status(day)
+    assert 7100 < found.value.shared_seconds <= 7200 and found.value.limit == 50, 'beyond the 1 hour cap of ordinary waits'
+    router = limited(503, '{"error":{"message":"[codex/gpt-6-sol] [429]: The usage limit has been reached (reset after 24m 7s)"}}')
+    with pytest.raises(providers.ProviderError) as found:
+        providers.check_status(router)
+    assert found.value.shared_seconds == 24 * 60 + 7 and found.value.limit is None
+    with pytest.raises(providers.ProviderError) as found:
+        providers.check_status(limited(429, '{"error":{"message":"Slow down"}}'))
+    assert found.value.shared_seconds is None, 'an ordinary rate limit belongs to the model'
+
+
+def test_models_on_one_limit_share_a_group():
+    group = providers.quota_group
+    free = {'base_url': 'https://openrouter.ai/api/v1', 'model': 'nvidia/nemotron:free'}
+    assert group(free) == group({**free, 'model': 'google/gemma:free'}), 'every free model of a key'
+    assert group(free) != group({**free, 'model': 'stealth/crouton-alpha'}), 'a stealth model is not one'
+    relay = {'base_url': 'http://localhost:8000/api/cli/relay/1', 'model': 'cx/gpt-6-sol'}
+    assert group(relay) == group({'base_url': 'http://localhost:8000/api/cli/relay/2', 'model': 'cx/gpt-5.6-luna'}), 'one account through a router'
+    assert group(relay) != group({**relay, 'model': 'gh/gpt-4.1'}), 'another account on the same router'

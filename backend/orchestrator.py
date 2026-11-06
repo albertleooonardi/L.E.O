@@ -29,6 +29,20 @@ class BudgetExceeded(ValueError):
     pass
 
 
+def wait_words(seconds):
+    """A wait in words: `24 minutes`, `7 hours`."""
+    minutes = max(round(seconds / 60), 1)
+    if minutes < 90:
+        return f"{minutes} minute{'' if minutes == 1 else 's'}"
+    return f"{round(minutes / 60)} hours"
+
+
+def short_errors(errors, shown=3):
+    """Why every model failed, in a few lines however many were tried."""
+    unique = [error[:200] for error in dict.fromkeys(errors)]
+    return "; ".join(unique[:shown]) + (f"; and {len(unique) - shown} more" if len(unique) > shown else "")
+
+
 class Orchestrator:
     def __init__(self, store, run, owner, transport=None, sandbox=None):
         self.store, self.run, self.owner, self.transport, self.sandbox = store, run, owner, transport, sandbox
@@ -85,8 +99,9 @@ class Orchestrator:
 
         With a `tier`, models of that strength come first, then stronger ones (nearest first), then weaker ones."""
         selected = self.prefs.get(f"{role}_id")
+        blocked = self.store.blocked_quotas()
         choices = [{"skills": [], "tier": "standard", "reasoning": False, **p} for p in self.state["providers"]
-                   if p["enabled"] and (p["free"] or self.prefs["allow_paid"])]
+                   if p["enabled"] and (p["free"] or self.prefs["allow_paid"]) and providers.quota_group(p) not in blocked]
         # Live disabled/deleted connections are never used, even by queued snapshots.
         live = {p["id"]: p for p in self.store.list_connections(self.user_id)}
         choices = self.store.with_usage([{**p, "tools": live[p["id"]].get("tools")} for p in choices
@@ -125,6 +140,27 @@ class Orchestrator:
         if tools and not tier:
             ordered = sorted(ordered, key=lambda p: p.get("tools") is not True)
         return ordered, reason
+
+    def requests_left(self, provider):
+        """About how many requests today this model's shared limit has left, as far as this device knows; None if unknown."""
+        group = providers.quota_group(provider)
+        limit = self.store.quota_limit(group) if group else None
+        if not limit:
+            return None
+        models = [c["model"] for c in self.store.list_connections(self.user_id) if providers.quota_group(c) == group]
+        now = time.time()
+        return max(limit - self.store.requests_since(models, now - now % 86400, self.user_id), 0)
+
+    def hit_shared_limit(self, provider, exc, queue):
+        """A limit on the whole account: remember it, and skip every model on it until it lifts. The rest of `queue`."""
+        group = providers.quota_group(provider)
+        self.store.note_quota(group or provider["id"], exc.limit, time.time() + exc.shared_seconds)
+        rest = [p for p in queue if providers.quota_group(p) != group]
+        others = len(queue) - len(rest)
+        name = provider["name"].split(" · ")[0]
+        self.store.event(self.id, "warning", {"message": f"{name}: the limit for this account is used up. Skipping "
+                                                         f"{f'it and {others} other models' if others else 'it'} for {wait_words(exc.shared_seconds)}."})
+        return rest
 
     async def research(self, key, queries, urls):
         """Run one search/read step (checkpointed, so recovery never searches twice) and publish its sources."""
@@ -316,6 +352,10 @@ class Orchestrator:
             except (providers.ProviderError, TimeoutError) as exc:
                 self.store.update_call(call_id, status="failed", elapsed_ms=int((time.monotonic() - started) * 1000))
                 error = str(exc) or "Provider timed out"
+                if isinstance(exc, providers.ProviderError) and exc.shared_seconds:
+                    errors.append(f"{provider['name'].split(' · ')[0]}: the limit for this account is used up")
+                    queue = self.hit_shared_limit(provider, exc, queue)
+                    continue
                 if (isinstance(exc, providers.ProviderError) and "HTTP 429" in error and provider is choices[0] and not waited
                         and exc.retry_after <= RATE_LIMIT_WAIT):
                     # The best fit is only briefly limited: waiting beats handing the task to a weaker model.
@@ -337,7 +377,10 @@ class Orchestrator:
                 more = bool(queue)
                 self.store.event(self.id, "warning", {"message": f"{provider['name']}: {error.rstrip('.')}." + (" Trying the next eligible connection." if more else "")})
                 # Retain full reservations for failed/ambiguous requests: they may have been billed.
-        raise ValueError("; ".join(dict.fromkeys(errors)) or "No eligible connection is available. Check enabled providers, paid usage, and rate-limit cooldowns.")
+        blocked = self.store.blocked_quotas()
+        if not errors and blocked:
+            raise ValueError(f"All your models are at their limits; the first comes back in {wait_words(min(blocked.values()) - time.time())}.")
+        raise ValueError(short_errors(errors) or "No eligible connection is available. Check enabled providers, paid usage, and rate-limit cooldowns.")
 
     async def continue_cut_off(self, stage, answer, route, difficulty, rounds=2):
         """An answer cut off by the output limit inside a code block (a page, a long file) is continued, not rerun."""

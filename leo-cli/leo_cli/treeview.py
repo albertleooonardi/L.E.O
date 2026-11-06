@@ -306,7 +306,7 @@ def alone_note(run):
     if len(tree.get("levels") or []) == 1:
         return "Only one model strength is usable, so the root works alone. Other strengths in /models would let it split work."
     if tree.get("solo"):
-        return "The root did this one itself: it judged the task too small to split."
+        return "Too few requests are left today for a tree, so the root worked alone."
     if run and run.get("status") == "completed":
         return "The root answered this one itself: nothing needed splitting."
     return "The root has not split anything yet."

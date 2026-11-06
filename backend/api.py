@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import html
 import json
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -34,7 +35,7 @@ from .schemas import (AccountSignIn, AdoptModels, ApprovalInput, CliAnswer, CliD
                       Skill, SteerInput, UserLogin, UserRegister, User, WorkspaceInput)
 from .store import Conflict, Store, TERMINAL
 from .tools import ToolError, web_search
-from .discovery import check_access, discover
+from .discovery import check_access, discover, profile
 
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "testserver"}
@@ -54,7 +55,7 @@ PUBLIC_API_PATHS = {
     "/api/cli/token",
 }
 # Only these accept a L.E.O.C.O.D.E device token (Authorization: Bearer), and nothing else does.
-CLI_DEVICE_PATHS = {"/api/cli/sync", "/api/cli/usage", "/api/cli/logout", "/api/cli/connections"}
+CLI_DEVICE_PATHS = {"/api/cli/sync", "/api/cli/usage", "/api/cli/logout", "/api/cli/connections", "/api/cli/connections/rerank"}
 # The CLI reaches models on the user's 9Router (on the server's network only) through the server: model calls only.
 CLI_RELAY_PREFIX = "/api/cli/relay/"
 # The CLI calls the tools of the user's L.E.O Chat connectors through the server, which keeps their sign-ins.
@@ -916,6 +917,23 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
         """A model added from the CLI is saved on the account, like one added in Settings → Models."""
         saved = store.save_connection(body.model_dump(), user_id=request.state.user.id)
         return {k: v for k, v in saved.items() if k != "secret"}
+
+    @app.post("/api/cli/connections/rerank")
+    def cli_rerank_connections(request: Request):
+        """Rank models signed in through the user's own router again with today's rules; they were ranked when they were added.
+        Models the user added another way, which they may have ranked themselves, are left alone."""
+        uid, changed = request.state.user.id, 0
+        router = store.get_router(uid)
+        for c in store.list_connections(uid) if router else []:
+            if c["base_url"].startswith(router["url"]):
+                tier = profile(c["model"])["tier"]
+                if tier != c["tier"]:
+                    # Say that a strong model can call tools, or known ones would stay ahead of it; newer versions go first.
+                    version = re.search(r"gpt-(\d+(?:\.\d+)?)", c["model"])
+                    extra = {"tools": True, "priority": max(0, 9 - round((float(version.group(1)) - 5) * 5))} if tier == "strong" and version else {}
+                    store.rerank(c["id"], tier=tier, **extra)
+                    changed += 1
+        return {"changed": changed}
 
     @app.post("/api/cli/usage")
     def cli_usage(body: CliUsageInput, request: Request):

@@ -304,6 +304,12 @@ class Account:
             raise AccountError(str(detail or f"The L.E.O. server answered HTTP {response.status_code}"))
         return response.json()
 
+    async def rerank_models(self):
+        """Rank the models of signed-in accounts again on the server, and sync: {changed}."""
+        result = await self.device_call("POST", "/api/cli/connections/rerank")
+        await self.sync()
+        return result
+
     async def model_accounts(self):
         """The subscription sign-ins the server offers: {available, error, providers, accounts}."""
         return await self.device_call("GET", "/api/cli/accounts")

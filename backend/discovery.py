@@ -26,6 +26,8 @@ CODER_NAME = re.compile(r"cod(e|er|ing|estral)|devstral|laguna|starcoder", re.I)
 CODER_DESCRIPTION = re.compile(r"\bcoding (agent|model|assistant|specialist)|\bcode (generation|model)|\bsoftware engineering (agent|model)|\bagentic coding", re.I)
 STRONG = re.compile(r"\b(ultra|pro|opus|large|frontier|max)\b", re.I)
 LIGHT = re.compile(r"\b(lite|mini|nano|small|tiny|xs|haiku|compact)\b", re.I)
+# OpenAI's current main models. Variants for one job, such as review models, are not its strongest.
+FRONTIER = re.compile(r"(^|/)gpt-([5-9]|\d\d)(\.\d+)?(-[a-z]+)?(\[\w+\])?$", re.I)
 
 
 def size_billions(*texts):
@@ -53,6 +55,8 @@ def profile(model_id, description="", thinking=False, context=None, free=None, n
         tier = "strong"
     elif not modern_lite and (LIGHT.search(text) or (size and size <= 10) or "flash-lite" in model_id):
         tier = "light"
+    elif FRONTIER.search(model_id) and not model_id.endswith("-review"):
+        tier = "strong"
     else:
         tier = "standard"
     skills = []

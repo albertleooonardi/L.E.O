@@ -274,3 +274,23 @@ async def test_callback_listener_serves_the_redirect():
     server.close()
     assert page.status_code == 200 and 'Signed in &lt;ok&gt;' in page.text and seen == [{'code': 'c', 'state': 's'}]
     assert missing.status_code == 404
+
+
+def test_the_cli_can_rerank_account_models_it_signed_in_earlier(router_client, store, fake):
+    """Models signed in before the ranks were fixed keep their old rank until the owner asks; other models are left alone."""
+    started = router_client.post('/api/cli/device', json={'device_name': 'laptop'}).json()
+    router_client.post(f"/api/cli/device/{started['user_code']}", json={'approve': True})
+    token = router_client.post('/api/cli/token', json={'device_code': started['device_code']}).json()['token']
+    device = {'Authorization': f'Bearer {token}'}
+    begun = router_client.post('/api/accounts/signin', json={'provider': 'codex', 'accept_risk': True}).json()
+    router_client.get('/api/auth/oauth/none')  # Not a sign-in; the router is what matters here.
+    from backend.schemas import Connection
+    router_url = f'http://leo-router-{store.user_id}:20128/v1'
+    old = store.save_connection(Connection(name='Old', base_url=router_url, model='cx/gpt-6-sol', free=True, tier='standard', api_key='k').model_dump(), user_id=store.user_id)
+    mine = store.save_connection(Connection(name='Mine', base_url='http://elsewhere.test/v1', model='gpt-6-sol', free=True, tier='light', api_key='k').model_dump(), user_id=store.user_id)
+    assert begun['id']
+    answer = router_client.post('/api/cli/connections/rerank', headers=device)
+    assert answer.status_code == 200 and answer.json()['changed'] == 1
+    tiers = {c['id']: c['tier'] for c in store.list_connections(store.user_id)}
+    assert tiers[old['id']] == 'strong' and tiers[mine['id']] == 'light'
+    assert store.decrypt(store.get_connection(old['id'], store.user_id, True)) == 'k', 'its key stays'

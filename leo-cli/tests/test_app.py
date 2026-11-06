@@ -583,7 +583,7 @@ def test_slash_commands_complete_with_what_they_do(ui, project):
         return [(c.text, c.display_meta_text) for c in SlashCompleter(ui).get_completions(Document(text), None)]
 
     assert ('/models', 'list your models, or add some (account sign-in or API key)') in complete('/mo')
-    assert [text for text, _ in complete('/models ')] == ['add'] and [text for text, _ in complete('/model a')] == ['add'], 'and what follows it'
+    assert [text for text, _ in complete('/models ')] == ['add', 'rerank'] and [text for text, _ in complete('/model a')] == ['add'], 'and what follows it'
     assert complete('/gr') == [('/greet', 'Say hello')], 'your skills complete too'
     assert complete('fix the tests') == [] and complete('/models add ') == [], 'only at the start of the message'
 
@@ -944,7 +944,7 @@ def tree_ui(tmp_path, monkeypatch, project):
 
 async def test_tree_command_draws_the_graph_with_a_note_for_a_root_alone(tree_ui):
     from test_tree import Team
-    ui = tree_ui(Team({'ROOT': [[('do_it_myself', {})], 'Done it.']}))
+    ui = tree_ui(Team({'ROOT': ['An answer.']}))
     await ui.command('/tree')
     assert 'No task yet' in text_of(ui.console)
     session = await ui.sessions.open()
@@ -952,9 +952,9 @@ async def test_tree_command_draws_the_graph_with_a_note_for_a_root_alone(tree_ui
     await session.task
     await ui.command('/tree')
     out = text_of(ui.console)
-    assert 'ROOT' in out and '+--' in out and 'did this one itself' in out
+    assert 'ROOT' in out and '+--' in out and 'answered this one itself' in out
     await ui.command('/usage')
-    assert text_of(ui.console).count('did this one itself') == 2, '/usage shows it too'
+    assert text_of(ui.console).count('answered this one itself') == 2, '/usage shows it too'
     await ui.sessions.close()
 
 
@@ -992,12 +992,20 @@ async def test_a_root_alone_prints_no_graph_by_itself(tree_ui):
     await ui.sessions.close()
 
 
-async def test_doing_it_yourself_reads_working(tree_ui):
-    from test_tree import Team, write
-    ui = tree_ui(Team({'ROOT': [[('do_it_myself', {})], [write('a.txt')], 'Done.']}))
-    session = await ui.sessions.open()
-    await ui.sessions.send(session, 'ROOT task')
-    await session.task
-    events = [e['data']['status'] for e in ui.sessions.store.events_of(session.run_id, 'tree')]
-    assert [status for status, _ in itertools.groupby(events)] == ['waiting', 'planning', 'working', 'done']
-    await ui.sessions.close()
+async def test_the_root_row_names_its_model_before_its_first_step_ends():
+    renderer = Renderer(Console(file=io.StringIO()))
+    renderer.event('tree', {'id': 'main', 'parent': None, 'kind': 'root', 'task': 'x', 'status': 'planning', 'model': None})
+    renderer.event('model', {'stage': 'agent:main:1', 'model': 'vendor/strong-m:free'})
+    assert renderer.tree['main']['model'] == 'vendor/strong-m:free'
+
+
+async def test_models_rerank_asks_the_server_then_syncs(ui, account, monkeypatch):
+    asked = []
+
+    async def rerank():
+        asked.append(True)
+        return {'changed': 3}
+
+    monkeypatch.setattr(account, 'rerank_models', rerank)
+    await ui.command('/models rerank')
+    assert asked == [True] and '3 models' in text_of(ui.console)
