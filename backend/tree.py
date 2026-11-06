@@ -7,7 +7,7 @@ light), so a tree has at most 3 levels, and the root decides for each subtask wh
 A parent reviews what its children did, on evidence the engine collects itself: rejected work gets one more try, then
 one try on a stronger model, then the failure goes up, and the final answer lists whatever was not finished.
 
-A workspace asks for this with `tree = True` (L.E.O CLI does); the server's agent stays flat.
+A workspace asks for this with `tree = True` (L.E.O.C.O.D.E does); the server's agent stays flat.
 """
 import contextlib
 import hashlib

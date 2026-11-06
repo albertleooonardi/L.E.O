@@ -46,7 +46,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from . import theme, treeview
+from . import NAME, theme, treeview
 from .account import AccountError
 from .mentions import attach, complete
 from .policy import compound
@@ -75,12 +75,14 @@ HELP = [
 KEYS = [("Enter", "send a task; while the agent works, your message steers it"), ("Esc", "stop the current task"),
         ("@path", "attach a file's text or a folder's listing to your message, e.g. @src/app.py"),
         ("Tab", "complete a /command or an @path"), ("Up", "earlier messages"), ("Ctrl-C x2", "quit; unfinished sessions keep their progress")]
-BANNER = ["██╗        ███████╗    ██████╗ ",
-          "██║        ██╔════╝   ██╔═══██╗",
-          "██║        █████╗     ██║   ██║",
-          "██║        ██╔══╝     ██║   ██║",
-          "███████╗██╗███████╗██╗╚██████╔╝",
-          "╚══════╝╚═╝╚══════╝╚═╝ ╚═════╝ "]
+LETTERS = {"L": ["██╗     ", "██║     ", "██║     ", "██║     ", "███████╗", "╚══════╝"],
+           "E": ["███████╗", "██╔════╝", "█████╗  ", "██╔══╝  ", "███████╗", "╚══════╝"],
+           "O": [" ██████╗ ", "██╔═══██╗", "██║   ██║", "██║   ██║", "╚██████╔╝", " ╚═════╝ "],
+           "C": [" ██████╗", "██╔════╝", "██║     ", "██║     ", "╚██████╗", " ╚═════╝"],
+           "D": ["██████╗ ", "██╔══██╗", "██║  ██║", "██║  ██║", "██████╔╝", "╚═════╝ "],
+           ".": ["   ", "   ", "   ", "   ", "██╗", "╚═╝"]}
+BANNER = ["".join(LETTERS[letter][row] for letter in NAME) for row in range(6)]
+LOGO_WIDTH = 80  # A narrower terminal gets the name as text.
 
 UNICODE = dict(tee="├─", elbow="└─", pipe="│  ", wave="▁▂▃▄▅▆▇█▇▆▅▄▃▂", dot="●", hook="└", rail="│", agent="◆", ok="✔", fail="✗", warn="▲", info="◇", idle="○", now="▸",
                prompt="❯", sep="·", bar="━", track="─", rule="─", spinner="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", box=box.ROUNDED, ellipsis="…")
@@ -96,7 +98,7 @@ def glyphs(console=None, unicode=None):
 
 
 def banner():
-    """L.E.O in block letters, shaded top to bottom in the theme's colours."""
+    """The name in block letters, shaded top to bottom in the theme's colours."""
     return Text("\n").join(Text(line, style=f"leo.banner{i}") for i, line in enumerate(BANNER))
 
 
@@ -946,7 +948,7 @@ class App:
                 event.app.exit(exception=EOFError())
             else:
                 self.last_interrupt = time.monotonic()
-                self.say("Press Ctrl-C again to quit (sessions keep their progress: leo resume).", "leo.warn")
+                self.say("Press Ctrl-C again to quit (sessions keep their progress: leocode resume).", "leo.warn")
 
         return bindings
 
@@ -968,7 +970,7 @@ class App:
                 await asyncio.gather(watcher, return_exceptions=True)
                 await self.sessions.close()
         if any(s.status in ("running", "queued", "waiting") for s in self.sessions.items):
-            self.say("Unfinished sessions keep their progress; continue with: leo resume")
+            self.say("Unfinished sessions keep their progress; continue with: leocode resume")
 
     async def loop(self):
         while True:
@@ -1051,7 +1053,7 @@ class App:
         if mine:
             parts += section("Your skills and commands", mine)
         parts += section("Keys", KEYS, chips=True)
-        self.console.print(Panel(Group(*parts[:-1]), box=self.g.box, border_style="leo.border", title="L.E.O CLI · help",
+        self.console.print(Panel(Group(*parts[:-1]), box=self.g.box, border_style="leo.border", title="L.E.O.C.O.D.E · help",
                                  title_align="left", padding=(1, 2)))
 
     async def cmd_exit(self, arguments):

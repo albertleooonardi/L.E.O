@@ -1,6 +1,6 @@
 """LocalWorkspace: the six operations agent mode uses, on a folder of the user's own machine.
 
-The server's agents work in a Docker sandbox; L.E.O CLI's agents work here, as the user, with no sandbox. Files stay
+The server's agents work in a Docker sandbox; L.E.O.C.O.D.E's agents work here, as the user, with no sandbox. Files stay
 inside the project folder (paths are resolved through symlinks first), and the permission policy decides what may run
 without asking.
 """
@@ -41,7 +41,7 @@ def find_bash():
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
             return candidate
-    raise SandboxError("L.E.O CLI runs commands with bash; install Git for Windows (it includes Git Bash), "
+    raise SandboxError("L.E.O.C.O.D.E runs commands with bash; install Git for Windows (it includes Git Bash), "
                        "or set LEO_CLI_BASH to a bash.exe")
 
 

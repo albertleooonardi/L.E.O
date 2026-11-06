@@ -1,4 +1,4 @@
-"""The server side of L.E.O CLI: device login, model sync, usage reports, and device revocation."""
+"""The server side of L.E.O.C.O.D.E: device login, model sync, usage reports, and device revocation."""
 import time
 
 from fastapi.testclient import TestClient
@@ -106,7 +106,7 @@ def test_revoking_a_device_signs_it_out(client, store):
     assert client.delete(f"/api/cli/devices/{device['id']}").status_code == 200
     with anonymous(store) as cli:
         refused = cli.get('/api/cli/sync', headers={'Authorization': f'Bearer {token}'})
-        assert refused.status_code == 401 and 'leo login' in refused.json()['detail']
+        assert refused.status_code == 401 and 'leocode login' in refused.json()['detail']
     _, second = sign_in_device(client, store, 'desktop')
     with anonymous(store) as cli:
         assert cli.post('/api/cli/logout', headers={'Authorization': f'Bearer {second}'}).status_code == 200

@@ -17,7 +17,7 @@ import httpx
 
 VERSION = "0.3.0"
 TERMINAL = {"completed", "failed", "cancelled", "waiting"}
-# Agent work belongs to L.E.O CLI; it is offered only when the server runs agents too (LEO_SERVER_AGENT=1).
+# Agent work belongs to L.E.O.C.O.D.E; it is offered only when the server runs agents too (LEO_SERVER_AGENT=1).
 MODES = ["auto", "quick", "reviewed", "deep"] + (["agent"] if os.getenv("LEO_SERVER_AGENT", "").lower() in {"1", "true", "yes"} else [])
 
 TOOLS = [

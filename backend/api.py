@@ -49,11 +49,11 @@ PUBLIC_API_PATHS = {
     # Arrives from the connector's sign-in page, so the SameSite=Strict session cookie is not sent; the encrypted
     # leo_mcp_oauth cookie says whose sign-in it is.
     "/api/connectors/oauth/callback",
-    # L.E.O CLI device login: the CLI asks for a code, then polls for its token.
+    # L.E.O.C.O.D.E device login: the CLI asks for a code, then polls for its token.
     "/api/cli/device",
     "/api/cli/token",
 }
-# Only these accept a L.E.O CLI device token (Authorization: Bearer), and nothing else does.
+# Only these accept a L.E.O.C.O.D.E device token (Authorization: Bearer), and nothing else does.
 CLI_DEVICE_PATHS = {"/api/cli/sync", "/api/cli/usage", "/api/cli/logout", "/api/cli/connections"}
 # The CLI reaches models on the user's 9Router (on the server's network only) through the server: model calls only.
 CLI_RELAY_PREFIX = "/api/cli/relay/"
@@ -174,7 +174,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
                 device = await run_in_threadpool(store.cli_device, request.headers.get("authorization", "").removeprefix("Bearer ").strip())
                 owner = device and await run_in_threadpool(store.get_user, device["user_id"])
                 if not owner:
-                    return JSONResponse({"detail": "This device was signed out; run leo login"}, status_code=401)
+                    return JSONResponse({"detail": "This device was signed out; run leocode login"}, status_code=401)
                 request.state.device = device
                 request.state.user = CurrentUser(id=owner["id"], username=owner["username"], is_admin=owner["id"] == store.admin_user_id())
             elif request.method != "OPTIONS" and not public:
@@ -698,7 +698,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
 
     # ---------------- agent workspaces ----------------
 
-    AGENT_MOVED = "Agent work is moving to L.E.O CLI; set LEO_SERVER_AGENT=1 to run it on this server"
+    AGENT_MOVED = "Agent work is moving to L.E.O.C.O.D.E; set LEO_SERVER_AGENT=1 to run it on this server"
 
     def require_sandbox():
         if not config.server_agent:
@@ -774,10 +774,10 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
         uid = user.owner_id
         report = store.usage_report(conversation_id, user_id=uid)
         if uid and not conversation_id:
-            report["cli"] = store.cli_usage_report(uid)  # What L.E.O CLI devices reported: totals only, no prompts or code.
+            report["cli"] = store.cli_usage_report(uid)  # What L.E.O.C.O.D.E devices reported: totals only, no prompts or code.
         return report
 
-    # ---------------- L.E.O CLI: device login, sync, usage ----------------
+    # ---------------- L.E.O.C.O.D.E: device login, sync, usage ----------------
 
     USER_CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # No 0/O or 1/I to misread.
 
@@ -802,7 +802,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
     def pending_login(user_code):
         login = store.cli_login(user_code=user_code.strip().upper())
         if not login or login["expires_at"] < time.time():
-            raise HTTPException(404, "This code has expired or does not exist; run leo login again")
+            raise HTTPException(404, "This code has expired or does not exist; run leocode login again")
         return login
 
     @app.get("/api/cli/device/{user_code}")
@@ -868,7 +868,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
         router = store.get_router(uid)
         c = store.get_connection(connection_id, uid, private=True)
         if not c or not c["enabled"] or not router or not c["base_url"].startswith(router["url"]):
-            raise HTTPException(404, "This model is not on your 9Router; run leo sync")
+            raise HTTPException(404, "This model is not on your 9Router; run leocode sync")
         body = await request.body()
         if len(body) > MAX_RELAY_BYTES:
             raise HTTPException(413, "The request is too large to relay")
@@ -901,7 +901,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
         """Run one tool of the user's Chat connector for the CLI, which asked the user first when the tool needs it."""
         found = store.get_connector(connector_id, request.state.user.id)
         if not found or not found.get("enabled", True):
-            raise HTTPException(404, "This connector is not in L.E.O Chat any more; run leo sync")
+            raise HTTPException(404, "This connector is not in L.E.O Chat any more; run leocode sync")
         if not any(tool["name"] == body.tool for tool in found.get("tools") or []) or (found.get("permissions") or {}).get(body.tool) == "deny":
             raise HTTPException(403, "This tool is not allowed in L.E.O Chat's connector settings")
         try:

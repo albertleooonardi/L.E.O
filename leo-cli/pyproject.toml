@@ -1,7 +1,7 @@
 [project]
 name = "leo-cli"
 version = "0.1.0"
-description = "L.E.O CLI: the multi-agent LLM Efficiency Orchestrator in your terminal"
+description = "L.E.O.C.O.D.E: the multi-agent LLM Efficiency Orchestrator in your terminal"
 requires-python = ">=3.11"
 dependencies = [
   "leo-orchestrator",
@@ -11,6 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
+leocode = "leo_cli.app:main"
 leo = "leo_cli.app:main"
 
 [build-system]

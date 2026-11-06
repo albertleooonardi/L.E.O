@@ -1,11 +1,11 @@
 """The `leo` command.
 
     leo [FOLDER]                 work with the agent on this folder, or on FOLDER (signs in through the browser the first time)
-    leo login [--server URL]     sign in again, or to another server
-    leo -p "task"                one task, then print the answer (exit code 1 if it failed)
-    leo resume [N]               continue an earlier session on this folder
-    leo sync | models [add] | logout
-    leo update                   upgrade L.E.O CLI to the latest version
+    leocode login [--server URL]     sign in again, or to another server
+    leocode -p "task"                one task, then print the answer (exit code 1 if it failed)
+    leocode resume [N]               continue an earlier session on this folder
+    leocode sync | models [add] | logout
+    leocode update                   upgrade L.E.O.C.O.D.E to the latest version
 """
 import argparse
 import asyncio
@@ -21,20 +21,20 @@ from rich.text import Text
 from rich.console import Group
 from rich.table import Table
 
-from . import __version__, models, theme
+from . import NAME, __version__, models, theme
 from .account import Account, AccountError, SignedOut
 from .mentions import attach
 from .ui import (ANSWERS, TERMINAL, App, Renderer, answers, approval_view, banner, choose_theme, clip_left, glyphs, home_path,
-                 key_hint, models_table, parse_answer, pick, tree_panel)
+                 key_hint, LOGO_WIDTH, models_table, parse_answer, pick, tree_panel)
 
 COMMANDS = ("login", "logout", "sync", "models", "resume", "update")
 DEFAULT_SERVER = "http://localhost:8000"
-SIGN_IN_FIRST = "Not signed in yet. Run [bold]leo[/] in a terminal to sign in (or [bold]leo login --server URL[/])."
+SIGN_IN_FIRST = "Not signed in yet. Run [bold]leocode[/] in a terminal to sign in (or [bold]leocode login --server URL[/])."
 
 
 def parser():
-    p = argparse.ArgumentParser(prog="leo", usage="leo [FOLDER] [options]  |  leo COMMAND",
-                                description="L.E.O CLI: the multi-agent LLM Efficiency Orchestrator in your terminal.",
+    p = argparse.ArgumentParser(prog="leocode", usage="leocode [FOLDER] [options]  |  leocode COMMAND",
+                                description="L.E.O.C.O.D.E: the multi-agent LLM Efficiency Orchestrator in your terminal.",
                                 epilog="Commands: login, logout, sync, models [add], resume [N], update. With no command, leo works on FOLDER, "
                                        "or on the current folder. In a message, @path attaches a file or folder.")
     p.add_argument("command", nargs="*", help=argparse.SUPPRESS)
@@ -44,7 +44,7 @@ def parser():
     p.add_argument("--project", default=os.getcwd(), help="the folder to work on (default: the current folder)")
     p.add_argument("--server", help=f"L.E.O. server to sign in to (default {DEFAULT_SERVER})")
     p.add_argument("--name", help="a name for this device on the server (login)")
-    p.add_argument("--version", action="version", version=f"leo {__version__}")
+    p.add_argument("--version", action="version", version=f"leocode {__version__}")
     return p
 
 
@@ -100,7 +100,7 @@ async def dispatch(args, account=None, transport=None):
                 return 0  # Quit from the welcome screen.
         if not await ready(account, console, interactive=not args.task and sys.stdin.isatty()):
             return 1
-        from .sessions import Sessions  # Imported here so `leo --help` and `leo login` start fast.
+        from .sessions import Sessions  # Imported here so `leo --help` and `leocode login` start fast.
         sessions = Sessions(account, args.project, autorun=True if args.autorun else None, transport=transport)
         if args.task:
             return await one_shot(sessions, args.task, args.worktree, transport)
@@ -131,8 +131,9 @@ async def first_sign_in(account, console, server=None, name=None):
 
     Signing in opens the L.E.O. website, where the user signs in or creates an account and allows this device.
     True once signed in; False if the user quit."""
-    console.print(banner())
-    console.print(Text.assemble("\nWelcome to ", ("L.E.O CLI", "leo.title"), ", the multi-agent LLM Efficiency Orchestrator.\n"))
+    if console.width >= LOGO_WIDTH:
+        console.print(banner())
+    console.print(Text.assemble("\nWelcome to ", (NAME, "leo.title"), ", the multi-agent LLM Efficiency Orchestrator.\n"))
     steps = 1 if account.config().get("theme") else 2
     if steps == 2:
         console.print(step(1, 2, "Choose a theme"))
@@ -191,7 +192,7 @@ async def login(account, console, server=None, name=None, inside=False):
     relayed = f" ({summary['relayed']} through your L.E.O. server)" if summary.get("relayed") else ""
     console.print(Text.assemble((f"{g.ok} Signed in as {summary['username']}", "leo.ok"),
                                 f": {summary['models']} models synced{relayed}. Keys are kept in {account.secrets.where}.",
-                                "" if inside else " Run leo in a project folder to start."))
+                                "" if inside else " Run leocode in a project folder to start."))
     return 0
 
 
@@ -217,44 +218,37 @@ async def ready(account, console, interactive=False, transport=None):
     if not signed_in(account):
         console.print(SIGN_IN_FIRST)
         return False
-    console.print("No model on this device can run the agent (it needs tool calling). Run [bold]leo[/] to add one, "
-                  "or add one in L.E.O. Settings → Models and run [bold]leo sync[/].")
+    console.print("No model on this device can run the agent (it needs tool calling). Run [bold]leocode[/] to add one, "
+                  "or add one in L.E.O. Settings → Models and run [bold]leocode sync[/].")
     return False
 
 
 def welcome(account, sessions, art=True, width=100):
-    """The session's first screen: who, where, and how it will behave, in a card; the logo beside it when it fits."""
+    """The session's first screen: who, where, and how it will behave, in a card; the logo above it when it fits."""
     config, g = account.config(), glyphs()
     count = sum(1 for c in account.store().list_connections(account.user_id) if c["enabled"])
     info = Table.grid(padding=(0, 2))
     info.add_column(style="leo.muted")
     info.add_column()
     info.add_row("account", Text(f"{config['username']} · {config['server']}") if config.get("username") else Text("offline", style="leo.warn"))
-    beside = art and width >= 96
-    # Room left for the value beside the logo and the labels; a long path keeps its end, the folder's own name.
-    info.add_row("project", Text(clip_left(home_path(sessions.project), max(width - (54 if beside else 19), 12)), style="leo.accent"))
+    # Room left beside the labels; a long path keeps its end, the folder's own name.
+    info.add_row("project", Text(clip_left(home_path(sessions.project), max(width - 19, 12)), style="leo.accent"))
     if sessions.items and sessions.current and sessions.current.branch:
         info.add_row("branch", Text(sessions.current.branch))
     info.add_row("models", Text(f"{count} ready", style="leo.ok" if count else "leo.warn"))
     info.add_row("mode", Text("autorun: edits and commands run without asking", style="leo.warn") if sessions.policy.autorun
                  else Text("asks before edits and commands"))
-    head = Text.assemble(("L.E.O CLI", "leo.title"), (f"  v{__version__}", "leo.muted"), "\n",
+    head = Text.assemble((NAME, "leo.title"), (f"  v{__version__}", "leo.muted"), "\n",
                          ("multi-agent LLM Efficiency Orchestrator", "leo.muted"))
     card = Group(head, Text(""), info)
-    if beside:  # Logo and card side by side.
-        body = Table.grid(padding=(0, 4))
-        body.add_row(banner(), card)
-    elif art and width >= 40:
-        body = Group(banner(), Text(""), card)
-    else:
-        body = card
+    logo = [banner(), Text("")] if art and width >= LOGO_WIDTH else []
     tips = [("enter", "send a task"), ("/", "commands"), ("esc", "stop"), ("ctrl-c x2", "quit")]
     tips = key_hint(tips if width >= 72 else tips[:3])  # One line, whatever the width.
-    return Group(Text(""), Panel(body, box=g.box, border_style="leo.border", padding=(1, 2), expand=False), tips, Text(""))
+    return Group(Text(""), *logo, Panel(card, box=g.box, border_style="leo.border", padding=(1, 2), expand=False), tips, Text(""))
 
 
 async def one_shot(sessions, task, worktree=False, transport=None, stdin=None):
-    """Run one task. Progress goes to stderr and the answer to stdout, so `leo -p` works in pipes and scripts.
+    """Run one task. Progress goes to stderr and the answer to stdout, so `leocode -p` works in pipes and scripts.
 
     Approvals are asked on the terminal when there is one; without a terminal, anything that needs approval is
     declined (use --autorun for unattended runs)."""
@@ -291,7 +285,7 @@ async def one_shot(sessions, task, worktree=False, transport=None, stdin=None):
                 break
             approval = session.approval
             if not approval:
-                break  # Neither working, waiting, nor finished: another leo window holds it (the session said so).
+                break  # Neither working, waiting, nor finished: another leocode window holds it (the session said so).
             err.print(approval_view(approval, unicode=renderer.g.dot != "*"))
             sessions.answer(session, await ask_line(approval, stdin, err))
     finally:
@@ -306,7 +300,7 @@ async def one_shot(sessions, task, worktree=False, transport=None, stdin=None):
 
 
 async def ask_line(approval, stdin, err):
-    """The approval answer from a plain terminal line (the full-screen prompt is not used by `leo -p`)."""
+    """The approval answer from a plain terminal line (the full-screen prompt is not used by `leocode -p`)."""
     g = glyphs(err)
     if not stdin.isatty():
         err.print(Text(f"{g.warn} Declined: no terminal to ask on. Use --autorun for unattended runs.", style="leo.warn"))

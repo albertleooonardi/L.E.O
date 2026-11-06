@@ -201,7 +201,7 @@ class Relayed:
 
 
 class Servers:
-    """The MCP servers whose tools the agent gets in this leo window: the CLI's own, then L.E.O Chat's connectors.
+    """The MCP servers whose tools the agent gets in this leocode window: the CLI's own, then L.E.O Chat's connectors.
 
     Started on first use and kept until the window closes; a server that fails to start is left out (and /mcp says why)."""
 
@@ -328,7 +328,7 @@ def view(chat, servers, results, g, home, project):
         parts.append(grid)
         parts.append(Text("The agent can use the connected ones too: your server keeps their sign-ins and makes each call. "
                           "Tools denied in L.E.O Chat stay off.", style="leo.muted"))
-    parts += [Text(""), Text("Set up for L.E.O CLI", style="leo.title")]
+    parts += [Text(""), Text("Set up for L.E.O.C.O.D.E", style="leo.title")]
     if not servers:
         parts.append(Text.assemble(("None yet. Add servers to ", "leo.muted"), (str(Path(home) / "mcp.json"), "leo.accent"),
                                    (" (yours) or ", "leo.muted"), (".leo-cli/mcp.json", "leo.accent"), (" (this project):\n", "leo.muted"),

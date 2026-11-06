@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// L.E.O CLI is a Python program. This launcher lets npm and npx install it: it finds uv (Astral's Python package
-// manager), installing it if needed, installs L.E.O CLI with `uv tool install` on first use, then runs it with the
-// same arguments. `leo update` upgrades it in place.
+// L.E.O.C.O.D.E is a Python program. This launcher lets npm and npx install it: it finds uv (Astral's Python package
+// manager), installing it if needed, installs L.E.O.C.O.D.E with `uv tool install` on first use, then runs it with the
+// same arguments. `leocode update` upgrades it in place.
 'use strict';
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -33,13 +33,13 @@ function findUv() {
 }
 
 function installUv() {
-  say('L.E.O CLI runs on uv (https://docs.astral.sh/uv/), which is not installed. Installing it for your user…');
+  say('L.E.O.C.O.D.E runs on uv (https://docs.astral.sh/uv/), which is not installed. Installing it for your user…');
   const status = windows
     ? run('powershell', ['-NoProfile', '-ExecutionPolicy', 'ByPass', '-Command', 'irm https://astral.sh/uv/install.ps1 | iex'])
     : run('sh', ['-c', 'curl -LsSf https://astral.sh/uv/install.sh | sh']);
   const uv = status === 0 ? findUv() : null;
   if (!uv) {
-    say('Could not install uv. Install it yourself (https://docs.astral.sh/uv/getting-started/installation/), then run leo again.');
+    say('Could not install uv. Install it yourself (https://docs.astral.sh/uv/getting-started/installation/), then run leocode again.');
     process.exit(1);
   }
   return uv;
@@ -54,7 +54,7 @@ function main() {
   const uv = findUv() || installUv();
   let leo = leoPath(uv);
   if (!leo || !fs.existsSync(leo)) {
-    say('Installing L.E.O CLI (first run only)…');
+    say('Installing L.E.O.C.O.D.E (first run only)…');
     if (run(uv, ['tool', 'install', '--force', SOURCE]) !== 0) process.exit(1);
     leo = leoPath(uv);
   }

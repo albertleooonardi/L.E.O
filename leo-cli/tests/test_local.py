@@ -1,4 +1,4 @@
-"""LocalWorkspace, the permission policy, and agent skills: the parts of L.E.O CLI that act on the user's machine."""
+"""LocalWorkspace, the permission policy, and agent skills: the parts of L.E.O.C.O.D.E that act on the user's machine."""
 import asyncio
 import os
 import sys

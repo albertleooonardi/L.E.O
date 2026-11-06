@@ -1,4 +1,4 @@
-"""`leo update`: upgrade L.E.O CLI in place with uv, from wherever it was installed (git, a folder, or the npm launcher)."""
+"""`leocode update`: upgrade L.E.O.C.O.D.E in place with uv, from wherever it was installed (git, a folder, or the npm launcher)."""
 import os
 import shutil
 import subprocess
@@ -27,13 +27,13 @@ def command(uv):
 def update(console, run=subprocess.call):
     uv = find_uv()
     if not uv:
-        console.print("L.E.O CLI updates itself with uv, which is not installed here. Reinstall with "
+        console.print("L.E.O.C.O.D.E updates itself with uv, which is not installed here. Reinstall with "
                       "[bold]npm install -g leo-orchestrator[/] or see https://docs.astral.sh/uv/ to install uv.")
         return 1
-    console.print("Updating L.E.O CLI…")
+    console.print("Updating L.E.O.C.O.D.E…")
     code = run(command(uv))
     if code == 0:
-        console.print("[leo.ok]L.E.O CLI is up to date.[/] Restart leo to use the new version.")
+        console.print("[leo.ok]L.E.O.C.O.D.E is up to date.[/] Restart leo to use the new version.")
         return 0
     console.print(f"[leo.error]The update did not finish (uv exited with {code}).[/] If leo is open in another window, close it "
                   f"and run [bold]{' '.join(command('uv'))}[/].")

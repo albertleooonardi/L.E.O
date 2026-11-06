@@ -396,13 +396,13 @@ def test_agent_mode_needs_the_sandbox_service(client, store):
 
 
 def test_server_agent_mode_is_off_unless_enabled(store):
-    """Agent work belongs to L.E.O CLI; the web chat refuses it unless LEO_SERVER_AGENT turns it back on."""
+    """Agent work belongs to L.E.O.C.O.D.E; the web chat refuses it unless LEO_SERVER_AGENT turns it back on."""
     add_provider(store)
     with TestClient(create_app(store.config, store, FakeSandbox())) as client:
         client.cookies.set('leo_session', store.user_session_token)
         assert client.get('/api/health').json()['agent'] is False
         refused = client.post('/api/runs', json={'prompt': 'fix the bug', 'mode': 'agent', 'request_id': 'agent-off-1'})
-        assert refused.status_code == 403 and 'L.E.O CLI' in refused.json()['detail']
+        assert refused.status_code == 403 and 'L.E.O.C.O.D.E' in refused.json()['detail']
         assert client.post('/api/workspaces', json={'source': 'empty'}).status_code == 403
         assert client.post('/api/runs', json={'prompt': 'hello', 'mode': 'quick', 'request_id': 'agent-off-2'}).status_code == 202
 
@@ -418,4 +418,4 @@ def test_old_agent_chats_stay_readable_but_take_no_new_messages(store):
         client.cookies.set('leo_session', store.user_session_token)
         assert client.get(f"/api/conversations/{run['conversation_id']}").status_code == 200
         later = client.post('/api/runs', json={'prompt': 'and now?', 'conversation_id': run['conversation_id'], 'request_id': 'agent-old-2'})
-        assert later.status_code == 409 and 'L.E.O CLI' in later.json()['detail']
+        assert later.status_code == 409 and 'L.E.O.C.O.D.E' in later.json()['detail']

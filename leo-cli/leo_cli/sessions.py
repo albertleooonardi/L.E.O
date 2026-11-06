@@ -140,13 +140,13 @@ class Sessions:
             run = self.store.get_run(session.run_id, self.uid, True) if session.run_id else None
             if not run or run["status"] != "running":
                 break
-            # A leo window that just closed still holds the run for up to 30 seconds; take it over when that runs out.
+            # A leocode window that just closed still holds the run for up to 30 seconds; take it over when that runs out.
             # A window that is still open keeps renewing it, so after a while this one stops trying.
             if waited >= lease_wait:
-                self.notify(session, "This session is running in another leo window; follow it there.")
+                self.notify(session, "This session is running in another leocode window; follow it there.")
                 break
             if waited == 0:
-                self.notify(session, "Waiting for the previous leo window to let go of this session…")
+                self.notify(session, "Waiting for the previous leocode window to let go of this session…")
             await asyncio.sleep(1)
             waited += 1
         try:
@@ -185,7 +185,7 @@ class Sessions:
                 self.notify(session, f"Sessions {other.number} and {session.number} both changed {relative}")
 
     async def close(self):
-        """Stop driving; interrupted runs keep their checkpoints and resume with leo resume."""
+        """Stop driving; interrupted runs keep their checkpoints and resume with leocode resume."""
         for session in self.items:
             if session.task and not session.task.done():
                 session.task.cancel()

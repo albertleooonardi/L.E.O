@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "L.E.O CLI: the multi-agent LLM Efficiency Orchestrator in your terminal (installs and runs the Python CLI with uv)",
   "bin": {
+    "leocode": "bin/leo.js",
     "leo": "bin/leo.js"
   },
   "files": [

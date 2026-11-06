@@ -1,8 +1,11 @@
 """The `leo` command and its terminal UI: one-shot runs, approvals, slash commands, and event rendering."""
 import asyncio
 import io
+import json
 import re
 import time
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +18,7 @@ from sqlalchemy import update
 from backend.store import runs
 from leo_cli import app
 from leo_cli.sessions import Sessions
-from leo_cli.ui import App, Renderer, approval_view, choose_answer, parse_answer, split_blocks, suggested_prefix
+from leo_cli.ui import BANNER, App, Renderer, approval_view, choose_answer, parse_answer, split_blocks, suggested_prefix
 from test_sessions import Model, account, project, reply, writes_hello  # noqa: F401 (fixtures)
 
 
@@ -64,14 +67,14 @@ async def test_no_models_means_sign_in_first(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
     from leo_cli.account import Account
     assert await app.dispatch(args('-p', 'hi', '--project', str(tmp_path)), Account(tmp_path / 'empty')) == 1
-    assert 'leo login' in capsys.readouterr().out
+    assert 'leocode login' in capsys.readouterr().out
 
 
 DOWN, ENTER = '\x1b[B', '\r'
 
 
 async def test_the_first_run_signs_in_inside_leo(tmp_path, monkeypatch):
-    """No `leo login` step: plain `leo` on a terminal shows the welcome screen; quitting there exits cleanly."""
+    """No `leocode login` step: plain `leo` on a terminal shows the welcome screen; quitting there exits cleanly."""
     monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
     monkeypatch.setattr(app.sys, 'stdin', Answers(tty=True))
     from leo_cli.account import Account
@@ -112,7 +115,7 @@ async def test_the_first_run_picks_a_theme_then_signs_in_on_the_website(signing_
     assert used == [(app.DEFAULT_SERVER, True)]
     assert account.config()['theme'] == 'light'
     shown = text_of(console)
-    assert '███████╗██╗███████╗██╗╚██████╔╝' in shown and 'Theme: Light' in shown
+    assert BANNER[4] in shown and 'Theme: Light' in shown
 
 
 async def test_quit_on_the_welcome_screen_signs_nothing_in(signing_in):
@@ -287,7 +290,7 @@ async def test_a_session_left_by_a_closed_window_is_taken_over(account, project)
     with sessions.store.engine.begin() as db:  # Another (now closed) window holds the run for two more seconds.
         db.execute(update(runs).where(runs.c.id == run['id']).values(status='running', lease_owner='closed-window', lease_until=time.time() + 2))
     await sessions.drive(session, lease_wait=10)
-    assert session.status == 'completed' and 'Waiting for the previous leo window' in notes[0]
+    assert session.status == 'completed' and 'Waiting for the previous leocode window' in notes[0]
 
 
 async def test_a_session_held_by_an_open_window_is_left_alone(account, project):
@@ -300,7 +303,7 @@ async def test_a_session_held_by_an_open_window_is_left_alone(account, project):
     with sessions.store.engine.begin() as db:
         db.execute(update(runs).where(runs.c.id == run['id']).values(status='running', lease_owner='open-window', lease_until=time.time() + 60))
     await sessions.drive(session, lease_wait=1)
-    assert session.status == 'running' and 'another leo window' in notes[-1]
+    assert session.status == 'running' and 'another leocode window' in notes[-1]
 
 
 # -- interactive commands (without the prompt) ----------------------------------------
@@ -618,10 +621,9 @@ def test_the_welcome_card_fits_the_terminal(account, project):
         return text_of(console)
 
     wide, narrow = shown(120), shown(36)
-    logo = '███████╗██╗███████╗██╗╚██████╔╝'
+    logo = BANNER[4]
     assert logo in wide and 'project' in wide and 'models' in wide and 'mode' in wide
-    assert any(logo in line and 'project' in line for line in wide.splitlines()), 'side by side on a wide terminal'
-    assert logo not in narrow and 'L.E.O CLI' in narrow, 'no logo when it would not fit'
+    assert logo not in narrow and 'L.E.O.C.O.D.E' in narrow, 'no logo when it would not fit'
     assert all(len(line) <= 36 for line in narrow.splitlines())
     assert all(len(line) <= 64 for line in shown(64).splitlines()), 'the key tips stay on one line'
     assert project.name in narrow and project.name in wide, 'a long project path keeps its folder name'
@@ -874,3 +876,40 @@ def test_a_finished_run_forgets_its_tree():
     renderer.event('tree', {'id': 'main', 'parent': None, 'kind': 'root', 'task': 'x', 'status': 'planning'})
     renderer.event('done', {'status': 'completed', 'output': 'ok', 'usage': {}})
     assert renderer.tree == {}
+
+
+# -- the name ----------------------------------------------------------------------------------
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_leocode_and_leo_are_both_commands():
+    scripts = tomllib.loads((ROOT / 'leo-cli' / 'pyproject.toml').read_text())['project']['scripts']
+    assert scripts['leocode'] == scripts['leo'] == 'leo_cli.app:main'
+    bins = json.loads((ROOT / 'leo-cli' / 'npm' / 'package.json').read_text())['bin']
+    assert bins['leocode'] == bins['leo'] == 'bin/leo.js'
+    assert app.parser().prog == 'leocode'
+
+
+def test_the_logo_fits_at_eighty_columns(account, project):
+    from leo_cli import theme
+    from leo_cli.ui import BANNER
+    sessions = Sessions(account, project)
+
+    def shown(width):
+        console = theme.apply(Console(record=True, width=width, color_system=None))
+        console.print(app.welcome(account, sessions, width=width))
+        return text_of(console)
+
+    assert len(BANNER) == 6 and max(len(line) for line in BANNER) <= 78
+    wide, narrow = shown(80), shown(79)
+    assert BANNER[4] in wide and all(len(line) <= 80 for line in wide.splitlines())
+    assert BANNER[4] not in narrow and 'L.E.O.C.O.D.E' in narrow
+
+
+def test_nothing_says_the_old_name():
+    files = [*(ROOT / 'leo-cli' / 'leo_cli').glob('*.py'), *(ROOT / 'backend').glob('*.py'), ROOT / 'frontend/src/components/AuthPage.astro', ROOT / 'frontend/src/scripts/chat.ts',
+             *[ROOT / 'frontend/src/pages' / name for name in ('cli.astro', 'usage.astro', 'index.astro')], ROOT / 'leo-cli/npm/bin/leo.js', ROOT / 'leo-cli/npm/README.md']
+    for path in files:
+        assert 'L.E.O CLI' not in path.read_text(), path
+    assert 'Soon' not in (ROOT / 'frontend/src/components/AuthPage.astro').read_text()

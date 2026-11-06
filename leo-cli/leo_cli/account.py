@@ -23,7 +23,7 @@ SERVICE = "leo-cli"
 LOCAL_USER = "local"
 # What the browser shows when the sign-in page sends it back to the terminal.
 RETURN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>L.E.O CLI</title><style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#151515;color:#ececec;
+<title>L.E.O.C.O.D.E</title><style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#151515;color:#ececec;
 font:16px/1.5 system-ui,sans-serif}}main{{padding:24px;max-width:420px}}h1{{font-size:22px;margin:0 0 8px}}p{{margin:0;color:#a3a3a3}}</style>
 </head><body><main><h1>{title}</h1><p>{text}</p></main></body></html>"""
 
@@ -33,7 +33,7 @@ class AccountError(Exception):
 
 
 class SignedOut(AccountError):
-    def __init__(self, message="This device is not signed in; run leo login"):
+    def __init__(self, message="This device is not signed in; run leocode login"):
         super().__init__(message)
 
 
@@ -200,7 +200,7 @@ class Account:
             try:
                 request = (await asyncio.wait_for(reader.readline(), 5)).decode("latin-1")
                 denied = "status=denied" in request
-                page = RETURN_PAGE.format(title="Sign-in denied" if denied else "L.E.O CLI is signed in",
+                page = RETURN_PAGE.format(title="Sign-in denied" if denied else "L.E.O.C.O.D.E is signed in",
                                           text="The device did not get access." if denied else "You can close this tab and go back to your terminal.")
                 body = page.encode()
                 writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n"
@@ -229,7 +229,7 @@ class Account:
             except httpx.HTTPError as exc:
                 raise AccountError(f"Cannot reach {self.server}: {type(exc).__name__}") from exc
         if response.status_code == 401:
-            raise SignedOut(response.json().get("detail") or "This device was signed out; run leo login")
+            raise SignedOut(response.json().get("detail") or "This device was signed out; run leocode login")
         response.raise_for_status()
         data = response.json()
         store, uid = self.store(), self.user_id
@@ -267,7 +267,7 @@ class Account:
         from backend.mcp_client import MCPError  # Only the agent's MCP tools need it.
         token = self.secrets.get("device-token")
         if not token:
-            raise MCPError("this device is not signed in; run leo login")
+            raise MCPError("this device is not signed in; run leocode login")
         async with self.client(token) as http:
             http.timeout = httpx.Timeout(150, connect=15)
             try:
@@ -299,7 +299,7 @@ class Account:
         if response.status_code == 401:
             if detail == "Sign in":  # This device is fine; the server has no such route for devices yet.
                 raise AccountError("Your L.E.O. server is older than this leo; update it (with Docker: docker compose up -d --build).")
-            raise SignedOut(detail or "This device was signed out; run leo login")
+            raise SignedOut(detail or "This device was signed out; run leocode login")
         if not response.is_success:
             raise AccountError(str(detail or f"The L.E.O. server answered HTTP {response.status_code}"))
         return response.json()

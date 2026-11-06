@@ -32,7 +32,7 @@ class NeedsApproval(Exception):
         self.approval = approval
 
 
-# Where agents work unless the workspace says otherwise (L.E.O CLI works on the user's own machine).
+# Where agents work unless the workspace says otherwise (L.E.O.C.O.D.E works on the user's own machine).
 SANDBOX_ENVIRONMENT = ("Environment: Debian with Python 3, pip, Node.js, npm, git, and ripgrep. You run as an unprivileged user without sudo.\n"
                        "Only package registries are reachable from the sandbox (pip and npm work); for documentation use web_search and read_url.")
 
@@ -105,14 +105,14 @@ class AgentRun:
     def __init__(self, orchestrator):
         self.o, self.store, self.sandbox = orchestrator, orchestrator.store, orchestrator.sandbox
         # A workspace can describe itself, check actions before they happen, and offer agent skills. The server's sandbox
-        # does none of that, so these defaults keep its behaviour; L.E.O CLI's LocalWorkspace sets all of them.
+        # does none of that, so these defaults keep its behaviour; L.E.O.C.O.D.E's LocalWorkspace sets all of them.
         self.root = getattr(self.sandbox, "root", WORKSPACE)
         self.place = getattr(self.sandbox, "place", f"a Linux sandbox at {WORKSPACE}")
         self.environment = getattr(self.sandbox, "environment", SANDBOX_ENVIRONMENT)
         self.where = getattr(self.sandbox, "resolve", workspace_path)
         self.policy = getattr(self.sandbox, "policy", None)
         self.agent_skills = getattr(self.sandbox, "skills", None)
-        # Tools of the workspace's own (L.E.O CLI: the user's MCP servers): extra_tools() lists them, call_tool runs one.
+        # Tools of the workspace's own (L.E.O.C.O.D.E: the user's MCP servers): extra_tools() lists them, call_tool runs one.
         self.extra_tools = getattr(self.sandbox, "extra_tools", None)
         self.ws = orchestrator.run["conversation_id"]
         self.prefs = orchestrator.prefs

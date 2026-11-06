@@ -1,4 +1,4 @@
-"""L.E.O CLI's account against the real server app, in-process: device login, sync, usage reports, sign-out."""
+"""L.E.O.C.O.D.E's account against the real server app, in-process: device login, sync, usage reports, sign-out."""
 import asyncio
 import json
 import os
@@ -191,7 +191,7 @@ async def test_the_browser_coming_back_ends_the_wait_at_once(account, server):
     summary = await asyncio.wait_for(account.login('http://testserver', show=show, sleep=never), 10)
     await returns[0]
     assert summary['username'] == 'ann'
-    assert pages[0].startswith(b'HTTP/1.1 200') and b'L.E.O CLI is signed in' in pages[0]
+    assert pages[0].startswith(b'HTTP/1.1 200') and b'L.E.O.C.O.D.E is signed in' in pages[0]
 
 
 async def test_a_denied_login_saves_nothing(account, server):
@@ -204,7 +204,7 @@ async def test_sync_after_revocation_says_to_sign_in_again(account, server):
     await account.login('http://testserver', show=approver(server), sleep=no_wait)
     [device] = server['browser'].get('/api/cli/devices').json()
     server['browser'].delete(f"/api/cli/devices/{device['id']}")
-    with pytest.raises(SignedOut, match='leo login'):
+    with pytest.raises(SignedOut, match='leocode login'):
         await account.sync()
 
 

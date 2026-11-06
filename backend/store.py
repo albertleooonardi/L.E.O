@@ -69,7 +69,7 @@ identities = Table("identities", metadata,
 connectors = Table("connectors", metadata,
     Column("id", String(36), primary_key=True), Column("user_id", String(36), index=True, nullable=False),
     Column("config", JSON, nullable=False), Column("secret", Text), Column("created_at", Float, nullable=False))
-# L.E.O CLI sign-in: a pending device login (device code digest → the user code shown in the browser), the signed-in
+# L.E.O.C.O.D.E sign-in: a pending device login (device code digest → the user code shown in the browser), the signed-in
 # devices (token digests, revocable), and the usage totals devices report back (no prompts or code).
 cli_logins = Table("cli_logins", metadata,
     Column("id", String(64), primary_key=True), Column("user_code", String(16), unique=True, nullable=False),
@@ -125,7 +125,7 @@ class Store:
         seed_skills = not inspect(self.engine).has_table("skills")
         metadata.create_all(self.engine)
         self._add_user_id_columns()
-        key = encryption_key or os.getenv("LEO_ENCRYPTION_KEY")  # L.E.O CLI passes the key from the OS keychain.
+        key = encryption_key or os.getenv("LEO_ENCRYPTION_KEY")  # L.E.O.C.O.D.E passes the key from the OS keychain.
         if not key:
             path = config.data_dir / "secret.key"
             if not path.exists():
@@ -295,7 +295,7 @@ class Store:
             if not db.execute(delete(connectors).where(connectors.c.id == connector_id, connectors.c.user_id == user_id)).rowcount:
                 raise KeyError(connector_id)
 
-    # -- L.E.O CLI devices ------------------------------------------------
+    # -- L.E.O.C.O.D.E devices ------------------------------------------------
 
     def create_cli_login(self, device_hash: str, user_code: str, device_name: str, expires_at: float) -> None:
         with self.engine.begin() as db:
@@ -360,7 +360,7 @@ class Store:
                 db.execute(insert(cli_usage).values(user_id=user_id, device_id=device_id, **entry))
 
     def cli_usage_report(self, user_id: str) -> dict:
-        """L.E.O CLI's reported usage: totals and per model."""
+        """L.E.O.C.O.D.E's reported usage: totals and per model."""
         query = select(cli_usage.c.model, func.sum(cli_usage.c.calls), func.sum(cli_usage.c.input_tokens), func.sum(cli_usage.c.output_tokens),
                        func.sum(cli_usage.c.cost), func.max(cli_usage.c.estimated.cast(Integer))).where(cli_usage.c.user_id == user_id).group_by(cli_usage.c.model)
         with self.engine.connect() as db:
@@ -449,7 +449,7 @@ class Store:
             db.execute(delete(user_sessions).where(user_sessions.c.expires_at <= time.time()))
 
     def replace_skills(self, items):
-        """Use exactly this skill catalog (L.E.O CLI takes the server's)."""
+        """Use exactly this skill catalog (L.E.O.C.O.D.E takes the server's)."""
         with self.engine.begin() as db:
             db.execute(delete(skills))
             for position, skill in enumerate(items):
@@ -705,7 +705,7 @@ class Store:
         return {k: v for k, v in row.items() if k not in {"state", "lease_owner", "lease_until", "request_id"}}
 
     def claim(self, owner, user_id: str | None = None, run_id: str | None = None):
-        """The oldest run ready for a worker (or exactly `run_id`: L.E.O CLI runs each session's own runs)."""
+        """The oldest run ready for a worker (or exactly `run_id`: L.E.O.C.O.D.E runs each session's own runs)."""
         now = time.time()
         ready = and_(runs.c.status.in_(["queued", "running"]), runs.c.lease_until < now)
         if user_id:

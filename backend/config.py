@@ -37,7 +37,7 @@ class Config:
     # Connectors (remote MCP servers) must be HTTPS on public addresses; this allows http:// and private networks too,
     # for self-hosted MCP servers.
     mcp_allow_private: bool = field(default_factory=lambda: os.getenv("LEO_MCP_ALLOW_PRIVATE", "").lower() in {"1", "true", "yes"})
-    # Agent work (sandbox workspaces, file and command tools, git push) belongs to L.E.O CLI. The web chat refuses it
+    # Agent work (sandbox workspaces, file and command tools, git push) belongs to L.E.O.C.O.D.E. The web chat refuses it
     # unless this turns server-side agent runs back on.
     server_agent: bool = field(default_factory=lambda: os.getenv("LEO_SERVER_AGENT", "").lower() in {"1", "true", "yes"})
     # sandboxd, which runs each user's model router and (with server_agent) agent workspaces; docker compose sets both.

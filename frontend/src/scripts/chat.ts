@@ -481,7 +481,7 @@ function listenAgent(listen: (kind: string, handler: (data: any) => void) => voi
 }
 // The Files panel: browse, upload to, and download the chat's sandbox workspace.
 function syncWorkspace() {
-  // Agent work moved to L.E.O CLI; its controls appear only when this server still runs agents (LEO_SERVER_AGENT).
+  // Agent work moved to L.E.O.C.O.D.E; its controls appear only when this server still runs agents (LEO_SERVER_AGENT).
   const workspace = agentOn ? current?.workspace : null;
   el('toggle-workspace').hidden = !workspace;
   if (workspace) select('composer-mode').value = 'agent';
@@ -915,7 +915,7 @@ async function loadDevices() {
       void loadDevices();
     });
     item.append(text, revoke); return item;
-  }) : [node('p', 'No devices yet. Install L.E.O CLI and run leo login.', 'account-empty')]));
+  }) : [node('p', 'No devices yet. Install L.E.O.C.O.D.E and run leocode login.', 'account-empty')]));
 }
 async function unlinkIdentity(id: string, name: string) {
   if (!window.confirm(`Unlink ${name}? You will no longer be able to sign in with it.`)) return;
@@ -1262,7 +1262,7 @@ el('open-settings').addEventListener('click', () => openSettings());
     if (failed) toast(failed === 'needs_client' ? 'This service needs a client ID: see the connector below' : failed === 'cancelled' ? 'Sign-in was cancelled' : 'Sign-in did not complete; see the connector below');
     else if (params.get('connected')) toast('Connector signed in');
   }
-  if (params.get('settings') === 'models') {  // From L.E.O CLI: "add a model on the website".
+  if (params.get('settings') === 'models') {  // From L.E.O.C.O.D.E: "add a model on the website".
     history.replaceState(null, '', location.pathname);
     openSettings('tab-models');
   }
