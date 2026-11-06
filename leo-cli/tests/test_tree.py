@@ -430,3 +430,10 @@ async def test_stopping_stops_every_node(members, project):
     await asyncio.wait_for(session.task, 30)
     assert session.status == 'completed' and session.run['output'] == 'Second answer.'
     await sessions.close()
+
+
+async def test_the_scrollback_says_who_each_agent_is(members, project):
+    team = Team({'ROOT': [[delegate('child work')], [accept('child work')], 'Done.'], 'child work': ['My report.']})
+    sessions, session = await run(members(), project, team)
+    events = [e['data'] for e in sessions.store.events_of(session.run_id, 'subagent')]
+    assert [e['status'] for e in events] == ['started', 'completed'] and events[0]['task'] == 'child work' and events[1]['report'] == 'My report.'

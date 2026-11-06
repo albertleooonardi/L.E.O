@@ -25,7 +25,7 @@ from . import __version__, models, theme
 from .account import Account, AccountError, SignedOut
 from .mentions import attach
 from .ui import (ANSWERS, TERMINAL, App, Renderer, answers, approval_view, banner, choose_theme, clip_left, glyphs, home_path,
-                 key_hint, models_table, parse_answer, pick)
+                 key_hint, models_table, parse_answer, pick, tree_panel)
 
 COMMANDS = ("login", "logout", "sync", "models", "resume", "update")
 DEFAULT_SERVER = "http://localhost:8000"
@@ -265,6 +265,9 @@ async def one_shot(sessions, task, worktree=False, transport=None, stdin=None):
 
     def show(event):
         if event["kind"] == "done":  # The answer goes to stdout; stderr gets the closing line with what the run cost.
+            tree = tree_panel(session.run, sessions.store, renderer.g)
+            if tree:
+                err.print(tree)
             err.print(renderer.footer(event["data"]))
         else:
             renderer.event(event["kind"], event["data"])

@@ -13,15 +13,7 @@ from rich.text import Text
 from backend.agent import COMPACT_AT, SCHEMAS
 from backend.context import token_bound
 
-
-def tokens(n):
-    n = n or 0
-    return f"{n / 1_000_000:.1f}M" if n >= 1_000_000 else f"{n / 1000:.1f}K" if n >= 1000 else str(n)
-
-
-def money(cost):
-    cost = cost or 0
-    return "free" if not cost else f"${cost:.4f}" if cost < 1 else f"${cost:.2f}"
+from .treeview import money, tokens
 
 
 def ago(stamp):
@@ -52,9 +44,9 @@ def summary(total):
             f"({tokens(total.get('input_tokens'))} in, {tokens(total.get('output_tokens'))} out) · {money(total.get('cost'))}")
 
 
-def usage_view(store, uid, session_id=None, folder_ids=(), g=None):
-    """Every model this device has called: calls, tokens, cost, and its share of all tokens; then the totals for this
-    session, this folder, and this device."""
+def usage_view(store, uid, session_id=None, folder_ids=(), g=None, tree=None):
+    """The latest task's tree of agents when there is one; every model this device has called: calls, tokens, cost, and
+    its share of all tokens; then the totals for this session, this folder, and this device."""
     report = store.usage_report(user_id=uid, recent=0)
     models = report["models"]
     if not models:
@@ -92,7 +84,7 @@ def usage_view(store, uid, session_id=None, folder_ids=(), g=None):
     totals.add_row("this device", summary(report["totals"]))
     note = Text(("~ estimated: the model did not report its token counts. " if any(m["estimated"] for m in models) else "")
                 + "All your devices add up on the website's Usage page.", style="leo.muted")
-    return Group(table, Text(""), totals, Text(""), note)
+    return Group(*([tree, Text("")] if tree else []), table, Text(""), totals, Text(""), note)
 
 
 def context_view(run, store, uid, model=None, g=None):

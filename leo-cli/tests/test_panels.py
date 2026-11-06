@@ -87,3 +87,47 @@ async def test_mcp_lists_cli_servers_and_checks_them(tmp_path):
 def test_mcp_says_how_to_add_servers(tmp_path):
     out = shown(mcp.view(None, [], [], glyphs(unicode=True), tmp_path, tmp_path))
     assert 'run /sync' in out and 'mcpServers' in out and 'mcp.json' in out
+
+
+async def test_usage_starts_with_the_latest_tree(tmp_path, monkeypatch, project):
+    from leo_cli.ui import App
+    from test_tree import ALL, Team, accept, delegate
+    from backend.schemas import Connection
+    from leo_cli.account import Account
+    monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
+    home = Account(tmp_path / 'home-2')
+    for model in ALL:
+        home.store().save_connection(Connection(name=model, base_url=f'http://{model}.test/v1', model=model, free=True, tools=True,
+                                                tier=model.split('-')[0]).model_dump(), user_id=home.user_id)
+    team = Team({'ROOT': [[delegate('child work')], [accept('child work')], 'Done.'], 'child work': ['ok'], 'plain': ['Just an answer.']})
+    console = theme.apply(Console(record=True, width=140, color_system=None))
+    ui = App(Sessions(home, project, autorun=True, transport=team.transport), home, console)
+    session = await ui.sessions.open()
+    await ui.sessions.send(session, 'ROOT task')
+    await session.task
+    await ui.command('/usage')
+    out = console.export_text()
+    assert 'child work' in out and out.index('child work') < out.index('Model usage on this device') and 'accepted' in out
+    await ui.command('/new')
+    await ui.sessions.send(ui.sessions.current, 'plain question')
+    await ui.sessions.current.task
+    await ui.command('/usage')
+    assert 'child work' not in console.export_text(), 'a tree of one is no tree'
+    await ui.sessions.close()
+
+
+async def test_print_mode_shows_the_tree_on_stderr(tmp_path, monkeypatch, project, capsys):
+    from leo_cli import app
+    from test_tree import ALL, Team, accept, delegate
+    from backend.schemas import Connection
+    from leo_cli.account import Account
+    monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
+    home = Account(tmp_path / 'home-3')
+    for model in ALL:
+        home.store().save_connection(Connection(name=model, base_url=f'http://{model}.test/v1', model=model, free=True, tools=True,
+                                                tier=model.split('-')[0]).model_dump(), user_id=home.user_id)
+    team = Team({'ROOT': [[delegate('child work')], [accept('child work')], 'Done.'], 'child work': ['ok']})
+    sessions = Sessions(home, project, autorun=True, transport=team.transport)
+    assert await app.one_shot(sessions, 'ROOT task') == 0
+    captured = capsys.readouterr()
+    assert captured.out == 'Done.\n' and 'child work' in captured.err and 'accepted' in captured.err

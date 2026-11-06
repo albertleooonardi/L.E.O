@@ -46,7 +46,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from . import theme
+from . import theme, treeview
 from .account import AccountError
 from .mentions import attach, complete
 from .policy import compound
@@ -82,9 +82,9 @@ BANNER = ["██╗        ███████╗    ██████╗ ",
           "███████╗██╗███████╗██╗╚██████╔╝",
           "╚══════╝╚═╝╚══════╝╚═╝ ╚═════╝ "]
 
-UNICODE = dict(wave="▁▂▃▄▅▆▇█▇▆▅▄▃▂", dot="●", hook="└", rail="│", agent="◆", ok="✔", fail="✗", warn="▲", info="◇", idle="○", now="▸",
+UNICODE = dict(tee="├─", elbow="└─", pipe="│  ", wave="▁▂▃▄▅▆▇█▇▆▅▄▃▂", dot="●", hook="└", rail="│", agent="◆", ok="✔", fail="✗", warn="▲", info="◇", idle="○", now="▸",
                prompt="❯", sep="·", bar="━", track="─", rule="─", spinner="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", box=box.ROUNDED, ellipsis="…")
-ASCII = dict(wave="_.-~'~-.", dot="*", hook="`-", rail="|", agent="#", ok="+", fail="x", warn="!", info="-", idle="o", now=">",
+ASCII = dict(tee="|-", elbow="`-", pipe="|  ", wave="_.-~'~-.", dot="*", hook="`-", rail="|", agent="#", ok="+", fail="x", warn="!", info="-", idle="o", now=">",
              prompt=">", sep="-", bar="#", track="-", rule="-", spinner="|/-\\", box=box.ASCII, ellipsis="...")
 
 
@@ -196,6 +196,8 @@ class Renderer:
         self.answer = None  # The lead agent's latest streamed text: the answer, when the run ends after it.
         self.phase = None  # thinking, writing, or running, for the status bar
         self.printed = set()  # Stages that have printed a block of their streamed text.
+        self.tree = {}  # The agents of the current run, from its tree events.
+        self.doing = {}  # agent -> its latest tool call, for the tree.
 
     def event(self, kind, data):
         for item in self.render(kind, data):
@@ -213,6 +215,7 @@ class Renderer:
     def reset(self):
         self.model = self.started = self.activity = self.answer = self.phase = None
         self.parallel, self.pending, self.streamed, self.printed = {}, {}, {}, set()
+        self.tree, self.doing = {}, {}
 
     @property
     def preview(self):
@@ -283,6 +286,9 @@ class Renderer:
         rest = self.pending.pop(stage, "")
         return self.block(stage, rest) if rest.strip() else []
 
+    def on_tree(self, data):
+        self.tree[data["id"]] = data  # Drawn above the prompt, not printed.
+
     def on_model(self, data):
         self.phase = "thinking"
         if str(data.get("stage", "")).startswith("agent:main") and data.get("model") != self.model:
@@ -304,7 +310,7 @@ class Renderer:
         self.parallel[agent] = sum(1 for call in calls if call["name"] != "todo_write")
         for call in calls:
             summary = f"({clip(call['summary'], 100)})" if call.get("summary") else ""
-            self.activity = call["name"] + summary
+            self.activity = self.doing[agent] = call["name"] + summary
             if call["name"] == "todo_write":
                 continue  # The plan itself is shown by its todos event.
             line = self.step_prefix(agent)
@@ -391,8 +397,10 @@ class Renderer:
         for stage in list(self.pending):
             out += self.flush(stage)
         if status == "completed" and data.get("output"):
-            if self.answer is not None and self.answer.strip() == data["output"].strip():
-                out.append(Text(""))  # It streamed in already.
+            streamed, output = (self.answer or "").strip(), data["output"].strip()
+            if streamed and output.startswith(streamed):  # It streamed in already; only what the engine added is new.
+                rest = output[len(streamed):].strip()
+                out += [Text(""), Markdown(rest, code_theme=theme.code()), Text("")] if rest else [Text("")]
             else:
                 out += [Text(""), Markdown(data["output"], code_theme=theme.code()), Text("")]
         elif status == "failed":
@@ -402,6 +410,7 @@ class Renderer:
         out.append(self.footer(data))
         self.started = self.activity = self.answer = self.phase = None
         self.pending, self.streamed, self.printed = {}, {}, set()
+        self.tree, self.doing = {}, {}
         return out
 
     def footer(self, data):
@@ -743,6 +752,7 @@ class App:
         self.history = []  # Earlier sessions listed by /resume, so /resume N refers to that list.
         self.prompt = None
         self._commands = (0.0, [])
+        self._node_usage = (0.0, None, {})
 
     @property
     def g(self):
@@ -821,9 +831,30 @@ class App:
         current = self.sessions.current
         return bool(current and current.busy)
 
+    def size(self):
+        """The terminal's columns and rows."""
+        try:
+            found = get_app().output.get_size()
+            return found.columns, found.rows
+        except Exception:
+            found = shutil.get_terminal_size()
+            return found.columns, getattr(found, "lines", 24)
+
+    def node_usage(self):
+        """What each agent of the current run has used, looked up at most once a second: this runs on every redraw."""
+        current = self.sessions.current
+        run_id = current.run_id if current else None
+        stamp, known, usage = self._node_usage
+        if known != run_id or time.monotonic() - stamp > 1:
+            usage = treeview.agent_usage(self.sessions.store.call_rows(run_id)) if run_id else {}
+            self._node_usage = (time.monotonic(), run_id, usage)
+        return usage
+
     def message(self):
         if self.busy():
-            return [("class:prompt.steer", f"steer {self.g.prompt} ")]
+            width, height = self.size()
+            tree = treeview.live(self.renderer.tree, self.node_usage(), width, height, self.g, int(time.monotonic() * 8), self.renderer.doing)
+            return tree + [("class:prompt.steer", f"steer {self.g.prompt} ")]
         return [("class:prompt", f"{self.g.prompt} ")]
 
     def placeholder(self):
@@ -1065,6 +1096,7 @@ class App:
             return
         self.sessions.current = session
         self.renderer.reset()
+        self.renderer.tree = dict(treeview.nodes_of(session.run))
         self.say(session.label(), "leo.ok")
         run = session.run
         if run and run["status"] in TERMINAL and run.get("output"):
@@ -1207,7 +1239,7 @@ class App:
         from .panels import usage_view  # Imports the engine's agent module; loaded when first asked for.
         current = self.sessions.current
         self.console.print(usage_view(self.sessions.store, self.sessions.uid, current.id if current else None,
-                                      [c["id"] for c in self.sessions.history()], self.g))
+                                      [c["id"] for c in self.sessions.history()], self.g, tree=tree_panel(current.run if current else None, self.sessions.store, self.g)))
 
     async def cmd_context(self, arguments):
         from .panels import context_view
@@ -1236,6 +1268,12 @@ class App:
              "estimated_cost": totals["cost"], "estimated": totals["estimated"]})))
         self.say(f"  {tokens(totals['input_tokens'])} in · {tokens(totals['output_tokens'])} out"
                  + (" · estimated (the model did not report usage)" if totals.get("estimated") else ""))
+
+
+def tree_panel(run, store, g):
+    """A run's tree in full with what each agent used, or None if it was not a tree."""
+    nodes = treeview.nodes_of(run)
+    return treeview.full(nodes, treeview.agent_usage(store.call_rows(run["id"])), g, run["status"]) if len(nodes) > 1 else None
 
 
 def models_table(store, uid, g=None):

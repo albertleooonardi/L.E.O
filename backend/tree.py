@@ -13,7 +13,7 @@ import contextlib
 import hashlib
 import os
 
-from .agent import STRING, SUB_MAX_STEPS, WORKSPACE, AgentRun, schema, SCHEMAS
+from .agent import EVENT_CHARS, SCHEMAS, STRING, SUB_MAX_STEPS, WORKSPACE, AgentRun, clip, schema
 from .router import TIERS
 
 MAX_AGENTS = 12  # Children in one run, not counting the root or retries.
@@ -275,6 +275,7 @@ How to work:
         except ValueError as exc:  # No model left for it, or its allowance ran out: its siblings carry on.
             return self.fail(node_id, exc)
         self.update(node_id, status="in_review")
+        self.store.event(self.o.id, "subagent", {"agent": node_id, "skill": node["skill"], "status": "completed", "report": clip(report, EVENT_CHARS)})
         return report
 
     async def tool_review_work(self, name, call, agent, verdict, feedback=""):
@@ -321,5 +322,6 @@ How to work:
                 return (f"Error: this run has reached its limit of {MAX_AGENTS} agents. Give the remaining work to the agents you have, "
                         "or report it as not done.")
             self.add_node(node_id, name, kind, parent["level"] + 1, task, agent)
+            self.store.event(self.o.id, "subagent", {"agent": node_id, "skill": agent, "task": clip(task, EVENT_CHARS), "status": "started"})
             self.o.save()
         return self.reported(node_id, await self.run_child(node_id))

@@ -841,3 +841,36 @@ async def test_model_and_models_list_and_point_at_adding(ui):
     await ui.command('/models')
     out = text_of(ui.console)
     assert 'Unknown command' not in out and out.count('/models add') == 2
+
+
+# -- the tree of agents on the screen --------------------------------------------------------
+
+async def test_the_prompt_shows_the_tree_while_working(ui, monkeypatch):
+    from leo_cli import ui as module
+    monkeypatch.setattr(module, 'get_app', lambda: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(module.shutil, 'get_terminal_size', lambda: SimpleNamespace(columns=100, lines=40))
+    session = await ui.sessions.open()
+    ui.renderer.event('tree', {'id': 'main', 'parent': None, 'kind': 'root', 'task': 'all of it', 'model': 'strong-m', 'status': 'planning'})
+    ui.renderer.event('tree', {'id': 'sub-1', 'parent': 'main', 'kind': 'worker', 'task': 'Write the tests', 'model': 'light-m', 'status': 'working'})
+    idle = ''.join(text for _, text in ui.message())
+    assert 'Write the tests' not in idle
+    monkeypatch.setattr(type(session), 'busy', property(lambda self: True))
+    busy = ''.join(text for _, text in ui.message())
+    assert 'Write the tests' in busy and busy.endswith(f'steer {ui.g.prompt} ') and busy.index('Write the tests') < busy.index('steer')
+
+
+def test_the_answer_block_is_not_printed_twice():
+    console = Console(record=True, width=100, color_system=None)
+    renderer = Renderer(console)
+    renderer.event('agent_text', {'stage': 'agent:main:1', 'text': 'The work is done.'})
+    renderer.event('agent_step', {'agent': 'main', 'step': 1, 'text': 'The work is done.', 'tools': []})
+    renderer.event('done', {'status': 'completed', 'output': 'The work is done.\n\n**Not finished:**\n- Docs (failed)', 'usage': {}})
+    out = text_of(console)
+    assert out.count('The work is done.') == 1 and out.count('Not finished:') == 1 and 'Docs (failed)' in out
+
+
+def test_a_finished_run_forgets_its_tree():
+    renderer = Renderer(Console(file=io.StringIO()))
+    renderer.event('tree', {'id': 'main', 'parent': None, 'kind': 'root', 'task': 'x', 'status': 'planning'})
+    renderer.event('done', {'status': 'completed', 'output': 'ok', 'usage': {}})
+    assert renderer.tree == {}
