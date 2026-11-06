@@ -186,6 +186,27 @@ def test_device_sign_in_adds_models_with_one_key(router_client, store, fake):
     assert accounts['available'] and accounts['accounts'] == [{'id': 'a2', 'provider': 'github', 'name': 'GitHub Copilot', 'label': 'octo'}]
 
 
+def test_the_cli_signs_in_to_an_account_with_its_device_token(router_client, store, fake):
+    """/models add uses the sign-in of Settings → Models, signed with the device token; nothing else opens up for it."""
+    started = router_client.post('/api/cli/device', json={'device_name': 'laptop'}).json()
+    assert router_client.post(f"/api/cli/device/{started['user_code']}", json={'approve': True}).status_code == 200
+    token = router_client.post('/api/cli/token', json={'device_code': started['device_code']}).json()['token']
+    router_client.cookies.clear()
+    device = {'Authorization': f'Bearer {token}'}
+    assert router_client.get('/api/cli/accounts').status_code == 401, 'no device token, no answer'
+    assert router_client.get('/api/accounts', headers=device).status_code == 401, 'the routes for the browser stay for the browser'
+    offered = router_client.get('/api/cli/accounts', headers=device).json()
+    assert offered['available'] is True and 'github' in {p['id'] for p in offered['providers']}
+    assert router_client.post('/api/cli/accounts/signin', headers=device, json={'provider': 'github'}).status_code == 400, 'the risk must be accepted'
+    begun = router_client.post('/api/cli/accounts/signin', headers=device, json={'provider': 'github', 'accept_risk': True})
+    assert begun.status_code == 201 and begun.json()['user_code'] == 'AB-12'
+    fake.pending = False
+    done = router_client.get(f"/api/cli/accounts/signin/{begun.json()['id']}", headers=device).json()
+    assert done['status'] == 'done' and [m['model'] for m in store.list_connections(store.user_id)] == ['gh/gpt-4.1']
+    assert router_client.delete(f"/api/cli/accounts/signin/{begun.json()['id']}", headers=device).json() == {'ok': True}
+    assert [m['model'] for m in router_client.get('/api/cli/sync', headers=device).json()['relayed']] == ['gh/gpt-4.1'], 'it syncs down, through the relay'
+
+
 def test_codex_redirect_exchanges_code_and_reuses_key(router_client, store, fake):
     started = router_client.post('/api/accounts/signin', json={'provider': 'codex', 'accept_risk': True}).json()
     assert started['url'].startswith('https://auth.openai.com/') and started['user_code'] is None

@@ -59,6 +59,8 @@ CLI_DEVICE_PATHS = {"/api/cli/sync", "/api/cli/usage", "/api/cli/logout", "/api/
 CLI_RELAY_PREFIX = "/api/cli/relay/"
 # The CLI calls the tools of the user's L.E.O Chat connectors through the server, which keeps their sign-ins.
 CLI_CONNECTOR_PREFIX = "/api/cli/connectors/"
+# The CLI's /models add signs in to ChatGPT, Copilot, and the others with the same flow as Settings → Models.
+CLI_ACCOUNTS_PREFIX = "/api/cli/accounts"
 RELAY_PATHS = {"chat/completions", "responses", "models"}
 MAX_RELAY_BYTES = 32 * 1024 * 1024
 LEGACY_ROUTER = "http://9router:20128"  # The shared 9router service of earlier versions (one per server, not per user).
@@ -167,7 +169,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
 
             # Auth: session cookie or bearer token (LEO_API_TOKEN for admin/MCP). CORS preflights carry no credentials.
             public = request.url.path in PUBLIC_API_PATHS or request.url.path.startswith(PUBLIC_API_PREFIXES)
-            device_path = request.url.path in CLI_DEVICE_PATHS or request.url.path.startswith((CLI_RELAY_PREFIX, CLI_CONNECTOR_PREFIX))
+            device_path = request.url.path in CLI_DEVICE_PATHS or request.url.path.startswith((CLI_RELAY_PREFIX, CLI_CONNECTOR_PREFIX, CLI_ACCOUNTS_PREFIX))
             if device_path and request.method != "OPTIONS":
                 device = await run_in_threadpool(store.cli_device, request.headers.get("authorization", "").removeprefix("Bearer ").strip())
                 owner = device and await run_in_threadpool(store.get_user, device["user_id"])
@@ -474,6 +476,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
         return signins
 
     @app.get("/api/accounts")
+    @app.get(CLI_ACCOUNTS_PREFIX)
     async def read_accounts(user: CurrentUser = Depends(current_user)):
         """Providers offered for sign-in and the accounts this user signed in on their own router."""
         offered = [{"id": key, "name": v["name"], "flow": v["flow"], "risk": RISK_NOTICE if v["risk"] else None} for key, v in ACCOUNTS.items()]
@@ -487,6 +490,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
             return {"available": False, "error": str(exc), "providers": offered, "accounts": []}
 
     @app.post("/api/accounts/signin", status_code=201)
+    @app.post(CLI_ACCOUNTS_PREFIX + "/signin", status_code=201)
     async def start_sign_in(body: AccountSignIn, user: CurrentUser = Depends(current_user)):
         flows = require_router()
         if body.provider not in ACCOUNTS:
@@ -499,6 +503,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
             raise HTTPException(502, str(exc)) from exc
 
     @app.get("/api/accounts/signin/{session_id}")
+    @app.get(CLI_ACCOUNTS_PREFIX + "/signin/{session_id}")
     async def sign_in_status(session_id: str, user: CurrentUser = Depends(current_user)):
         try:
             return await require_router().status(session_id, user.id)
@@ -506,6 +511,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
             raise HTTPException(502, str(exc)) from exc
 
     @app.delete("/api/accounts/signin/{session_id}")
+    @app.delete(CLI_ACCOUNTS_PREFIX + "/signin/{session_id}")
     def cancel_sign_in(session_id: str, user: CurrentUser = Depends(current_user)):
         require_router().cancel(session_id, user.id)
         return {"ok": True}

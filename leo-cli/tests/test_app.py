@@ -176,12 +176,16 @@ async def test_without_a_usable_model_leo_sets_one_up_inside(tmp_path, monkeypat
         return {'models': [{'model': 'qwen3-coder', 'name': 'qwen3-coder', 'tier': 'standard', 'skills': ['coding'], 'reasoning': False,
                             'tools': True, 'context_window': 65536, 'free': True}]}
 
-    async def add_connection(body):  # Saved on the account and synced down (tested in test_account).
+    async def add_connection(body, sync=True):  # Saved on the account and synced down (tested in test_account).
         added.append(body)
         account.store().save_connection(Connection(**body).model_dump(), user_id=account.user_id)
 
+    async def sync():
+        return {}
+
     monkeypatch.setattr(models, 'discover', discover)
     monkeypatch.setattr(account, 'add_connection', add_connection)
+    monkeypatch.setattr(account, 'sync', sync)
     console = Console(record=True, width=120, color_system=None)
     with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
         for keys in (ENTER, ENTER, ENTER, ENTER, ENTER):  # Add a model, Ollama, its URL, no key, qwen3-coder.
@@ -574,9 +578,10 @@ def test_slash_commands_complete_with_what_they_do(ui, project):
     def complete(text):
         return [(c.text, c.display_meta_text) for c in SlashCompleter(ui).get_completions(Document(text), None)]
 
-    assert ('/models', 'list your models, or add one with an API key') in complete('/mo')
+    assert ('/models', 'list your models, or add some (account sign-in or API key)') in complete('/mo')
+    assert [text for text, _ in complete('/models ')] == ['add'] and [text for text, _ in complete('/model a')] == ['add'], 'and what follows it'
     assert complete('/gr') == [('/greet', 'Say hello')], 'your skills complete too'
-    assert complete('fix the tests') == [] and complete('/models a') == [], 'only the command name, only at the start'
+    assert complete('fix the tests') == [] and complete('/models add ') == [], 'only at the start of the message'
 
 
 async def test_the_status_bar_lists_sessions_and_the_keys_that_matter(ui):
@@ -691,3 +696,148 @@ async def test_approvals_are_a_menu_that_ignores_keys_typed_too_soon():
     from leo_cli.ui import menu_labels
     assert dict(menu_labels(approval, 'npm test'))['session'] == 'Yes, and allow commands starting with `npm test` for the rest of this session'
     assert [d for d, _ in menu_labels({'kind': 'command', 'detail': {'command': 'sudo x', 'risky': True}})] == ['once', 'deny']
+
+
+# -- adding models, as on the website ---------------------------------------------------------
+
+async def tick(options, *keys, **kwargs):
+    from leo_cli.ui import pick_many
+    with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
+        for key in keys:
+            typed.send_text(key)
+        return await asyncio.wait_for(pick_many('Which?', options, **kwargs), 5)
+
+
+async def test_the_checklist_ticks_filters_and_cancels():
+    options = [('a/one', 'One'), ('a/two', 'Two'), ('b/three', 'Three'), ('type', 'Type a model ID')]
+    assert await tick(options, ENTER) == ['a/one'], 'nothing ticked: the highlighted row'
+    assert await tick(options, ' ', DOWN, DOWN, ' ', ENTER) == ['a/one', 'b/three']
+    assert await tick(options, ' ', ' ', DOWN, ENTER) == ['a/two'], 'space unticks'
+    assert await tick(options, 'thr', ' ', '\x7f\x7f\x7f', ENTER) == ['b/three'], 'a tick survives changing the filter'
+    assert await tick(options, 'zzz', ENTER, keep='type') == ['type'], 'the kept row stays visible'
+    assert await tick(options, ' ', '\x1b') is None, 'Esc cancels, ticks and all'
+
+
+def discovered(*names):
+    return {'models': [{'model': n, 'name': f'{n} (free)', 'tier': 'standard', 'skills': [], 'reasoning': False, 'tools': True,
+                        'context_window': 65536, 'free': True} for n in names]}
+
+
+async def test_more_models_reuse_the_saved_key_and_sync_once(tmp_path, monkeypatch):
+    monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
+    from backend.schemas import Connection
+    from leo_cli import models
+    from leo_cli.account import Account
+    account = Account(tmp_path / 'home')
+    account.store().save_connection(Connection(name='OpenRouter · First', base_url='https://openrouter.example/v1', model='m/first', free=True,
+                                                tools=True, api_key='sk-saved').model_dump(), user_id=account.user_id)
+    account.store().save_connection(Connection(name='Codex', base_url='http://leo.test/api/cli/relay/1', model='cx/gpt', free=True,
+                                                api_key='device-token').model_dump(), user_id=account.user_id)
+    added, synced = [], []
+
+    async def discover(connection, key, transport=None):
+        assert key == 'sk-saved' and connection['base_url'] == 'https://openrouter.example/v1'
+        return discovered('m/first', 'm/second', 'm/third', 'm/fourth')
+
+    async def add_connection(body, sync=True):
+        assert sync is False
+        added.append(body)
+
+    async def sync():
+        synced.append(True)
+
+    monkeypatch.setattr(models, 'discover', discover)
+    monkeypatch.setattr(account, 'add_connection', add_connection)
+    monkeypatch.setattr(account, 'sync', sync)
+    console = theme_console()
+    with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
+        typed.send_text(DOWN + ENTER)  # Account sign-in, then OpenRouter's saved key (relayed models have none here).
+        await asyncio.sleep(0.3)
+        typed.send_text(' ' + DOWN + ' ' + ENTER)  # m/fourth and m/second, in the order of the list.
+        assert await asyncio.wait_for(models.add_model(account, console), 10) is True
+    assert [b['model'] for b in added] == ['m/fourth', 'm/second'], 'what is already added is not offered'
+    assert added[0]['name'] == 'OpenRouter · m/fourth' and added[0]['api_key'] == 'sk-saved' and added[0]['free'] is True
+    assert synced == [True] and 'Added to your L.E.O. account: OpenRouter · m/fourth, OpenRouter · m/second.' in text_of(console)
+
+
+class FakeAccounts:
+    """What the server answers for account sign-in."""
+
+    def __init__(self, available=True, finish='done'):
+        self.available, self.finish, self.polls, self.started, self.synced, self.cancelled = available, finish, 0, [], 0, []
+
+    async def model_accounts(self):
+        return {'available': self.available, 'error': None if self.available else 'Model-account sign-in needs the sandbox service',
+                'providers': [{'id': 'kimi', 'name': 'Kimi', 'flow': 'device', 'risk': None},
+                              {'id': 'github', 'name': 'GitHub Copilot', 'flow': 'device', 'risk': 'May be restricted.'}],
+                'accounts': []}
+
+    async def start_sign_in(self, provider, accept_risk=False):
+        self.started.append((provider, accept_risk))
+        return {'id': 's1', 'provider': provider, 'status': 'waiting', 'error': None, 'url': 'https://sign.example/device', 'user_code': 'ABCD-1234', 'result': None}
+
+    async def sign_in_status(self, session_id):
+        self.polls += 1
+        if self.polls < 2:
+            return {'id': 's1', 'status': 'waiting'}
+        if self.finish == 'hang':
+            await asyncio.sleep(30)
+        return {'id': 's1', 'status': self.finish, 'error': 'It was denied' if self.finish == 'error' else None,
+                'result': {'account': 'me@example.com', 'added': 4}}
+
+    async def cancel_sign_in(self, session_id):
+        self.cancelled.append(session_id)
+
+    async def sync(self):
+        self.synced += 1
+
+
+async def test_signing_in_with_an_account_from_the_cli(monkeypatch):
+    from leo_cli import models
+    opened = []
+    monkeypatch.setattr(models.webbrowser, 'open', lambda url: opened.append(url) or True)
+    fake, console = FakeAccounts(), theme_console()
+    with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
+        typed.send_text(ENTER)  # Kimi.
+        assert await asyncio.wait_for(models.sign_in_account(fake, console, poll_seconds=0), 10) is True
+    out = text_of(console)
+    assert fake.started == [('kimi', False)] and opened == ['https://sign.example/device'] and fake.synced == 1
+    assert 'ABCD-1234' in out and 'https://sign.example/device' in out and 'Signed in to Kimi as me@example.com: 4 models added.' in out
+
+
+async def test_account_sign_in_needs_the_risk_accepted_and_the_sandbox():
+    from leo_cli import models
+    fake, console = FakeAccounts(), theme_console()
+    with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
+        typed.send_text(DOWN + ENTER)  # GitHub Copilot.
+        await asyncio.sleep(0.3)
+        typed.send_text(ENTER)  # The default answer: No.
+        assert await asyncio.wait_for(models.sign_in_account(fake, console), 10) is False
+    assert fake.started == [] and 'May be restricted.' in text_of(console)
+    fake, console = FakeAccounts(available=False), theme_console()
+    assert await models.sign_in_account(fake, console) is False and 'needs the sandbox service' in text_of(console)
+
+
+async def test_a_failed_or_cancelled_sign_in_says_so(monkeypatch):
+    from leo_cli import models
+    monkeypatch.setattr(models.webbrowser, 'open', lambda url: True)
+    fake, console = FakeAccounts(finish='error'), theme_console()
+    with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
+        typed.send_text(ENTER)
+        assert await asyncio.wait_for(models.sign_in_account(fake, console, poll_seconds=0), 10) is False
+    assert 'It was denied' in text_of(console) and fake.synced == 0
+    fake, console = FakeAccounts(finish='hang'), theme_console()
+    with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
+        typed.send_text(ENTER)
+        task = asyncio.create_task(models.sign_in_account(fake, console, poll_seconds=0))
+        await until(lambda: fake.polls == 2)
+        task.cancel()  # Ctrl-C.
+        assert await task is False
+    assert fake.cancelled == ['s1'] and 'Sign-in cancelled.' in text_of(console)
+
+
+async def test_model_and_models_list_and_point_at_adding(ui):
+    await ui.command('/model')
+    await ui.command('/models')
+    out = text_of(ui.console)
+    assert 'Unknown command' not in out and out.count('/models add') == 2

@@ -110,7 +110,7 @@ files, and `@` paths. The status bar at the bottom shows every session, what the
 | `/cd PATH` | Work on another folder in this window (its own rules, skills, and sessions). |
 | `/clear` | Start over in this session. |
 | `/autorun on\|off [--save]` | Turn the approval questions off or on. |
-| `/models [add]` | List your models, or add one with an API key (saved on your L.E.O. account). |
+| `/models [add]` | List your models, or add some (saved on your L.E.O. account). `/model` works too. |
 | `/sync` | Fetch model changes made on the website. |
 | `/cost` | Show tokens and cost for this session. |
 | `/usage` | Calls, tokens, cost, and share of tokens for every model on this device; totals for this session, folder, and device. |
@@ -128,6 +128,16 @@ files, and `@` paths. The status bar at the bottom shows every session, what the
   The agent loads a skill when the work needs it, and `/name args` asks for it directly.
 - **Command files.** `.leo-cli/commands/<name>.md` holds a prompt template for `/name`. `$ARGUMENTS` is replaced with
   what you type after the command.
+
+**Adding models.** `/models add` (or `leo models add`) has the ways in of Settings → Models:
+- **Sign in with an account:** ChatGPT, GitHub Copilot, Kiro, Kimi, Kilo Code, Qoder, Grok CLI, or Z.ai GLM Coding. Your
+  browser opens the sign-in page, and leo shows the code when the page asks for one. The account's models then come down.
+  This needs a server started with Docker Compose, which runs the sign-ins; leo says so otherwise.
+- **More models from a provider you already use:** picks up its saved key, so you type nothing again.
+- **A provider with an API key:** OpenRouter, Gemini, OpenAI, Anthropic, Ollama, and others.
+
+The model list is a checklist: type to filter, Space ticks, Enter adds the ticked ones (or the highlighted one). Models
+known to call tools come first, because the agent needs them. To remove a model or turn it off, use the website.
 
 **MCP servers.** `/mcp` lists two kinds:
 - **From L.E.O Chat:** the connectors under Settings → Connectors on the website. Sync brings their names, state, and

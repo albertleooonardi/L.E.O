@@ -282,8 +282,44 @@ class Account:
             raise MCPError(str(detail or f"the L.E.O. server answered HTTP {response.status_code}"))
         return response.json()
 
-    async def add_connection(self, connection):
-        """Save a model on the account (as Settings → Models does), then sync it down."""
+    async def device_call(self, method, path, **kwargs):
+        """One call to the server as this device; the answer as JSON."""
+        token = self.secrets.get("device-token")
+        if not token:
+            raise SignedOut()
+        async with self.client(token) as http:
+            try:
+                response = await http.request(method, path, **kwargs)
+            except httpx.HTTPError as exc:
+                raise AccountError(f"Cannot reach {self.server}: {type(exc).__name__}") from exc
+        try:
+            detail = response.json().get("detail") if not response.is_success else None
+        except ValueError:
+            detail = None
+        if response.status_code == 401:
+            if detail == "Sign in":  # This device is fine; the server has no such route for devices yet.
+                raise AccountError("Your L.E.O. server is older than this leo; update it (with Docker: docker compose up -d --build).")
+            raise SignedOut(detail or "This device was signed out; run leo login")
+        if not response.is_success:
+            raise AccountError(str(detail or f"The L.E.O. server answered HTTP {response.status_code}"))
+        return response.json()
+
+    async def model_accounts(self):
+        """The subscription sign-ins the server offers: {available, error, providers, accounts}."""
+        return await self.device_call("GET", "/api/cli/accounts")
+
+    async def start_sign_in(self, provider, accept_risk=False):
+        # The first sign-in starts this user's 9Router on the server, which takes a while.
+        return await self.device_call("POST", "/api/cli/accounts/signin", json={"provider": provider, "accept_risk": accept_risk}, timeout=120)
+
+    async def sign_in_status(self, session_id):
+        return await self.device_call("GET", f"/api/cli/accounts/signin/{session_id}", timeout=60)
+
+    async def cancel_sign_in(self, session_id):
+        return await self.device_call("DELETE", f"/api/cli/accounts/signin/{session_id}")
+
+    async def add_connection(self, connection, sync=True):
+        """Save a model on the account (as Settings → Models does), then sync it down (adding several: sync once, after)."""
         token = self.secrets.get("device-token")
         if not token:
             raise SignedOut()
@@ -297,7 +333,8 @@ class Account:
         if not response.is_success:
             detail = response.json().get("detail") if response.headers.get("content-type", "").startswith("application/json") else None
             raise AccountError(f"The server did not save the model: {detail or response.status_code}")
-        await self.sync()
+        if sync:
+            await self.sync()
         return response.json()
 
     async def logout(self):

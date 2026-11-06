@@ -25,11 +25,13 @@ import time
 from types import SimpleNamespace
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.application import get_app
+from prompt_toolkit.application import Application, get_app
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout import FormattedTextControl, Layout, Window
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts.choice_input import ChoiceInput
 from prompt_toolkit.styles import DynamicStyle
@@ -59,7 +61,7 @@ HELP = [
                   ("/sessions", "list sessions in this window"), ("/switch N", "show session N"),
                   ("/resume [N]", "list earlier sessions on this folder, or reopen one"),
                   ("/cd PATH", "work on another folder in this window"), ("/clear", "start over in this session")]),
-    ("Models and account", [("/models [add]", "list your models, or add one with an API key"),
+    ("Models and account", [("/models [add]", "list your models, or add some (account sign-in or API key)"),
                             ("/sync", "fetch model changes made on the website"), ("/cost", "tokens and cost of this session"),
                             ("/usage", "calls, tokens, and cost of every model on this device"),
                             ("/context", "how full the agent's context window is, and with what"),
@@ -550,6 +552,73 @@ async def pick(message, options, default=None):
         return None
 
 
+async def pick_many(message, options, keep=None, height=12):
+    """A checklist: type to filter, Up/Down move, Space ticks, Enter takes the ticked rows (or, with none ticked, the
+    highlighted one). None if cancelled with Esc or Ctrl-C. The `keep` row stays visible whatever the filter."""
+    g, query, index, ticked = glyphs(), "", 0, set()
+
+    def rows():
+        needle = query.lower()
+        return [o for o in options if o[0] == keep or needle in f"{o[0]} {o[1]}".lower()]
+
+    def text():
+        shown, start = rows(), max(0, index - height + 1)
+        out = [("class:prompt", message), ("class:muted", f"  {len(ticked)} ticked" if ticked else ""), ("", "\n")]
+        out += [("class:muted", "  filter: "), ("", query + "\n")] if query else []
+        for number, (value, label) in enumerate(shown[start:start + height], start):
+            here = number == index
+            mark = f"{g.ok} " if value in ticked else f"{g.idle} "
+            out += [("class:selected-option" if here else "", f"  {g.now if here else ' '} {mark}{label}\n")]
+        if not shown:
+            out.append(("class:muted", "    nothing matches\n"))
+        more = len(shown) - start - height
+        out.append(("class:muted", (f"    {g.ellipsis} {more} more\n" if more > 0 else "") + "  type to filter · space ticks · enter adds · esc cancels"))
+        return out
+
+    keys = KeyBindings()
+
+    def move(step):
+        nonlocal index
+        index = max(0, min(len(rows()) - 1, index + step))
+
+    keys.add("up")(lambda event: move(-1))
+    keys.add("down")(lambda event: move(1))
+    keys.add("pageup")(lambda event: move(-height))
+    keys.add("pagedown")(lambda event: move(height))
+
+    @keys.add(" ")
+    def _tick(event):
+        shown = rows()
+        if shown:
+            ticked.symmetric_difference_update({shown[index][0]})
+
+    @keys.add("enter")
+    def _done(event):
+        shown = rows()
+        if ticked or shown:
+            event.app.exit(result=[value for value, _ in options if value in ticked] or [shown[index][0]])
+
+    @keys.add("escape", eager=True)
+    @keys.add("c-c")
+    def _cancel(event):
+        event.app.exit(result=None)
+
+    @keys.add("backspace")
+    def _erase(event):
+        nonlocal query, index
+        query, index = query[:-1], 0
+
+    @keys.add(Keys.Any)
+    def _filter(event):
+        nonlocal query, index
+        if event.data.isprintable():
+            query, index = query + event.data, 0
+
+    app = Application(layout=Layout(Window(FormattedTextControl(text, focusable=True, show_cursor=False), dont_extend_height=True, wrap_lines=False)),
+                      key_bindings=keys, style=theme.prompt_style(), full_screen=False, erase_when_done=True)
+    return await app.run_async()
+
+
 def theme_preview(unicode=True):
     """A few lines exactly as the agent prints them (the same renderer), in the active theme."""
     renderer = Renderer(Console(file=io.StringIO()), unicode=unicode)
@@ -631,6 +700,11 @@ def fit(fragments, width, style="class:tb"):
     return out
 
 
+SUBCOMMANDS = {"/models": [("add", "sign in with an account, or add models with an API key")],
+               "/model": [("add", "sign in with an account, or add models with an API key")],
+               "/autorun": [("on", "run edits and commands without asking"), ("off", "ask before edits and commands")]}
+
+
 class SlashCompleter(Completer):
     """Completes /commands, your skills, and your command files, with what each one does; and @paths to attach."""
 
@@ -644,7 +718,13 @@ class SlashCompleter(Completer):
             for replacement, label in complete(word, self.app.root()):
                 yield Completion(replacement, start_position=-len(word), display=label)
             return
-        if not text.startswith("/") or " " in text:
+        command, space, typed = text.partition(" ")
+        if space and " " not in typed:
+            for name, description in SUBCOMMANDS.get(command, []):
+                if name.startswith(typed):
+                    yield Completion(name, start_position=-len(typed), display_meta=description)
+            return
+        if not text.startswith("/") or space:
             return
         for usage, description in self.app.command_list():
             name = usage.split()[0]
@@ -1078,12 +1158,18 @@ class App:
     async def cmd_models(self, arguments):
         if arguments == "add":
             from .models import add_model  # models imports this module.
-            await add_model(self.account, self.console, self.sessions.transport)
+            try:
+                await add_model(self.account, self.console, self.sessions.transport)
+            except AccountError as exc:
+                self.say(str(exc), "leo.error")
             return
         if arguments:
-            self.say("Use /models to list your models, /models add to add one, or /sync to fetch changes from the website.", "leo.warn")
+            self.say("Use /models to list your models, /models add to add some, or /sync to fetch changes from the website.", "leo.warn")
             return
         self.console.print(models_table(self.sessions.store, self.sessions.uid, self.g))
+        self.say("Add more with /models add: sign in with ChatGPT, Copilot, and others, or use an API key.")
+
+    cmd_model = cmd_models
 
     async def cmd_sync(self, arguments):
         try:
@@ -1161,7 +1247,9 @@ def models_table(store, uid, g=None):
     for connection in sorted(store.list_connections(uid), key=lambda c: (not c["enabled"], c["name"])):
         tools = {True: Text(f"{g.ok} yes", style="leo.ok"), False: Text(f"{g.fail} no", style="leo.error"),
                  None: Text("? untried", style="leo.muted")}[connection.get("tools")]
-        cost = "free" if connection["free"] or connection["local"] else f"${connection.get('input_price') or 0}/{connection.get('output_price') or 0} per 1M"
+        priced = connection.get("input_price") or connection.get("output_price")
+        cost = ("free" if connection["free"] or connection["local"] else
+                f"${connection.get('input_price') or 0}/{connection.get('output_price') or 0} per 1M" if priced else "price not set")
         name = Text.assemble((f"{g.dot if connection['enabled'] else g.idle} ", "leo.ok" if connection["enabled"] else "leo.muted"),
                              (connection["name"], "" if connection["enabled"] else "leo.muted"))
         if "/api/cli/relay/" in connection["base_url"]:

@@ -4,7 +4,7 @@
     leo login [--server URL]     sign in again, or to another server
     leo -p "task"                one task, then print the answer (exit code 1 if it failed)
     leo resume [N]               continue an earlier session on this folder
-    leo sync | models | logout
+    leo sync | models [add] | logout
     leo update                   upgrade L.E.O CLI to the latest version
 """
 import argparse
@@ -35,7 +35,7 @@ SIGN_IN_FIRST = "Not signed in yet. Run [bold]leo[/] in a terminal to sign in (o
 def parser():
     p = argparse.ArgumentParser(prog="leo", usage="leo [FOLDER] [options]  |  leo COMMAND",
                                 description="L.E.O CLI: the multi-agent LLM Efficiency Orchestrator in your terminal.",
-                                epilog="Commands: login, logout, sync, models, resume [N], update. With no command, leo works on FOLDER, "
+                                epilog="Commands: login, logout, sync, models [add], resume [N], update. With no command, leo works on FOLDER, "
                                        "or on the current folder. In a message, @path attaches a file or folder.")
     p.add_argument("command", nargs="*", help=argparse.SUPPRESS)
     p.add_argument("-p", "--print", dest="task", metavar="TASK", help="run one task, print the answer, and exit")
@@ -85,6 +85,8 @@ async def dispatch(args, account=None, transport=None):
             summary = await account.sync()
             console.print(Text(f"{glyphs(console).ok} Synced {summary['models']} models for {summary['username']}.", style="leo.ok"))
             return 0
+        if command == "models" and args.command[1:] == ["add"]:
+            return 0 if await models.add_model(account, console, transport) else 1
         if command == "models":
             if not account.store().list_connections(account.user_id):
                 console.print(SIGN_IN_FIRST)

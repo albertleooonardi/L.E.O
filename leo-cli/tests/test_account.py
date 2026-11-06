@@ -121,6 +121,17 @@ async def test_chat_connectors_come_down_and_run_through_the_server(tmp_path, mo
     assert chat_connectors(account.home) is None, 'signing out removes them'
 
 
+async def test_the_device_can_ask_for_account_sign_in(account, server):
+    """The sign-in routes of Settings → Models answer a device token too; this server has no sandbox, and says so."""
+    with pytest.raises(SignedOut):
+        await account.model_accounts()
+    await account.login('http://testserver', show=approver(server), sleep=no_wait)
+    offered = await account.model_accounts()
+    assert offered['available'] is False and 'sandbox service' in offered['error'] and {'codex', 'github'} <= {p['id'] for p in offered['providers']}
+    with pytest.raises(AccountError, match='sandbox service'):
+        await account.start_sign_in('kimi')
+
+
 async def test_chatgpt_models_on_the_server_work_through_the_relay(account, server):
     """A model call from the laptop goes to the server, which signs it with the router key and streams the answer back."""
     from backend import providers
