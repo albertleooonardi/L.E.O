@@ -124,6 +124,10 @@ class LocalWorkspace:
             timed_out = True
             await asyncio.to_thread(kill_tree, process.pid)  # Background children go too.
             await process.wait()
+        except asyncio.CancelledError:  # Stopped, or paused for an approval elsewhere: it has its own session, so it would run on.
+            await asyncio.to_thread(kill_tree, process.pid)
+            reader.cancel()
+            raise
         try:
             await asyncio.wait_for(reader, 2)  # A background child may still hold the pipe; never wait on it for long.
         except asyncio.TimeoutError:

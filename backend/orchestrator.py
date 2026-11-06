@@ -110,18 +110,19 @@ class Orchestrator:
             ordered = sorted(ordered, key=lambda p: (p["id"] != selected if selected else False, p["model"] == writer and role == "reviewer",
                                                      -TIERS.get(p.get("tier", "standard"), 1), round(call_cost(p), 6), p["priority"], p["id"]))
             reason = "assigned in Settings" if selected and ordered and ordered[0]["id"] == selected else "strongest available, not the answer's author"
+        if tier:
+            def strength(p):
+                gap = TIERS.get(p.get("tier", "standard"), 1) - TIERS.get(tier, 1)
+                return 0 if gap == 0 else gap if gap > 0 else len(TIERS) - gap
+            broken = self.state.get("broken_models", [])  # Last resort: they refused this run's requests.
+            ordered = sorted(ordered, key=lambda p: (p["id"] in broken, strength(p), tools and p.get("tools") is not True))
         if self.prefs["routing"] == "free_first" and not (selected and role != "generator"):
             # Paid models are a backup: after a few free attempts, before the call limit is spent on the rest.
             free, paid = [p for p in ordered if p["free"]], [p for p in ordered if not p["free"]]
             ordered = free[:FREE_ATTEMPTS] + paid + free[FREE_ATTEMPTS:]
             if ordered and not ordered[0]["free"]:
                 reason += "; no free model available, using a paid backup"
-        if tier:
-            def strength(p):
-                gap = TIERS.get(p.get("tier", "standard"), 1) - TIERS.get(tier, 1)
-                return 0 if gap == 0 else gap if gap > 0 else len(TIERS) - gap
-            ordered = sorted(ordered, key=lambda p: (strength(p), tools and p.get("tools") is not True))
-        elif tools:
+        if tools and not tier:
             ordered = sorted(ordered, key=lambda p: p.get("tools") is not True)
         return ordered, reason
 
@@ -231,8 +232,11 @@ class Orchestrator:
                     context, omitted = prepare_context(history or [], system, prompt, limit)
                     self.state["omitted"] = max(self.state.get("omitted", 0), omitted)
                 call_id = self.reserve(provider, stage, context, output_limit_for_call, tool_bytes)
-            except BudgetExceeded:
-                raise  # Budget limits apply to all providers; no point trying another.
+            except BudgetExceeded as exc:
+                if not tier or "price" not in str(exc):
+                    raise  # Budget limits apply to all providers; no point trying another.
+                errors.append(str(exc))  # This model has no prices set; another may do the job.
+                continue
             except ValueError as exc:
                 errors.append(str(exc))
                 continue
@@ -299,6 +303,8 @@ class Orchestrator:
                     self.state.setdefault("truncated", []).append(stage)
                     self.store.event(self.id, "warning", {"message": "Output limit reached; response may be incomplete."})
                 _strikes.pop(provider["id"], None)
+                if provider["id"] in self.state.get("broken_models", []):
+                    self.state["broken_models"].remove(provider["id"])
                 if role == "generator":
                     self.state["last_generator"] = provider["model"]
                 if tool_calls and provider.get("tools") is not True:
@@ -319,6 +325,8 @@ class Orchestrator:
                     queue.insert(0, provider)
                     continue
                 errors.append(f"{provider['name']}: {error}")
+                if tier and isinstance(exc, providers.ProviderError) and not exc.retryable and provider["id"] not in self.state.get("broken_models", []):
+                    self.state.setdefault("broken_models", []).append(provider["id"])
                 if tools and provider.get("tools") is None and re.search(r"HTTP 40[04]", error) and re.search(r"tool|function", error, re.I):
                     # The API rejected tool definitions (OpenRouter answers 404 "no endpoints that support tool use"):
                     # this model cannot be an agent; remember that.

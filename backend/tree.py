@@ -20,6 +20,7 @@ MAX_AGENTS = 12  # Children in one run, not counting the root or retries.
 MAX_ATTEMPTS = 3
 MAX_REMINDERS = 2  # Replies to a parent that tries to finish with unreviewed children, before the run carries on without.
 EVIDENCE_CHARS = 4000
+EVIDENCE_CUT = "… (evidence cut; read the files to check more)"
 PRIVATE = {"files", "commands", "collisions", "reviews", "nudges"}  # A node's working notes, not for the display.
 
 
@@ -35,7 +36,10 @@ class TreeRun(AgentRun):
     def levels(self):
         """The strengths among usable models, strongest first; fixed for the run, so a resume sees the same tree."""
         if not self.tree["levels"]:
-            present = {p.get("tier", "standard") for p in self.o.candidates("agent", tools=True)[0]}
+            usable = self.o.candidates("agent", tools=True)[0]
+            if self.prefs["routing"] == "free_first":  # Paid models are a backup there, not the top of the tree.
+                usable = [p for p in usable if p["free"]] or usable
+            present = {p.get("tier", "standard") for p in usable}
             self.tree["levels"] = sorted(present, key=lambda tier: -TIERS.get(tier, 1)) or ["strong"]
         return self.tree["levels"]
 
@@ -71,6 +75,7 @@ class TreeRun(AgentRun):
         answer = await super().run()
         if answer is None:
             return None  # Paused for an approval.
+        self.close_reviews("main")
         self.update("main", status="done")
         unfinished = [node for node in self.tree["nodes"].values() if node["status"] in ("failed", "not_reviewed")]
         if unfinished:
@@ -100,10 +105,15 @@ class TreeRun(AgentRun):
                                                  + "\n".join(f"- {n['id']}: {n['task']}" for n in unreviewed)})
             self.o.save()
             return True
-        for child in unreviewed:
-            self.update(child["id"], status="not_reviewed")
-            self.store.event(self.o.id, "warning", {"message": f"The work on \"{child['task'][:80]}\" was not reviewed."})
+        self.close_reviews(name)
         return False
+
+    def close_reviews(self, name):
+        """A parent is finished, however it got there (its step limit too): what it never reviewed stays visible as such."""
+        for child in self.tree["nodes"].values():
+            if child["parent"] == name and child["status"] == "in_review":
+                self.update(child["id"], status="not_reviewed")
+                self.store.event(self.o.id, "warning", {"message": f"The work on \"{child['task'][:80]}\" was not reviewed."})
 
     def record(self, name, t, call, output):
         super().record(name, t, call, output)
@@ -128,7 +138,8 @@ class TreeRun(AgentRun):
         self.o.save()
 
     def evidence(self, node_id):
-        """What this agent and the children it accepted really did, from the tool calls and not from their reports."""
+        """What this agent and the children it kept really did, from the tool calls and not from their reports. A long
+        record keeps its start (what changed) and its end (the latest commands, which a retry was asked to run)."""
         node, lines = self.tree["nodes"][node_id], []
 
         def collect(item, indent=""):
@@ -140,13 +151,15 @@ class TreeRun(AgentRun):
                 lines.append(f"{indent}Ran `{run['command']}`: {run['exit']}")
                 lines.extend(f"{indent}    {line}" for line in run["tail"])
             for child in self.tree["nodes"].values():
-                if child["parent"] == item["id"] and child["status"] == "accepted":
-                    lines.append(f"{indent}From {child['id']}:")
+                if child["parent"] == item["id"] and child["status"] in ("accepted", "not_reviewed"):
+                    lines.append(f"{indent}From {child['id']}{' (not reviewed)' if child['status'] == 'not_reviewed' else ''}:")
                     collect(child, indent + "  ")
 
         collect(node)
         text = "\n".join(lines) or "No files changed and no commands run."
-        return text if len(text) <= EVIDENCE_CHARS else text[:EVIDENCE_CHARS] + "\n… (evidence cut; read the files to check more)"
+        if len(text) <= EVIDENCE_CHARS:
+            return text
+        return f"{text[:EVIDENCE_CHARS // 4]}\n{EVIDENCE_CUT}\n{text[-(EVIDENCE_CHARS - EVIDENCE_CHARS // 4):]}"
 
     def reported(self, node_id, report):
         """A finished child, as its parent sees it."""
@@ -272,6 +285,7 @@ How to work:
             else:
                 self.update(node_id, status="planning")
                 report = await self.loop(node_id, system, node["task"], tools, "subagent", node["skill"], node["tier"], limit)
+                self.close_reviews(node_id)
         except ValueError as exc:  # No model left for it, or its allowance ran out: its siblings carry on.
             return self.fail(node_id, exc)
         self.update(node_id, status="in_review")
@@ -279,7 +293,7 @@ How to work:
         return report
 
     async def tool_review_work(self, name, call, agent, verdict, feedback=""):
-        node = self.tree["nodes"].get(agent)
+        node = self.tree["nodes"].get(agent) if isinstance(agent, str) else None
         if not node or node["parent"] != name:
             return f"Error: {agent!r} is not one of your children."
         if verdict not in ("accept", "reject"):
@@ -310,8 +324,8 @@ How to work:
     async def tool_delegate(self, name, call, agent, task, kind="worker"):
         parent = self.tree["nodes"][name]
         skills = [s["id"] for s in self.skills]
-        if not str(task).strip():
-            return "Error: give the child a task to do."
+        if not isinstance(task, str) or not task.strip():
+            return "Error: give the child a task to do, as text."
         if kind not in ("worker", "manager") or (kind == "manager" and (name != "main" or len(self.levels()) != 3)):
             return f"Error: kind must be one of the kinds listed for delegate here, not {kind!r}."
         if skills and agent not in skills:

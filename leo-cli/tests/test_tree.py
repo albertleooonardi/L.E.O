@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import itertools
 import json
+import re
 
 import httpx
 import pytest
@@ -13,6 +14,10 @@ from leo_cli.sessions import Sessions
 from test_sessions import project, reply  # noqa: F401 (fixtures)
 
 ALL = ('strong-m', 'standard-m', 'light-m')
+
+
+class LastChild:
+    """The ID of the child whose report came last, for providers whose call IDs say nothing."""
 
 
 class Child:
@@ -26,13 +31,16 @@ class Team:
     """Answers each request by its task: a script is a list of turns. A string is a final message; a list of
     (tool, arguments) is a turn of tool calls. When a script runs out, the agent reports `finished`."""
 
-    def __init__(self, scripts, fail_models=(), fail_tasks=(), hook=None):
+    def __init__(self, scripts, fail_models=(), fail_tasks=(), hook=None, plain_ids=False, fail_status=500):
         self.scripts, self.hook = {key: list(steps) for key, steps in scripts.items()}, hook
+        self.plain_ids, self.fail_status = plain_ids, fail_status  # plain_ids: every turn's first call is call_0, as without provider IDs.
         self.fail_models, self.fail_tasks, self.calls, self.ids = fail_models, fail_tasks, [], itertools.count(1)
         self.children = {}
         self.transport = httpx.MockTransport(self)
 
-    def resolve(self, value):
+    def resolve(self, value, body=None):
+        if isinstance(value, LastChild):
+            return re.findall(r'Report from (sub-[0-9a-f]+)', ''.join(m.get('content') or '' for m in body['messages'] if m['role'] == 'tool'))[-1]
         return 'sub-' + hashlib.sha1(self.children[value.task].encode()).hexdigest()[:8] if isinstance(value, Child) else value
 
     def __call__(self, request):
@@ -42,7 +50,7 @@ class Team:
         if self.hook:
             self.hook(self.calls[-1])
         if model in self.fail_models:
-            return httpx.Response(500, text='this model is broken')
+            return httpx.Response(self.fail_status, text='this model is broken')
         if any(key in task for key in self.fail_tasks):
             return httpx.Response(400, text='no access')
         key = next((k for k in self.scripts if k in task), None)
@@ -50,11 +58,11 @@ class Team:
         if isinstance(step, str):
             return reply(text=step)
         calls = []
-        for name, arguments in step:
-            ident = f'call-{next(self.ids)}'
-            if name == 'delegate':
+        for index, (name, arguments) in enumerate(step):
+            ident = f'call_{index}' if self.plain_ids else f'call-{next(self.ids)}'
+            if name == 'delegate' and isinstance(arguments['task'], str):
                 self.children[arguments['task']] = ident
-            calls.append((ident, name, {k: self.resolve(v) for k, v in arguments.items()}))
+            calls.append((ident, name, {k: self.resolve(v, body) for k, v in arguments.items()}))
         return reply(calls)
 
     def models_of(self, task):
@@ -271,7 +279,7 @@ async def test_long_evidence_is_cut_and_says_so(members, project):
     team = Team({'ROOT': [[delegate('child work')], [accept('child work')], 'Done.'], 'child work': [many, 'Wrote them.']})
     await run(members(), project, team)
     evidence = results(team)[0].split('Evidence the engine collected:\n')[1].split('\n\nReview it')[0]
-    assert evidence.endswith('… (evidence cut; read the files to check more)') and len(evidence) <= 4000 + 60
+    assert '… (evidence cut; read the files to check more)' in evidence and len(evidence) <= 4000 + 60
 
 
 async def test_two_workers_changing_a_file_warns_the_parent(members, project):
@@ -437,3 +445,108 @@ async def test_the_scrollback_says_who_each_agent_is(members, project):
     sessions, session = await run(members(), project, team)
     events = [e['data'] for e in sessions.store.events_of(session.run_id, 'subagent')]
     assert [e['status'] for e in events] == ['started', 'completed'] and events[0]['task'] == 'child work' and events[1]['report'] == 'My report.'
+
+
+# -- found in the final review ------------------------------------------------------------------
+
+async def test_a_provider_without_call_ids_keeps_every_subtask(members, project):
+    team = Team({'ROOT': [[delegate('first part')], [('review_work', {'agent': LastChild(), 'verdict': 'accept'})], [delegate('second part')],
+                          [('review_work', {'agent': LastChild(), 'verdict': 'accept'})], 'Done.'],
+                 'first part': [[write('first.txt')], 'one'], 'second part': [[write('second.txt')], 'two']}, plain_ids=True)
+    _, session = await run(members(), project, team)
+    assert (project / 'first.txt').exists() and (project / 'second.txt').exists()
+    assert by_task(session, 'first part')['status'] == by_task(session, 'second part')['status'] == 'accepted'
+
+
+async def test_a_manager_with_the_same_call_id_as_its_parent_does_not_hang(members, project):
+    team = Team({'ROOT': [[delegate('boss part', 'manager')], [('review_work', {'agent': LastChild(), 'verdict': 'accept'})], 'Done.'],
+                 'boss part': [[delegate('leaf part')], [('review_work', {'agent': LastChild(), 'verdict': 'accept'})], 'report'],
+                 'leaf part': [[write('leaf.txt')], 'ok']}, plain_ids=True)
+    _, session = await run(members(), project, team)
+    assert (project / 'leaf.txt').exists() and session.status == 'completed'
+
+
+@pytest.mark.parametrize('tree', [True, False])
+async def test_a_once_approval_does_not_cover_a_later_call_with_the_same_id(members, project, tree):
+    team = Team({'ROOT': [[('do_it_myself', {})], [write('first.txt')], [write('second.txt')], 'Done.'] if tree else [[write('first.txt')], [write('second.txt')], 'Done.']},
+                plain_ids=True)
+    sessions = Sessions(members(), project, transport=team.transport)
+    session = await sessions.open()
+    session.workspace.tree = tree
+    await sessions.send(session, 'ROOT task')
+    await asyncio.wait_for(session.task, 30)
+    assert session.approval['detail']['path'] == 'first.txt'
+    sessions.answer(session, 'once')
+    await asyncio.wait_for(session.task, 30)
+    assert session.status == 'waiting' and session.approval['detail']['path'] == 'second.txt', 'it must ask again'
+    assert not (project / 'second.txt').exists()
+    await sessions.close()
+
+
+async def test_stopping_kills_the_commands_that_are_running(members, project):
+    team = Team({'ROOT': [[delegate('part a'), delegate('part b')], 'unused'],
+                 'part a': [[('bash', {'command': 'sleep 1; touch a-finished'})], 'a'], 'part b': [[('bash', {'command': 'sleep 1; touch b-finished'})], 'b']})
+    sessions = Sessions(members(), project, autorun=True, transport=team.transport)
+    session = await sessions.open()
+    await sessions.send(session, 'ROOT task')
+    await asyncio.sleep(0.4)
+    sessions.stop(session)
+    await asyncio.wait_for(session.task, 10)
+    await asyncio.sleep(1.2)
+    assert session.status == 'cancelled' and not (project / 'a-finished').exists() and not (project / 'b-finished').exists()
+
+
+@pytest.mark.parametrize('task', [None, 42, ['a list']])
+async def test_a_task_that_is_not_text_gets_a_readable_error(members, project, task):
+    team = Team({'ROOT': [[('delegate', {'agent': 'coding', 'task': task})], 'Done.']})
+    _, session = await run(members(), project, team)
+    assert session.status == 'completed' and results(team)[0].startswith('Error') and list(nodes(session)) == ['main']
+
+
+async def test_a_review_of_something_odd_gets_a_readable_error(members, project):
+    team = Team({'ROOT': [[('review_work', {'agent': ['x'], 'verdict': 'accept'}), ('review_work', {'agent': None, 'verdict': ['accept']})], 'Done.']})
+    _, session = await run(members(), project, team)
+    assert session.status == 'completed' and all(r.startswith('Error') for r in results(team))
+
+
+async def test_a_manager_stopped_by_its_step_limit_hides_nothing(members, project):
+    busy = [[('list_files', {})] for _ in range(5)]
+    team = Team({'ROOT': [[delegate('boss part', 'manager')], [accept('boss part')], 'All good.'],
+                 'boss part': [[delegate('leaf part')], *busy], 'leaf part': [[write('leaf.txt')], 'ok']})
+    _, session = await run(members(agent_max_steps=5), project, team)
+    assert by_task(session, 'leaf part')['status'] == 'not_reviewed'
+    assert 'leaf.txt' in results(team)[0], 'its work still shows in the evidence'
+    assert session.run['output'].startswith('All good.\n\n**Not finished:**') and 'leaf part' in session.run['output']
+
+
+async def test_the_evidence_cut_keeps_the_latest_commands(members, project):
+    noisy = [[('bash', {'command': f'echo {n} {"x" * 280}'})] for n in range(30)]
+    team = Team({'ROOT': [[delegate('child work')], [reject('child work', 'Run the tests')], [accept('child work')], 'Done.'],
+                 'child work': [*noisy, 'Wrote it.', [write('a.txt'), ('bash', {'command': 'echo FINAL TEST RUN'})], 'Tests pass.']})
+    await run(members(), project, team)
+    assert 'FINAL TEST RUN' in results(team)[1] and 'evidence cut' in results(team)[1]
+
+
+async def test_a_model_that_answers_with_an_error_is_tried_once_per_run(members, project):
+    team = Team({'ROOT': [[delegate('child work')], [accept('child work')], 'Done.'],
+                 'child work': [[('list_files', {})], [('list_files', {})], [('list_files', {})], 'ok']}, fail_models={'standard-m'}, fail_status=400)
+    await run(members(), project, team)
+    assert team.models_of('child work').count('standard-m') == 1 and team.models_of('child work')[-1] == 'strong-m'
+
+
+async def test_an_unpriced_paid_model_is_skipped_for_another(members, project):
+    account = members(('strong-m', 'light-m'), allow_paid=True)
+    account.store().save_connection(Connection(name='unpriced', base_url='http://standard-unpriced.test/v1', model='standard-unpriced', free=False, tools=True,
+                                               tier='standard').model_dump(), user_id=account.user_id)
+    team = Team({'ROOT': [[delegate('child work')], [accept('child work')], 'Done.'], 'child work': ['ok']})
+    _, session = await run(account, project, team)
+    assert by_task(session, 'child work')['status'] == 'accepted' and 'standard-unpriced' not in team.models_of('child work')
+
+
+async def test_free_first_keeps_paid_models_as_a_backup(members, project):
+    account = members(('standard-m', 'light-m'), allow_paid=True, routing='free_first')
+    account.store().save_connection(Connection(name='paid', base_url='http://strong-paid.test/v1', model='strong-paid', free=False, tools=True, tier='strong',
+                                               input_price=1, output_price=1).model_dump(), user_id=account.user_id)
+    team = Team({'ROOT': [[delegate('child work')], [accept('child work')], 'Done.'], 'child work': ['ok']})
+    _, session = await run(account, project, team)
+    assert 'strong-paid' not in [c['model'] for c in team.calls] and team.models_of('ROOT')[0] == 'standard-m' and team.models_of('child work')[0] == 'light-m'

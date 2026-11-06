@@ -167,3 +167,13 @@ async def test_installing_a_skill_from_a_folder(project, tmp_path):
     assert 'lint-fixer' in skills.discover()
     with pytest.raises(SandboxError, match='No SKILL.md'):
         await skills.install(str(tmp_path))
+
+
+async def test_cancelling_a_command_stops_it_and_what_it_started(project):
+    import asyncio
+    task = asyncio.create_task(LocalWorkspace(project).exec('s', '(sleep 1; touch child-finished) & sleep 1; touch finished; wait', 30))
+    await asyncio.sleep(0.3)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(1.2)
+    assert not (project / 'finished').exists() and not (project / 'child-finished').exists()

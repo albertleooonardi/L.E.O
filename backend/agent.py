@@ -196,14 +196,26 @@ class AgentRun:
                 self.o.state["budget_extensions"] = extensions + 1
                 self.o.save()
                 continue
-            t.append({"role": "assistant", "content": result["text"], "tool_calls": result["tool_calls"]})
+            calls = self.unique_calls(result["tool_calls"], name, steps + 1)
+            t.append({"role": "assistant", "content": result["text"], "tool_calls": calls})
             self.state["steps"][name] = steps + 1
             self.o.state["completed"].pop(stage, None)  # The transcript holds it now.
             self.o.save()
             self.store.event(self.o.id, "agent_step", {"agent": name, "step": steps + 1, "model": result.get("model"),
                                                        "text": clip(result["text"], EVENT_CHARS),
-                                                       "tools": [{"id": c["id"], "name": c["name"], "summary": summary(c)} for c in result["tool_calls"]]})
+                                                       "tools": [{"id": c["id"], "name": c["name"], "summary": summary(c)} for c in calls]})
             self.after_step(name, result)
+
+    def unique_calls(self, calls, name, step):
+        """Tool calls with IDs unique in the run. Some providers send none, which makes every turn's first call `call_0`, and
+        checkpoints and approvals go by this ID: a repeat would count as already done, or as already approved."""
+        seen = {c["id"] for t in self.state["transcripts"].values() for m in t for c in m.get("tool_calls") or []}
+        unique = []
+        for number, call in enumerate(calls):
+            ident = call["id"] if call["id"] not in seen else f"{call['id']}-{name}-{step}-{number}"
+            seen.add(ident)
+            unique.append({**call, "id": ident})
+        return unique
 
     # What a tree of agents (backend/tree.py) changes about the loop; here, nothing.
 
