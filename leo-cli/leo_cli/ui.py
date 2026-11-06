@@ -60,7 +60,8 @@ HELP = [
     ("Sessions", [("/new [--worktree]", "start another session (in its own git worktree with --worktree)"),
                   ("/sessions", "list sessions in this window"), ("/switch N", "show session N"),
                   ("/resume [N]", "list earlier sessions on this folder, or reopen one"),
-                  ("/cd PATH", "work on another folder in this window"), ("/clear", "start over in this session")]),
+                  ("/cd PATH", "work on another folder in this window"), ("/clear", "start over in this session"),
+                  ("/tree", "draw the agents of the latest task as a tree")]),
     ("Models and account", [("/models [add]", "list your models, or add some (account sign-in or API key)"),
                             ("/sync", "fetch model changes made on the website"), ("/cost", "tokens and cost of this session"),
                             ("/usage", "calls, tokens, and cost of every model on this device"),
@@ -790,6 +791,10 @@ class App:
                 cursor = event["id"]
                 if session is self.sessions.current:
                     self.renderer.event(event["kind"], event["data"])
+                    if event["kind"] == "done":
+                        tree = tree_panel(session.run, self.sessions.store, self.g, self.console.width)
+                        if tree:
+                            self.console.print(tree)
                 elif event["kind"] == "approval":
                     self.say(f"Session {session.number} is waiting for your approval: /switch {session.number}", "leo.warn")
                 elif event["kind"] == "done":
@@ -1246,7 +1251,16 @@ class App:
         from .panels import usage_view  # Imports the engine's agent module; loaded when first asked for.
         current = self.sessions.current
         self.console.print(usage_view(self.sessions.store, self.sessions.uid, current.id if current else None,
-                                      [c["id"] for c in self.sessions.history()], self.g, tree=tree_panel(current.run if current else None, self.sessions.store, self.g)))
+                                      [c["id"] for c in self.sessions.history()], self.g,
+                                      tree=tree_panel(current.run if current else None, self.sessions.store, self.g, self.console.width, always=True)))
+
+    async def cmd_tree(self, arguments):
+        current = self.sessions.current
+        tree = tree_panel(current.run if current else None, self.sessions.store, self.g, self.console.width, always=True)
+        if tree:
+            self.console.print(tree)
+        else:
+            self.say("No task yet in this session: send one, then /tree draws its agents.")
 
     async def cmd_context(self, arguments):
         from .panels import context_view
@@ -1277,10 +1291,20 @@ class App:
                  + (" · estimated (the model did not report usage)" if totals.get("estimated") else ""))
 
 
-def tree_panel(run, store, g):
-    """A run's tree in full with what each agent used, or None if it was not a tree."""
+def tree_panel(run, store, g, width, always=False):
+    """A run's tree with what each agent used: an ASCII graph, or a table if that does not fit. Without `always`, None
+    when the root worked alone. None for a run that is not a tree."""
     nodes = treeview.nodes_of(run)
-    return treeview.full(nodes, treeview.agent_usage(store.call_rows(run["id"])), g, run["status"]) if len(nodes) > 1 else None
+    if not nodes or (len(nodes) < 2 and not always):
+        return None
+    usage = treeview.agent_usage(store.call_rows(run["id"]))
+    art = treeview.graph(nodes, usage, width, run["status"])
+    if art is None:
+        return treeview.full(nodes, usage, g, run["status"])
+    parts = [Text("Agent tree of the latest task", style="leo.title"), art]
+    if len(nodes) < 2:
+        parts.append(Text(treeview.alone_note(run), style="leo.muted"))
+    return Group(*parts)
 
 
 def models_table(store, uid, g=None):

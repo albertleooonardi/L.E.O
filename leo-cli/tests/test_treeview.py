@@ -81,10 +81,6 @@ def test_never_more_than_ten_lines():
     assert len(lines(treeview.live(tree(*[node(f'n{i}') for i in range(12)]), {}, 100, 100, G, 0))) == 10
 
 
-def test_only_a_root_shows_nothing():
-    assert treeview.live(tree(), {}, 100, 60, G, 0) == []
-
-
 def test_ascii_terminals_get_ascii():
     plain = glyphs(unicode=False)
     nodes = tree(node('a', status='accepted'), node('b', status='failed'), node('c', status='waiting'), node('d'), node('e', status='retrying'))
@@ -119,3 +115,67 @@ def test_a_stopped_run_does_not_show_working():
     nodes = tree(node('a'), node('b', status='retrying'), node('c', status='accepted'))
     out = full_text(nodes, run_status='cancelled')
     assert 'stopped' in out and 'working' not in out and 'retrying' not in out and 'accepted' in out
+
+
+# -- the ASCII graph -----------------------------------------------------------------------------
+
+def art(nodes, usage=None, width=100, **kwargs):
+    found = treeview.graph(nodes, usage or {}, width, **kwargs)
+    return found.plain.splitlines() if found is not None else None
+
+
+def test_a_root_alone_is_still_drawn():
+    usage = {'main': {'calls': 3, 'input_tokens': 10600, 'output_tokens': 3300, 'cost': 0}}
+    out = art(tree(root_status='done'), usage)
+    assert out[0].startswith('+--') and out[-1].startswith('+--') and all(line[0] in '+|' for line in out)
+    text = '\n'.join(out)
+    assert 'ROOT' in text and 'done' in text and 'the task' in text and 'strong-m' in text and '3 calls' in text and '13.9K' in text and 'free' in text
+
+
+def test_children_hang_under_their_parent_with_connectors():
+    nodes = tree(node('a', status='accepted', task='Auth module', kind='manager', model='standard-m'), node('a1', 'a', 'accepted', 'Login route'),
+                 node('a2', 'a', 'working', 'Tests'), node('b', status='waiting', task='Docs', model=None))
+    out = art(nodes, width=100)
+    text = '\n'.join(out)
+    assert all(word in text for word in ('ROOT', 'MANAGER', 'WORKER', 'Auth module', 'Login route', 'Tests', 'Docs', 'accepted', 'working', 'waiting'))
+    assert text.isascii() and all(len(line) <= 100 for line in out)
+    # Row by row: the root is above its children, and the manager above its own.
+    row = lambda word: next(i for i, line in enumerate(out) if word in line)  # noqa: E731
+    assert row('the task') < row('Auth module') == row('Docs') < row('Login route') == row('Tests')
+    # The manager's connector starts under the middle of its box, and reaches both of its workers.
+    column = lambda word: out[row(word)].index(word)  # noqa: E731
+    assert column('Login route') < column('Auth module') < column('Tests')
+    bars = [i for i, line in enumerate(out) if set(line.strip()) == {'+', '-'} and line.count('+') >= 3]
+    assert len(bars) == 2, 'a horizontal bar joins each set of siblings'
+    assert out[bars[0] - 1].strip() == '|', 'one line down from the parent'
+
+
+def test_one_child_is_a_straight_line():
+    out = art(tree(node('a', status='working')))
+    assert not any('-' in line and '+' in line and line.strip().count('+') == 1 for line in out)
+    joints = [line for line in out if line.strip() == '|']
+    assert joints and len({line.index('|') for line in joints}) == 1
+
+
+def test_boxes_shrink_to_fit_then_it_gives_up():
+    many = tree(*[node(f'n{i}', status='accepted', task=f'piece number {i}') for i in range(3)])
+    wide, narrow = art(many, width=100), art(many, width=60)
+    assert len(wide[0]) > len(narrow[0]) and all(len(line) <= 60 for line in narrow)
+    assert art(many, width=30) is None, 'three boxes do not fit in 30 columns'
+    assert art(tree(), width=30) is not None and art(tree(), width=8) is None
+
+
+def test_the_graph_is_ascii_whatever_the_text():
+    out = art(tree(node('a', task='修复 the “bug” — now', model='vendor/模型:free')))
+    assert '\n'.join(out).isascii() and 'the' in '\n'.join(out)
+
+
+def test_retries_and_stops_show_in_the_box():
+    retrying = dict(node('a', status='retrying'), attempt=2)
+    assert 'try 2/3' in '\n'.join(art(tree(retrying)))
+    assert 'stopped' in '\n'.join(art(tree(node('a')), run_status='cancelled'))
+
+
+def test_a_root_alone_has_one_live_line():
+    assert len(lines(treeview.live(tree(), {}, 100, 60, G, 0))) == 1
+    assert treeview.live({}, {}, 100, 60, G, 0) == []

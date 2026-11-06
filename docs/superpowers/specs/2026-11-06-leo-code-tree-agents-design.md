@@ -173,19 +173,23 @@ it. The wave and shimmer line stays in the status bar below the prompt:
 - It takes at most a third of the terminal's height, and never more than 10 lines.
 - When it does not fit, finished branches collapse first (`✔ 3 finished`), then waiting ones (`○ 2 waiting`).
 - Rows are cut to the terminal's width; the status stays and the task text gives way.
-- A 1-level tree shows nothing extra.
+- A root alone shows one line.
 - An approval menu replaces the prompt while it is open, so the tree is hidden until it is answered.
 - Tool lines keep scrolling above it, marked with the agent's `#tag` as today.
 
 ### 6.3 `/usage`
 
-`/usage` starts with the current session's latest tree, in full, with calls, tokens, and cost per agent. It adds this up
+`/usage` and `/tree` show the current session's latest tree as an ASCII graph, with a box per agent (state, task, model,
+tokens, calls, cost), even when the root worked alone, and say why it did; a tree that does not fit the terminal becomes a
+table. A task that split also prints the graph when it ends. Usage is added up
 from the call ledger: stages are already `agent:<id>:<step>`, so no schema change is needed. Context summaries
 (`agent:compact:n`) get their own line, because they belong to no agent. The tables by model below it stay.
 
 ### 6.4 `leocode -p`
 
 The tree goes to stderr once when the run ends, with the footer. The answer alone goes to stdout, as today.
+
+(Changed on 6 November after trying it: hiding a tree of one made the feature look missing.)
 
 ## 7. The rename
 

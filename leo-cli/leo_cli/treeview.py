@@ -1,4 +1,5 @@
-"""Drawing the tree of agents: a few lines above the prompt while it works, every agent with its usage in /usage.
+"""Drawing the tree of agents: a few lines above the prompt while it works, and an ASCII graph afterwards (/tree, /usage,
+and when a tree finishes), with a table when the graph does not fit.
 
     ◆ Dots3-Note  reviewing                                  2.1K
     ├─ ✔ Auth module         Nemotron Lightning  accepted    3.4K
@@ -16,6 +17,11 @@ FINISHED = {"accepted", "failed", "not_reviewed"}
 UNFINISHED_WHEN_STOPPED = {"waiting", "planning", "working", "in_review", "retrying"}
 WORDS = {"in_review": "in review", "not_reviewed": "not reviewed"}
 MAX_LINES = 10
+BOX_WIDTHS = (28, 22, 16)  # The graph uses the widest that fits the terminal.
+BOX_HEIGHT = 6
+BOX_GAP = 2
+CONNECTOR_HEIGHT = 3
+ATTEMPTS = 3
 
 
 def tokens(n):
@@ -128,11 +134,11 @@ def right_side(node, nodes, usage, width, activity):
 
 
 def live(nodes, usage, width, height, g, frame, activity=None):
-    """The tree as prompt_toolkit fragments, each row ending in a newline; nothing when the root is alone.
+    """The tree as prompt_toolkit fragments, each row ending in a newline; one line when the root is alone.
 
     It takes at most a third of the terminal and never more than MAX_LINES lines: finished branches collapse first, then
     waiting ones, and what still does not fit becomes `… N more`."""
-    if len(nodes) < 2 or "main" not in nodes:
+    if "main" not in nodes:
         return []
     limit = min(MAX_LINES, max(height // 3, 1))
     width = max(width - 1, 10)
@@ -181,6 +187,129 @@ def live(nodes, usage, width, height, g, frame, activity=None):
     for row in shown:
         out.append(row)
     return [fragment for row in out for fragment in row]
+
+
+def plain(value):
+    """Text that is pure ASCII on one line, for the graph: wide characters would break its columns."""
+    return " ".join(str(value or "").split()).encode("ascii", "replace").decode()
+
+
+def box_lines(node, nodes, usage, inner, run_status):
+    """The four lines inside a node's box."""
+    state = status_of(node, nodes, run_status=run_status)
+    if node.get("attempt", 1) > 1 and state not in ("stopped", "accepted", "failed"):
+        state = f"{state} try {node['attempt']}/{ATTEMPTS}"
+    used = usage.get(node["id"]) or {}
+    total = (used.get("input_tokens") or 0) + (used.get("output_tokens") or 0)
+    numbers = f"{tokens(total)} {used['calls']} calls {money(used.get('cost'))}" if used else ""
+    kind = node.get("kind", "worker").upper()
+    return [cut(plain(text), inner, "..") for text in (f"{kind}  {state}", node.get("task"), short_model(node.get("model")), numbers)]
+
+
+def box_style(node, nodes, run_status):
+    state = status_of(node, nodes, run_status=run_status)
+    if state in ("accepted", "done"):
+        return "leo.ok"
+    if state in ("failed", "not reviewed"):
+        return "leo.error"
+    if state == "stopped" or node["status"] == "retrying":
+        return "leo.warn"
+    return "leo.muted" if state == "waiting" else "leo.accent"
+
+
+def graph(nodes, usage, width, run_status=None):
+    """The tree top-down in ASCII art, with a box per agent: a rich Text, or None if it cannot fit in `width`.
+
+        +--------------------------+
+        | ROOT  reviewing          |
+        |                 ...      |
+        +--------------------------+
+                     |
+             +-------+-------+
+             |               |
+        +--------+      +--------+
+        | WORKER |      | WORKER |
+    """
+    if "main" not in nodes:
+        return None
+    children = {}
+    for node in nodes.values():
+        if node["id"] != "main":
+            children.setdefault(node["parent"], []).append(node)
+
+    for box in BOX_WIDTHS:
+        def span(node, box=box):
+            below = children.get(node["id"], [])
+            return max(box, sum(span(child) for child in below) + BOX_GAP * (len(below) - 1)) if below else box
+
+        if span(nodes["main"]) <= width:
+            break
+    else:
+        return None
+
+    def depth(node):
+        return 1 + max((depth(child) for child in children.get(node["id"], [])), default=0)
+
+    total = span(nodes["main"])
+    rows = [[(" ", "")] * total for _ in range(depth(nodes["main"]) * (BOX_HEIGHT + CONNECTOR_HEIGHT) - CONNECTOR_HEIGHT)]
+
+    def put(row, column, text, style):
+        for offset, char in enumerate(text):
+            rows[row][column + offset] = (char, style)
+
+    def draw(node, left, level):
+        """Draw a subtree that starts at column `left`; the column of its box's middle."""
+        below = children.get(node["id"], [])
+        top = level * (BOX_HEIGHT + CONNECTOR_HEIGHT)
+        if below:
+            used = sum(span(child) for child in below) + BOX_GAP * (len(below) - 1)
+            column, middles = left + (span(node) - used) // 2, []
+            for child in below:
+                middles.append(draw(child, column, level + 1))
+                column += span(child) + BOX_GAP
+            middle = (middles[0] + middles[-1]) // 2
+        else:
+            middles, middle = [], left + span(node) // 2
+        style = box_style(node, nodes, run_status)
+        start, border = middle - box // 2, "+" + "-" * (box - 2) + "+"
+        put(top, start, border, style)
+        for offset, text in enumerate(box_lines(node, nodes, usage, box - 4, run_status), 1):
+            put(top + offset, start, "| " + text.ljust(box - 4) + " |", style)
+        put(top + BOX_HEIGHT - 1, start, border, style)
+        if middles:
+            joint = top + BOX_HEIGHT
+            put(joint, middle, "|", "leo.border")
+            if len(middles) > 1:
+                put(joint + 1, middles[0], "-" * (middles[-1] - middles[0] + 1), "leo.border")
+                for column in {middle, *middles}:
+                    put(joint + 1, column, "+", "leo.border")
+            else:
+                put(joint + 1, middle, "|", "leo.border")
+            for column in middles:
+                put(joint + 2, column, "|", "leo.border")
+        return middle
+
+    draw(nodes["main"], 0, 0)
+    art = Text()
+    for number, row in enumerate(rows):
+        end = max((i for i, (char, _) in enumerate(row) if char != " "), default=-1)
+        for char, style in row[:end + 1]:
+            art.append(char, style=style)
+        if number < len(rows) - 1:
+            art.append("\n")
+    return art
+
+
+def alone_note(run):
+    """Why a tree has only its root."""
+    tree = (((run or {}).get("state") or {}).get("agent") or {}).get("tree") or {}
+    if len(tree.get("levels") or []) == 1:
+        return "Only one model strength is usable, so the root works alone. Other strengths in /models would let it split work."
+    if tree.get("solo"):
+        return "The root did this one itself: it judged the task too small to split."
+    if run and run.get("status") == "completed":
+        return "The root answered this one itself: nothing needed splitting."
+    return "The root has not split anything yet."
 
 
 def full(nodes, usage, g, run_status=None):

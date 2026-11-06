@@ -259,7 +259,7 @@ async def one_shot(sessions, task, worktree=False, transport=None, stdin=None):
 
     def show(event):
         if event["kind"] == "done":  # The answer goes to stdout; stderr gets the closing line with what the run cost.
-            tree = tree_panel(session.run, sessions.store, renderer.g)
+            tree = tree_panel(session.run, sessions.store, renderer.g, err.width)
             if tree:
                 err.print(tree)
             err.print(renderer.footer(event["data"]))

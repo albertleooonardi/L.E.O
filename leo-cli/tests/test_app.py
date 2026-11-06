@@ -1,6 +1,7 @@
 """The `leo` command and its terminal UI: one-shot runs, approvals, slash commands, and event rendering."""
 import asyncio
 import io
+import itertools
 import json
 import re
 import time
@@ -921,3 +922,82 @@ async def test_the_completion_menu_keeps_no_room_while_the_agent_works(ui, monke
     assert ui.completes_while_typing() is True
     monkeypatch.setattr(type(session), 'busy', property(lambda self: True))
     assert ui.completes_while_typing() is False
+
+
+# -- the tree as a graph ------------------------------------------------------------------------
+
+@pytest.fixture
+def tree_ui(tmp_path, monkeypatch, project):
+    from test_tree import ALL
+    from backend.schemas import Connection
+    from leo_cli.account import Account
+    monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
+    home = Account(tmp_path / 'home-tree')
+    for model in ALL:
+        home.store().save_connection(Connection(name=model, base_url=f'http://{model}.test/v1', model=model, free=True, tools=True,
+                                                tier=model.split('-')[0]).model_dump(), user_id=home.user_id)
+
+    def make(team):
+        return App(Sessions(home, project, autorun=True, transport=team.transport), home, Console(record=True, width=120, color_system=None))
+    return make
+
+
+async def test_tree_command_draws_the_graph_with_a_note_for_a_root_alone(tree_ui):
+    from test_tree import Team
+    ui = tree_ui(Team({'ROOT': [[('do_it_myself', {})], 'Done it.']}))
+    await ui.command('/tree')
+    assert 'No task yet' in text_of(ui.console)
+    session = await ui.sessions.open()
+    await ui.sessions.send(session, 'ROOT task')
+    await session.task
+    await ui.command('/tree')
+    out = text_of(ui.console)
+    assert 'ROOT' in out and '+--' in out and 'did this one itself' in out
+    await ui.command('/usage')
+    assert text_of(ui.console).count('did this one itself') == 2, '/usage shows it too'
+    await ui.sessions.close()
+
+
+async def test_a_question_says_the_root_answered_it(tree_ui):
+    from test_tree import Team
+    ui = tree_ui(Team({'ROOT': ['An answer.']}))
+    session = await ui.sessions.open()
+    await ui.sessions.send(session, 'ROOT task')
+    await session.task
+    await ui.command('/tree')
+    assert 'answered this one itself' in text_of(ui.console)
+    await ui.sessions.close()
+
+
+async def test_a_real_tree_prints_its_graph_when_the_task_ends(tree_ui):
+    from test_tree import Team, accept, delegate
+    ui = tree_ui(Team({'ROOT': [[delegate('child work')], [accept('child work')], 'Done.'], 'child work': ['ok']}))
+    session = await ui.sessions.open()
+    await ui.sessions.send(session, 'ROOT task')
+    await session.task
+    ui.follow(session)
+    out = text_of(ui.console)
+    assert out.count('child work') >= 1 and 'WORKER' in out and 'accepted' in out and out.index('Done.') < out.index('WORKER')
+    await ui.sessions.close()
+
+
+async def test_a_root_alone_prints_no_graph_by_itself(tree_ui):
+    from test_tree import Team
+    ui = tree_ui(Team({'ROOT': ['An answer.']}))
+    session = await ui.sessions.open()
+    await ui.sessions.send(session, 'ROOT task')
+    await session.task
+    ui.follow(session)
+    assert 'ROOT' not in text_of(ui.console) and '+--' not in text_of(ui.console)
+    await ui.sessions.close()
+
+
+async def test_doing_it_yourself_reads_working(tree_ui):
+    from test_tree import Team, write
+    ui = tree_ui(Team({'ROOT': [[('do_it_myself', {})], [write('a.txt')], 'Done.']}))
+    session = await ui.sessions.open()
+    await ui.sessions.send(session, 'ROOT task')
+    await session.task
+    events = [e['data']['status'] for e in ui.sessions.store.events_of(session.run_id, 'tree')]
+    assert [status for status, _ in itertools.groupby(events)] == ['waiting', 'planning', 'working', 'done']
+    await ui.sessions.close()

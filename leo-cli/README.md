@@ -113,6 +113,7 @@ files, and `@` paths. The status bar at the bottom shows every session, what the
 | `/models [add]` | List your models, or add some (saved on your L.E.O. account). `/model` works too. |
 | `/sync` | Fetch model changes made on the website. |
 | `/cost` | Show tokens and cost for this session. |
+| `/tree` | Draw the agents of the latest task as an ASCII tree. |
 | `/usage` | Calls, tokens, cost, and share of tokens for every model on this device; totals for this session, folder, and device. |
 | `/context` | How full the agent's context window is: system prompt, your messages, replies, tool results, tool definitions. |
 | `/mcp` | MCP servers: the connectors added in L.E.O Chat, and the ones set up for the CLI, with their tools. |
@@ -175,8 +176,27 @@ model. After that it counts as failed, and the final answer ends with a **Not fi
 **Limits.** A run has at most 12 agents below the root, and at most 3 workers run at once (`agent_parallel`). Your budgets
 apply to the whole tree. An approval from any worker pauses the whole tree, and answering resumes it.
 
-**Seeing it.** While a tree works, it shows above the prompt, cut down to fit your terminal. `/usage` then shows the latest
-tree in full, with each agent's calls, tokens, and cost, and `leocode -p` prints it to stderr when it ends.
+**Seeing it.** While the agent works, the tree shows above the prompt, cut down to fit your terminal. When a task that split
+ends, it is drawn as an ASCII graph, with each agent's state, model, tokens, calls, and cost. `/tree` draws the latest one
+at any time, and `/usage` starts with it; if the root did the task alone, they say so. `leocode -p` prints it to stderr.
+
+```
+                +--------------------------+
+                | ROOT done                |
+                | Add login and tests      |
+                | dots-3-note-preview      |
+                | 4.2K 4 calls free        |
+                +--------------------------+
+                             |
+              +--------------+--------------+
+              |                             |
++--------------------------+ +--------------------------+
+| WORKER accepted          | | WORKER retrying try 2/3  |
+| Login route              | | Tests for login          |
+| north-mini-code          | | north-mini-code          |
+| 1.1K 2 calls free        | | 900 2 calls free         |
++--------------------------+ +--------------------------+
+```
 
 ## Where things are stored
 

@@ -71,7 +71,7 @@ class TreeRun(AgentRun):
         if "main" not in self.tree["nodes"]:
             self.levels()
             self.add_node("main", None, "root", 0, self.o.run["prompt"])
-        self.update("main", status="planning")
+        self.update("main", status="working" if self.works("main") else "planning")
         answer = await super().run()
         if answer is None:
             return None  # Paused for an approval.
@@ -264,6 +264,7 @@ How to work:
         if any(node["parent"] == name for node in self.tree["nodes"].values()):
             return "Error: you have already delegated subtasks; carry on with those."
         self.tree["solo"] = True
+        self.update(name, status="working")
         self.o.save()
         return "You now have bash, write_file, and edit_file, and can no longer delegate. Do the task, and verify it by running it."
 
