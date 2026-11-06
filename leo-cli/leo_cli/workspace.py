@@ -66,6 +66,8 @@ def kill_tree(pid):
 
 
 class LocalWorkspace:
+    tree = True  # The agents work as a tree (backend/tree.py).
+
     def __init__(self, root, policy=None, skills=None, on_write=None, mcp=None):
         self.root = os.path.realpath(root)
         self.place = f"the user's own computer, in the project folder {self.root}"
@@ -75,6 +77,10 @@ class LocalWorkspace:
     def extra_tools(self):
         """The tools of the user's MCP servers, for the agent (empty until the session has started them)."""
         return list(self.mcp.specs) if self.mcp else []
+
+    def extra_read_tools(self):
+        """The MCP tools that only read, which agents that do not change things may use too."""
+        return [spec for spec in self.mcp.specs if self.mcp.index[spec["name"]]["read_only"]] if self.mcp else []
 
     async def call_tool(self, name, arguments):
         if not self.mcp:
