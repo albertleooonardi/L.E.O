@@ -55,7 +55,8 @@ if it is installed. It then runs the API and a durable worker and opens **http:/
 everything. Your accounts, models, encrypted keys, chats, and settings live in `.leo/`. Pass another folder to use a
 different workspace, for example `./start.sh .leo-bench`.
 
-Create the first account, then open **Settings → Models → Add provider**. Paste a key (a free OpenRouter or Gemini AI
+Signed out, L.E.O. opens on its landing page. Choose **Create account** for the first account, then open
+**Settings → Models → Add provider**. Paste a key (a free OpenRouter or Gemini AI
 Studio key is enough) and use **Add models** to choose which models L.E.O. may use. No model is downloaded and no
 provider is contacted until you do.
 
@@ -393,6 +394,12 @@ are **at least once**: a crash during a request can send it again, so this is no
 
 All screenshots were taken on 7 November 2026 from the current code. The web screenshots show real data from a QA
 workspace; the terminal screenshots are described one by one.
+
+![The landing page signed-out visitors see: "Your models. One thoughtful answer." beside how L.E.O. routed a real request](docs/screenshots/landing.jpg)
+
+<sub>**The landing page** (`/welcome/`), shown to anyone who opens L.E.O. signed out. The panel replays how three real
+requests were routed: a question, code with stated rules (two models failed, one wrote it, another reviewed it), and a
+web page. Signing out returns here; a session that expires mid-chat goes straight back to sign-in.</sub>
 
 ![L.E.O Chat: a request in Auto mode, and the page it produced in the live preview](docs/screenshots/hero.jpg)
 

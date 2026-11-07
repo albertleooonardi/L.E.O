@@ -42,12 +42,15 @@ function toast(text: string) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => el('toast').hidden = true, 5000);
 }
 function errorText(error: unknown) { return error instanceof Error ? error.message : 'Something went wrong'; }
+let signedIn = false;  // Set by the first request that gets through: a later 401 is an expired session.
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`/api${path}`, { ...init, credentials: 'include', headers: { 'Content-Type': 'application/json', ...init.headers } });
   if (response.status === 401) {
-    window.location.href = '/login';
+    // Never signed in: the landing page. Signed out while working: straight back to sign-in.
+    window.location.replace(signedIn ? '/login' : '/welcome/');
     throw new Error('Session expired');
   }
+  signedIn = true;
   const data = await response.json().catch(() => ({ detail: 'Server returned an unreadable response' }));
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `Request failed (${response.status})`);
   return data;
@@ -936,7 +939,7 @@ el('cancel-password').addEventListener('click', () => { field('current-password'
 
 async function doLogout() {
   try { await api('/auth/logout', { method: 'POST' }); } catch {}
-  window.location.href = '/login';
+  window.location.href = '/welcome/';
 }
 function applyPreset() {
   const preset = presets.find(p => p.id === select('provider-preset').value); if (!preset) return;

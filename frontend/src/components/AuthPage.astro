@@ -26,7 +26,7 @@ const title = mode === 'signin' ? 'Sign in' : 'Create account';
     <main class="auth-split" data-mode={mode}>
       <section class="auth-pitch" aria-label="About L.E.O">
         <div>
-          <div class="auth-brand"><Icon name="spark" size={26} /><span>L.E.O</span></div>
+          <a class="auth-brand" href="/welcome/" aria-label="L.E.O home"><Icon name="spark" size={26} /><span>L.E.O</span></a>
           <h2>Your models.<br />One thoughtful answer.</h2>
           <p>Bring your own keys and subscriptions. L.E.O. routes every request to the best model you have, and keeps them with your account.</p>
           <ul class="auth-products">

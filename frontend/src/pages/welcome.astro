@@ -1,0 +1,334 @@
+---
+import '@fontsource/ibm-plex-sans/latin-400.css';
+import '@fontsource/ibm-plex-sans/latin-500.css';
+import '@fontsource/ibm-plex-sans/latin-600.css';
+import Icon from '../components/Icon.astro';
+import '../styles/global.css';
+
+// Three real requests and what L.E.O. did with them (QA workspace, free models only).
+const examples = [
+  {
+    id: 'question', label: 'A question', prompt: 'What is an API?',
+    facts: [['Skill', 'General'], ['Difficulty', 'Light'], ['Pipeline', 'Quick']],
+    steps: [
+      { state: 'ok', model: 'Gemma 4 26B', role: 'answers', note: 'Lightest model that is enough. Free.' },
+    ],
+    route: 'Auto → quick · general · light · 1 call', usage: '925 tokens · 19 s · $0',
+  },
+  {
+    id: 'code', label: 'Code with rules', prompt: 'Write a Python function is_valid_ipv4(s) that returns True only for dotted-decimal IPv4: exactly four parts, ASCII digits only, 0–255, no leading zeros.',
+    facts: [['Skill', 'Coding'], ['Difficulty', 'Standard'], ['Pipeline', 'Reviewed, because the rules can be checked']],
+    steps: [
+      { state: 'skip', model: 'Laguna S 2.1', role: 'first choice', note: 'Failed, so the next model takes over.' },
+      { state: 'skip', model: 'Gemini 2.5 Flash', role: 'second choice', note: 'Failed too.' },
+      { state: 'ok', model: 'Nemotron 3 Ultra 550B', role: 'writes the code', note: 'Has the coding skill. Free.' },
+      { state: 'ok', model: 'Nemotron 3.5 Super VL', role: 'reviews it', note: 'Strongest model that did not write the answer.' },
+    ],
+    route: 'Auto → reviewed · coding · standard · 4 calls', usage: '4,373 tokens · $0',
+  },
+  {
+    id: 'page', label: 'A web page', prompt: 'Create me a minimalist, clean and informative landing page about coffee',
+    facts: [['Skill', 'Frontend'], ['Difficulty', 'Standard'], ['Pipeline', 'Quick, one page is one deliverable']],
+    steps: [
+      { state: 'ok', model: 'Wikimedia Commons', role: 'finds photos', note: 'Openly licensed, checked to load, credited.' },
+      { state: 'ok', model: 'Gemini 2.5 Flash', role: 'writes the page', note: 'Has the frontend skill. Medium thinking effort for design work.' },
+    ],
+    route: 'Auto → quick · frontend · standard · 1 call', usage: '9,206 tokens · 36 s · $0',
+  },
+];
+---
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="L.E.O — LLM Efficiency Orchestrator. Routes every request to the cheapest of your models that can do it well." />
+    <meta name="theme-color" content="#151515" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>L.E.O — your models, one thoughtful answer</title>
+    <script is:inline>
+      try { document.documentElement.dataset.theme = localStorage.getItem('leo-theme') === 'light' ? 'light' : 'dark'; } catch {}
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="w-top">
+      <a class="w-brand" href="/welcome/" aria-label="L.E.O home"><span class="w-mark" aria-hidden="true"><Icon name="spark" size={13} /></span>L.E.O</a>
+      <nav class="w-nav" aria-label="Sections">
+        <a href="#how">How it works</a>
+        <a href="#code">L.E.O.C.O.D.E</a>
+        <a href="#yours">Self-hosted</a>
+      </nav>
+      <div class="w-top-actions" data-signed-out>
+        <a class="w-link" href="/login/">Sign in</a>
+        <a class="w-button" href="/register/">Create account</a>
+      </div>
+      <div class="w-top-actions" data-signed-in hidden>
+        <a class="w-button" href="/">Open your chats</a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="w-hero" aria-labelledby="w-title">
+        <div class="w-hero-copy">
+          <h1 id="w-title">Your models.<br />One thoughtful answer.</h1>
+          <p class="w-lede">L.E.O. reads every request and sends it to the cheapest of your models that can do it well:
+            free, local, or paid when you allow it. When an answer can be checked, a second model checks it.</p>
+          <div class="w-cta" data-signed-out>
+            <a class="w-button w-button-large" href="/register/">Create account</a>
+            <a class="w-button w-button-large w-button-quiet" href="/login/">Sign in</a>
+          </div>
+          <div class="w-cta" data-signed-in hidden>
+            <a class="w-button w-button-large" href="/">Open your chats</a>
+          </div>
+          <p class="w-fine">Works with Ollama, LM Studio, vLLM, OpenRouter, Gemini, OpenAI, Claude, and ChatGPT or Copilot sign-ins.</p>
+        </div>
+
+        <figure class="w-router" aria-labelledby="w-router-caption">
+          <div class="w-router-head">
+            <span class="w-router-title"><Icon name="compass" size={15} />How L.E.O. routed it</span>
+            <div class="w-tabs" role="tablist" aria-label="Example requests">
+              {examples.map((example, index) => (
+                <button type="button" role="tab" id={`tab-${example.id}`} aria-controls={`panel-${example.id}`}
+                        aria-selected={index === 1 ? 'true' : 'false'} tabindex={index === 1 ? 0 : -1}>{example.label}</button>
+              ))}
+            </div>
+          </div>
+          {examples.map((example, index) => (
+            <div class="w-panel" role="tabpanel" id={`panel-${example.id}`} aria-labelledby={`tab-${example.id}`} hidden={index !== 1}>
+              <p class="w-prompt"><span class="w-you">You</span>{example.prompt}</p>
+              <dl class="w-facts">
+                {example.facts.map(([term, value]) => (<div><dt>{term}</dt><dd>{value}</dd></div>))}
+              </dl>
+              <ol class="w-steps">
+                {example.steps.map((step) => (
+                  <li class={`w-step w-step-${step.state}`}>
+                    <span class="w-dot" aria-hidden="true"></span>
+                    <span class="w-step-model">{step.model}<span class="w-step-role"> {step.role}</span></span>
+                    <span class="w-step-note">{step.state === 'skip' ? <span class="sr-only">Skipped: </span> : null}{step.note}</span>
+                  </li>
+                ))}
+              </ol>
+              <p class="w-route"><code>{example.route}</code><span>{example.usage}</span></p>
+            </div>
+          ))}
+          <figcaption id="w-router-caption" class="w-caption">Real requests from a test workspace with 12 free models. No tokens are spent before the model call.</figcaption>
+        </figure>
+      </section>
+
+      <section class="w-how" id="how" aria-labelledby="w-how-title">
+        <h2 id="w-how-title">What happens to a request</h2>
+        <ol class="w-sequence">
+          <li><span class="w-num" aria-hidden="true">1</span><h3>Read it</h3><p>Rules match the skill it needs, how hard it is, and whether it needs the web. This costs no tokens.</p></li>
+          <li><span class="w-num" aria-hidden="true">2</span><h3>Choose how to answer</h3><p>One call for most work. A second model's review when the request states rules. A plan split across specialists for a whole app.</p></li>
+          <li><span class="w-num" aria-hidden="true">3</span><h3>Choose a model</h3><p>Strong enough, with the right skill, then the cheapest. A rate-limited model waits or steps aside for the next one.</p></li>
+          <li><span class="w-num" aria-hidden="true">4</span><h3>Check the answer</h3><p>Syntax checks, broken links, and placeholder text trigger a repair. Every call is logged with its reason and cost.</p></li>
+        </ol>
+      </section>
+
+      <section class="w-code" id="code" aria-labelledby="w-code-title">
+        <div class="w-code-copy">
+          <h2 id="w-code-title">L.E.O.C.O.D.E works in your terminal</h2>
+          <p>The same account, in your project folder. Your strongest model splits the task and reviews the work; cheaper models
+            write the files and run the tests. Nothing changes without your approval, and your code stays on your computer.</p>
+          <pre class="w-shell"><code>uv tool install ./leo-cli
+cd my-project
+leocode</code></pre>
+        </div>
+        <div class="w-term" role="img" aria-label="A leocode tree of agents: the root is reviewing while two workers have finished their subtasks">
+          <div class="w-term-bar" aria-hidden="true"><span></span><span></span><span></span></div>
+<pre aria-hidden="true"><span class="t-dim">❯</span> Add login to this project, with tests
+<span class="t-dim">◆</span> demo-strong                          <span class="t-dim">reviewing  1.6K</span>
+<span class="t-dim">├─</span> <span class="t-ok">✔</span> Login: write auth.py   demo-standard  <span class="t-ok">accepted</span>
+<span class="t-dim">└─</span> <span class="t-ok">✔</span> Tests for login        demo-light     <span class="t-ok">accepted</span>
+  <span class="t-dim">│</span> Ran 2 tests in 0.000s
+  <span class="t-dim">│</span> <span class="t-ok">OK</span></pre>
+        </div>
+      </section>
+
+      <section class="w-yours" id="yours" aria-labelledby="w-yours-title">
+        <h2 id="w-yours-title">Your server, your keys</h2>
+        <dl class="w-list">
+          <div><dt><Icon name="plug" size={17} />Nothing is contacted until you add it</dt><dd>Paste an API key or sign in to an account, then choose which of its models L.E.O. may use.</dd></div>
+          <div><dt><Icon name="settings" size={17} />Keys are encrypted</dt><dd>Stored encrypted on the server you run, and never shown again after you save them.</dd></div>
+          <div><dt><Icon name="gauge" size={17} />Paid models only when you allow them</dt><dd>Every run has a limit on calls, tokens, time, and cost. Free models cost nothing.</dd></div>
+          <div><dt><Icon name="chart" size={17} />Every call is accounted for</dt><dd>Which model answered, why it was chosen, and what it used, per chat and overall.</dd></div>
+        </dl>
+      </section>
+
+      <section class="w-end" aria-labelledby="w-end-title">
+        <h2 id="w-end-title">Bring the models you already have.</h2>
+        <div class="w-cta" data-signed-out>
+          <a class="w-button w-button-large" href="/register/">Create account</a>
+          <a class="w-button w-button-large w-button-quiet" href="/login/">Sign in</a>
+        </div>
+        <div class="w-cta" data-signed-in hidden>
+          <a class="w-button w-button-large" href="/">Open your chats</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="w-foot">
+      <span class="w-brand w-brand-small"><span class="w-mark" aria-hidden="true"><Icon name="spark" size={11} /></span>L.E.O</span>
+      <span>LLM Efficiency Orchestrator. Self-hosted; work in progress.</span>
+    </footer>
+
+    <script>
+      // Signed in already: offer the way back to the chats instead of sign-in.
+      fetch('/api/auth/me', { credentials: 'include' }).then((res) => {
+        if (!res.ok) return;
+        document.querySelectorAll<HTMLElement>('[data-signed-out]').forEach((el) => { el.hidden = true; });
+        document.querySelectorAll<HTMLElement>('[data-signed-in]').forEach((el) => { el.hidden = false; });
+      }).catch(() => {});
+
+      // Example tabs: arrow keys move between them, as in any tab list.
+      const tabs = [...document.querySelectorAll<HTMLButtonElement>('.w-tabs [role=tab]')];
+      function select(tab: HTMLButtonElement, focus = false) {
+        for (const other of tabs) {
+          const on = other === tab;
+          other.setAttribute('aria-selected', String(on));
+          other.tabIndex = on ? 0 : -1;
+          const panel = document.getElementById(other.getAttribute('aria-controls')!)!;
+          panel.hidden = !on;
+          if (on) { panel.classList.remove('w-play'); void panel.offsetWidth; panel.classList.add('w-play'); }
+        }
+        if (focus) tab.focus();
+      }
+      tabs.forEach((tab, index) => {
+        tab.addEventListener('click', () => select(tab));
+        tab.addEventListener('keydown', (event) => {
+          const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+          if (step) { event.preventDefault(); select(tabs[(index + step + tabs.length) % tabs.length], true); }
+        });
+      });
+      const first = tabs.find((tab) => tab.getAttribute('aria-selected') === 'true');
+      if (first) select(first);
+    </script>
+  </body>
+</html>
+
+<style>
+  body { font-size: 15px; line-height: 1.6; }
+  .w-top { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 28px; padding: 14px clamp(16px, 4vw, 48px);
+    background: var(--topbar-bg-scrolled); backdrop-filter: blur(14px); border-bottom: 1px solid var(--topbar-border); }
+  .w-brand { display: inline-flex; align-items: center; gap: 9px; font-size: 16px; font-weight: 600; letter-spacing: -.3px; }
+  .w-brand-small { font-size: 13px; gap: 7px; }
+  .w-mark { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; background: var(--accent); color: var(--accent-text); }
+  .w-brand-small .w-mark { width: 19px; height: 19px; border-radius: 6px; }
+  .w-mark :global(svg) { fill: currentColor; }
+  .w-nav { display: flex; gap: 22px; margin-right: auto; font-size: 14px; color: var(--muted); }
+  .w-nav a:hover, .w-link:hover { color: var(--text); }
+  .w-top-actions { display: flex; align-items: center; gap: 18px; font-size: 14px; }
+  .w-link { color: var(--muted); }
+  .w-button { display: inline-flex; align-items: center; justify-content: center; padding: 8px 15px; border-radius: 9px; background: var(--accent);
+    color: var(--accent-text); font-weight: 500; font-size: 14px; transition: opacity .15s; }
+  .w-button:hover { opacity: .88; }
+  .w-button-large { padding: 12px 20px; font-size: 15px; border-radius: 11px; }
+  .w-button-quiet { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px var(--border); }
+  .w-button-quiet:hover { background: var(--hover); opacity: 1; }
+
+  /* The app's own `main` is a centred column (global.css); this page is a plain document. */
+  main { display: block; min-height: 0; max-width: 1180px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px); }
+  h1, h2, h3 { margin: 0; font-weight: 600; }
+  /* Top-aligned, so switching examples (panels of different heights) never moves the headline. */
+  .w-hero { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: clamp(32px, 5vw, 72px); align-items: start;
+    padding: clamp(56px, 8vw, 96px) 0 clamp(56px, 8vw, 96px); }
+  .w-hero-copy { padding-top: clamp(0px, 4vw, 56px); }
+  .w-hero h1 { font-size: clamp(40px, 5.6vw, 66px); line-height: 1.04; letter-spacing: -2.2px; }
+  .w-lede { margin: 24px 0 0; font-size: 18px; line-height: 1.6; color: var(--muted); max-width: 33em; }
+  .w-cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
+  .w-fine { margin: 28px 0 0; font-size: 13px; color: var(--subtle); max-width: 36em; }
+
+  .w-router { margin: 0; border-radius: 18px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--border), 0 30px 80px -40px rgb(0 0 0 / 70%); overflow: hidden; }
+  .w-router-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px 14px 20px; border-bottom: 1px solid var(--border); }
+  .w-router-title { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .w-tabs { display: flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--bg); box-shadow: inset 0 0 0 1px var(--border); }
+  .w-tabs button { padding: 5px 11px; border-radius: 7px; font-size: 13px; color: var(--muted); }
+  .w-tabs button:hover { color: var(--text); }
+  .w-tabs button[aria-selected='true'] { background: var(--hover); color: var(--text); }
+  .w-panel { padding: 22px 22px 18px; }
+  .w-prompt { margin: 0; font-size: 15.5px; line-height: 1.55; }
+  .w-you { display: inline-block; margin-right: 10px; padding: 1px 8px; border-radius: 6px; background: var(--hover); color: var(--muted); font-size: 12px; vertical-align: 2px; }
+  .w-facts { display: flex; flex-wrap: wrap; gap: 8px 26px; margin: 18px 0 0; }
+  .w-facts div { display: flex; gap: 8px; font-size: 13px; }
+  .w-facts dt { color: var(--subtle); }
+  .w-facts dd { margin: 0; }
+  .w-steps { list-style: none; margin: 18px 0 0; padding: 0; border-top: 1px solid var(--border); }
+  .w-step { display: grid; grid-template-columns: 14px minmax(0, 1fr); column-gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .w-dot { width: 8px; height: 8px; margin-top: 8px; border-radius: 50%; background: #59b88c; }
+  .w-step-skip .w-dot { background: transparent; box-shadow: inset 0 0 0 1.5px #c99a45; }
+  .w-step-model { font-weight: 500; font-size: 14.5px; }
+  .w-step-role { font-weight: 400; color: var(--muted); }
+  .w-step-note { grid-column: 2; font-size: 13px; color: var(--muted); }
+  .w-step-skip .w-step-model { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--subtle); }
+  .w-route { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; margin: 16px 0 0; }
+  .w-route code { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 13px; padding: 5px 9px; border-radius: 7px; background: var(--bg); box-shadow: inset 0 0 0 1px var(--border); }
+  .w-route span { font-size: 12.5px; color: var(--subtle); }
+  .w-caption { padding: 12px 22px 16px; font-size: 12px; color: var(--subtle); border-top: 1px solid var(--border); }
+
+  /* The one moment of motion: a request's decision plays out when it is shown. */
+  @media (prefers-reduced-motion: no-preference) {
+    .w-play .w-facts, .w-play .w-step, .w-play .w-route { animation: w-in .45s cubic-bezier(.2, .8, .3, 1) both; }
+    .w-play .w-facts { animation-delay: .05s; }
+    .w-play .w-step:nth-child(1) { animation-delay: .2s; }
+    .w-play .w-step:nth-child(2) { animation-delay: .4s; }
+    .w-play .w-step:nth-child(3) { animation-delay: .6s; }
+    .w-play .w-step:nth-child(4) { animation-delay: .8s; }
+    .w-play .w-route { animation-delay: .95s; }
+  }
+  @keyframes w-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+
+  .w-how, .w-code, .w-yours, .w-end { padding: clamp(56px, 8vw, 96px) 0; border-top: 1px solid var(--border); }
+  h2 { font-size: clamp(26px, 3vw, 34px); letter-spacing: -.8px; line-height: 1.15; }
+  .w-sequence { list-style: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 32px; margin: 40px 0 0; padding: 0; counter-reset: none; }
+  .w-sequence li { position: relative; }
+  .w-num { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--border); font-size: 13px; color: var(--muted); background: var(--bg); position: relative; z-index: 1; }
+  .w-sequence li:not(:last-child)::after { content: ''; position: absolute; top: 15px; left: 38px; right: -24px; height: 1px; background: var(--border); }
+  .w-sequence h3 { margin-top: 18px; font-size: 17px; letter-spacing: -.2px; }
+  .w-sequence p { margin: 8px 0 0; font-size: 14.5px; color: var(--muted); }
+
+  .w-code { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: clamp(32px, 5vw, 72px); align-items: center; }
+  .w-code-copy p { margin: 18px 0 0; font-size: 16px; color: var(--muted); max-width: 32em; }
+  .w-shell { margin: 24px 0 0; padding: 14px 16px; border-radius: 12px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--border);
+    font: 13.5px/1.7 ui-monospace, 'SF Mono', Menlo, monospace; overflow-x: auto; }
+  .w-term { border-radius: 14px; background: #0f0f10; color: #e6e6e6; box-shadow: inset 0 0 0 1px #2a2a2c, 0 30px 80px -40px rgb(0 0 0 / 70%); overflow: hidden; }
+  .w-term-bar { display: flex; gap: 7px; padding: 12px 14px; border-bottom: 1px solid #222; }
+  .w-term-bar span { width: 10px; height: 10px; border-radius: 50%; background: #333; }
+  .w-term pre { margin: 0; padding: 18px 20px 22px; font: 13px/1.75 ui-monospace, 'SF Mono', Menlo, monospace; overflow-x: auto; }
+  .t-dim { color: #8a8a8a; }
+  .t-ok { color: #6fcf9c; }
+
+  .w-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 30px 56px; margin: 40px 0 0; }
+  .w-list dt { display: flex; align-items: center; gap: 10px; font-weight: 500; font-size: 16px; }
+  .w-list dt :global(svg) { color: var(--muted); }
+  .w-list dd { margin: 6px 0 0 27px; color: var(--muted); font-size: 14.5px; max-width: 34em; }
+
+  .w-end { text-align: center; }
+  .w-end .w-cta { justify-content: center; }
+  .w-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; max-width: 1180px; margin: 0 auto;
+    padding: 24px clamp(16px, 4vw, 48px) 40px; font-size: 13px; color: var(--subtle); border-top: 1px solid var(--border); }
+  .w-foot .w-brand { color: var(--text); }
+
+  :global(:root[data-theme='light']) .w-step-ok .w-dot { background: #2f8f64; }
+  :global(:root[data-theme='light']) .w-step-skip .w-dot { box-shadow: inset 0 0 0 1.5px #a87a24; }
+  :global(:root[data-theme='light']) .w-router { box-shadow: inset 0 0 0 1px var(--border), 0 30px 70px -45px rgb(0 0 0 / 25%); }
+
+  @media (max-width: 900px) {
+    .w-nav { display: none; }
+    .w-hero, .w-code { grid-template-columns: minmax(0, 1fr); }
+    .w-sequence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .w-sequence li:nth-child(2)::after { display: none; }
+  }
+  @media (max-width: 560px) {
+    .w-top { gap: 12px; }
+    .w-top-actions { gap: 12px; margin-left: auto; }
+    .w-hero h1 { letter-spacing: -1.4px; }
+    .w-lede { font-size: 16.5px; }
+    .w-sequence, .w-list { grid-template-columns: minmax(0, 1fr); }
+    .w-sequence li::after { display: none; }
+    .w-list dd { margin-left: 0; }
+    .w-panel { padding: 18px 16px 14px; }
+    .w-router-head { padding: 12px 14px; }
+    .w-caption { padding: 12px 16px 14px; }
+  }
+</style>
