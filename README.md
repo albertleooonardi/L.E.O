@@ -1,18 +1,18 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/leo-banner-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/leo-banner-light.png">
-  <img alt="L.E.O — LLM Efficiency Orchestrator. Your free and local models, routed like a pro plan." src="docs/assets/leo-banner-dark.png" width="100%">
-</picture>
+# L.E.O.
 
-<br>
+**LLM Efficiency Orchestrator**
+
+Use your free and local models like a pro subscription.
 
 ![Status: work in progress](https://img.shields.io/badge/status-work%20in%20progress-orange)
 ![Tests: 396 passing](https://img.shields.io/badge/tests-396%20passing-brightgreen)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB)
 ![Astro 7](https://img.shields.io/badge/frontend-Astro%207-BC52EE)
 ![Runs locally](https://img.shields.io/badge/runs-locally-555)
+
+![The L.E.O chat page: "What's on your mind?" with the message box and Auto · L.E.O. decides](docs/screenshots/chat-home.jpg)
 
 **[Quick start](#quick-start)** · **[Architecture](#architecture)** · **[The harness algorithm](#the-harness-algorithm)** · **[Tech stack](#tech-stack)** · **[Screenshots](#screenshots)** · **[Benchmarks](#benchmarks)**
 
@@ -751,5 +751,4 @@ Interactive API docs are at `/api/docs` while the backend runs. Requirements and
 ---
 
 <sub>L.E.O. is a work in progress; issues and suggestions are welcome. No license has been chosen yet, so all rights are
-reserved by the author until one is added. The banner uses the app's logo, the spark mark from
-[`frontend/public/favicon.svg`](frontend/public/favicon.svg); the mark alone is in [`docs/assets/`](docs/assets) as SVG.</sub>
+reserved by the author until one is added.</sub>
