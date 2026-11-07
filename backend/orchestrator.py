@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import uuid
+from urllib.parse import urlsplit
 
 from . import providers, tools
 from .context import parse_plan, parse_review, prepare_context, static_review, token_bound
@@ -17,8 +18,17 @@ FREE_ATTEMPTS = 3
 # A rate-limited first choice that asks for a short wait is retried once instead of falling back to a weaker model.
 RATE_LIMIT_WAIT = 20
 
+# A server where nothing answers is skipped, with every model on it, for this long.
+UNREACHABLE_COOLDOWN = 60
+
 # Consecutive retryable failures per connection (this worker process); each one doubles the cooldown.
 _strikes: dict[str, int] = {}
+
+
+def server_of(provider):
+    """Where a model is served: models relayed through L.E.O. all sit behind the user's one 9Router, others behind their host."""
+    url = provider["base_url"]
+    return url.split("/api/cli/relay/")[0] + " relay" if "/api/cli/relay/" in url else urlsplit(url).netloc
 
 
 class Cancelled(Exception):
@@ -160,6 +170,19 @@ class Orchestrator:
         name = provider["name"].split(" · ")[0]
         self.store.event(self.id, "warning", {"message": f"{name}: the limit for this account is used up. Skipping "
                                                          f"{f'it and {others} other models' if others else 'it'} for {wait_words(exc.shared_seconds)}."})
+        return rest
+
+    def skip_unreachable(self, provider, error, queue):
+        """Nothing answers where this model is served: cool it and every model on the same server down, say so once, and
+        return the rest of `queue`. Trying each one in turn would only fail the same way."""
+        server = server_of(provider)
+        rest = [p for p in queue if server_of(p) != server]
+        for p in [provider, *(p for p in queue if server_of(p) == server)]:
+            self.store.cooldown(p["id"], UNREACHABLE_COOLDOWN)
+        others = len(queue) - len(rest)
+        name = provider["name"].split(" · ")[0]
+        self.store.event(self.id, "warning", {"message": f"{name}: {error.rstrip('.')}. Skipping {f'it and {others} other models there' if others else 'it'} "
+                                                         f"for a minute." + (" Trying the next eligible connection." if rest else "")})
         return rest
 
     async def research(self, key, queries, urls):
@@ -355,6 +378,10 @@ class Orchestrator:
                 if isinstance(exc, providers.ProviderError) and exc.shared_seconds:
                     errors.append(f"{provider['name'].split(' · ')[0]}: the limit for this account is used up")
                     queue = self.hit_shared_limit(provider, exc, queue)
+                    continue
+                if isinstance(exc, providers.ProviderError) and exc.unreachable:
+                    errors.append(f"{provider['name']}: {error}")
+                    queue = self.skip_unreachable(provider, error, queue)
                     continue
                 if (isinstance(exc, providers.ProviderError) and "HTTP 429" in error and provider is choices[0] and not waited
                         and exc.retry_after <= RATE_LIMIT_WAIT):

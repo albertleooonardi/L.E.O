@@ -35,6 +35,8 @@ LABEL = "leo.session"
 # Each user's own 9Router. A separate label, so the sandbox idle reaper never stops them.
 ROUTER_LABEL = "leo.router"
 ROUTER_PORT = 20128
+# Docker refusing to start a container whose network no longer exists.
+STALE_NETWORK = re.compile(r"network [0-9a-f]+ not found", re.I)
 
 
 def _bytes(value):
@@ -347,6 +349,28 @@ def create_app(settings=None, docker_transport=None):
         """Create or start the user's 9Router. Its volume keeps signed-in accounts; the password applies on first start."""
         name = router_name(uid)
         adopted = False
+
+        async def create():
+            spec = {"Image": settings.router_image, "Hostname": "router", "Labels": {ROUTER_LABEL: uid},
+                    "Env": ["DATA_DIR=/app/data", f"INITIAL_PASSWORD={body.password}"],
+                    "HostConfig": {"Mounts": [{"Type": "volume", "Source": name, "Target": "/app/data"}],
+                                   "Memory": settings.router_memory, "MemorySwap": settings.router_memory, "NanoCpus": int(1e9),
+                                   # Its entrypoint chowns the volume and drops to the `node` user with su-exec; nothing else.
+                                   "PidsLimit": 256, "CapDrop": ["ALL"], "CapAdd": ["CHOWN", "SETUID", "SETGID"],
+                                   "SecurityOpt": ["no-new-privileges"],
+                                   "NetworkMode": settings.router_network, "Init": True,
+                                   # It refreshes account tokens in the background, so it keeps running.
+                                   "RestartPolicy": {"Name": "unless-stopped"}}}
+            for attempt in range(2):
+                try:
+                    await docker.request("POST", "/containers/create", params={"name": name}, json=spec)
+                    return
+                except DockerError as exc:
+                    if exc.status == 404 and not attempt:
+                        await pull(settings.router_image)
+                    elif exc.status != 409:  # 409: another request created it first.
+                        raise
+
         async with locks.setdefault(name, asyncio.Lock()):
             info = await docker.inspect(name)
             if info and (info.get("Config", {}).get("Labels") or {}).get(ROUTER_LABEL) != uid:
@@ -355,28 +379,19 @@ def create_app(settings=None, docker_transport=None):
                 await docker.request("POST", "/volumes/create", json={"Name": name, "Labels": {ROUTER_LABEL: uid}})
                 if body.adopt_legacy:
                     adopted = await adopt_legacy(name)
-                spec = {"Image": settings.router_image, "Hostname": "router", "Labels": {ROUTER_LABEL: uid},
-                        "Env": ["DATA_DIR=/app/data", f"INITIAL_PASSWORD={body.password}"],
-                        "HostConfig": {"Mounts": [{"Type": "volume", "Source": name, "Target": "/app/data"}],
-                                       "Memory": settings.router_memory, "MemorySwap": settings.router_memory, "NanoCpus": int(1e9),
-                                       # Its entrypoint chowns the volume and drops to the `node` user with su-exec; nothing else.
-                                       "PidsLimit": 256, "CapDrop": ["ALL"], "CapAdd": ["CHOWN", "SETUID", "SETGID"],
-                                       "SecurityOpt": ["no-new-privileges"],
-                                       "NetworkMode": settings.router_network, "Init": True,
-                                       # It refreshes account tokens in the background, so it keeps running.
-                                       "RestartPolicy": {"Name": "unless-stopped"}}}
-                for attempt in range(2):
-                    try:
-                        await docker.request("POST", "/containers/create", params={"name": name}, json=spec)
-                        break
-                    except DockerError as exc:
-                        if exc.status == 404 and not attempt:
-                            await pull(settings.router_image)
-                        elif exc.status != 409:  # 409: another request created it first.
-                            raise
+                await create()
                 info = await docker.inspect(name)
             if not info["State"]["Running"]:
-                await docker.request("POST", f"/containers/{name}/start", ok=(304,))
+                try:
+                    await docker.request("POST", f"/containers/{name}/start", ok=(304,))
+                except DockerError as exc:
+                    if not STALE_NETWORK.search(str(exc)):
+                        raise
+                    # Its network was recreated since (docker compose down and up), and a container keeps the old network's ID, so
+                    # it can never start again. Accounts live in the volume: a new container on the current network takes its place.
+                    await docker.request("DELETE", f"/containers/{name}", ok=(404,), params={"force": "true"})
+                    await create()
+                    await docker.request("POST", f"/containers/{name}/start", ok=(304,))
         return {"url": f"http://{name}:{ROUTER_PORT}", "status": "running", "adopted": adopted}
 
     async def adopt_legacy(volume):

@@ -150,3 +150,22 @@ def test_models_on_one_limit_share_a_group():
     relay = {'base_url': 'http://localhost:8000/api/cli/relay/1', 'model': 'cx/gpt-6-sol'}
     assert group(relay) == group({'base_url': 'http://localhost:8000/api/cli/relay/2', 'model': 'cx/gpt-5.6-luna'}), 'one account through a router'
     assert group(relay) != group({**relay, 'model': 'gh/gpt-4.1'}), 'another account on the same router'
+
+
+def test_a_relay_error_shows_its_reason_and_a_down_router_is_unreachable():
+    """L.E.O.'s relay answers like FastAPI ({"detail": ...}); its reason must reach the user, not just "HTTP 502"."""
+    with pytest.raises(providers.ProviderError) as found:
+        providers.check_status(limited(502, '{"detail":"Your 9Router is not reachable from the L.E.O. server"}'))
+    assert 'Your 9Router is not reachable' in str(found.value) and found.value.unreachable
+    with pytest.raises(providers.ProviderError) as found:
+        providers.check_status(limited(502, '{"error":{"message":"Upstream provider returned an error"}}'))
+    assert not found.value.unreachable, 'one model failing upstream says nothing about its neighbours'
+
+
+async def test_nothing_answering_at_an_address_is_unreachable():
+    def refuse(request):
+        raise httpx.ConnectError('Connection refused', request=request)
+    provider = {'protocol': 'openai', 'base_url': 'http://router.test/v1', 'model': 'cx/gpt'}
+    with pytest.raises(providers.ProviderError) as found:
+        [c async for c in stream(provider, 'k', [{'role': 'user', 'content': 'Hi'}], 64, 10, httpx.MockTransport(refuse))]
+    assert found.value.unreachable and found.value.retryable

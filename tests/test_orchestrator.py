@@ -459,3 +459,23 @@ async def test_page_builds_get_verified_photos_and_other_requests_do_not(store):
         return httpx.Response(200, json={'query': {'pages': {}}})
     result = await execute(store, make_run(store, prompt='Build a website about coffee'), lambda r: sse_response('<html><body>Hi</body></html>'))
     assert result['status'] == 'completed'
+
+
+async def test_an_unreachable_server_is_skipped_with_all_its_models(store):
+    """Every model behind one stopped server fails the same way: one attempt, one warning, then the next server."""
+    on_router = [store.save_connection(Connection(name=f'ChatGPT (Codex) · gpt-{n}', base_url='http://router.test/v1', model=f'cx/gpt-{n}', free=True,
+                                                  priority=n).model_dump(), user_id=store.user_id) for n in (1, 2, 3)]
+    store.save_connection(Connection(name='Backup', base_url='http://backup.test/v1', model='backup', free=True, priority=50).model_dump(), user_id=store.user_id)
+    tried = []
+    def handler(request):
+        tried.append(request.url.host)
+        if request.url.host == 'router.test':
+            raise httpx.ConnectError('Connection refused', request=request)
+        return sse_response('Recovered')
+    result = await execute(store, make_run(store), handler)
+    assert result['output'] == 'Recovered'
+    assert tried == ['router.test', 'backup.test'], 'one attempt on the stopped server, not one per model'
+    for connection in on_router:
+        assert store.get_connection(connection['id'], store.user_id)['cooldown_until'] > time.time() + 50
+    [warning] = [e['data']['message'] for e in store.get_events(result['id']) if e['kind'] == 'warning']
+    assert warning.startswith('ChatGPT (Codex): Cannot reach the provider') and 'Skipping it and 2 other models there for a minute' in warning

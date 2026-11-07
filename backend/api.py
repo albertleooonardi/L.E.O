@@ -64,6 +64,9 @@ CLI_CONNECTOR_PREFIX = "/api/cli/connectors/"
 CLI_ACCOUNTS_PREFIX = "/api/cli/accounts"
 RELAY_PATHS = {"chat/completions", "responses", "models"}
 MAX_RELAY_BYTES = 32 * 1024 * 1024
+# A stopped 9Router is started again by the relay; this long it may take to answer once started.
+ROUTER_BOOT_SECONDS = 60
+ROUTER_UNREACHABLE = "Your 9Router is not reachable from the L.E.O. server"
 LEGACY_ROUTER = "http://9router:20128"  # The shared 9router service of earlier versions (one per server, not per user).
 # OAuth start and callback check the session themselves when linking.
 PUBLIC_API_PREFIXES = ("/api/auth/oauth/",)
@@ -876,12 +879,34 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
         client = httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10), trust_env=False, transport=relay_transport)
         headers = {"Authorization": f"Bearer {store.decrypt(c)}", "Content-Type": request.headers.get("content-type", "application/json"),
                    "Accept": request.headers.get("accept", "*/*")}
+
+        async def send():
+            return await client.send(client.build_request(request.method, f"{c['base_url'].rstrip('/')}/{path}", content=body or None,
+                                                          headers=headers), stream=True)
+
         try:
-            upstream = await client.send(client.build_request(request.method, f"{c['base_url'].rstrip('/')}/{path}", content=body or None,
-                                                              headers=headers), stream=True)
+            try:
+                upstream = await send()
+            except httpx.ConnectError:
+                # Nothing listens: the router container stopped (Docker restarted, or it crashed). Start it, then retry while it boots.
+                if not sandbox:
+                    raise
+                await sandbox.ensure_router(uid, router["password"])
+                deadline = time.monotonic() + ROUTER_BOOT_SECONDS
+                while True:
+                    try:
+                        upstream = await send()
+                        break
+                    except httpx.ConnectError:
+                        if time.monotonic() > deadline:
+                            raise
+                        await asyncio.sleep(1)
+        except SandboxError as exc:
+            await client.aclose()
+            raise HTTPException(502, f"{ROUTER_UNREACHABLE}, and starting it again failed: {exc}") from exc
         except httpx.HTTPError as exc:
             await client.aclose()
-            raise HTTPException(502, "Your 9Router is not reachable from the L.E.O. server") from exc
+            raise HTTPException(502, ROUTER_UNREACHABLE) from exc
 
         async def answer():
             try:

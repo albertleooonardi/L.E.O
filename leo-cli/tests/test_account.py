@@ -146,6 +146,50 @@ async def test_chatgpt_models_on_the_server_work_through_the_relay(account, serv
     assert str(call.url) == 'http://leo-router-a:20128/v1/chat/completions' and call.headers['authorization'] == 'Bearer sk-9r'
 
 
+async def test_the_relay_starts_a_stopped_router_and_still_answers(tmp_path, monkeypatch, server):
+    """The router container stopped (Docker restarted, or it crashed): the relay starts it again and the call goes through."""
+    from backend import providers
+    from backend.sandbox import SandboxError
+    monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
+    started = []
+
+    class Sandboxd:
+        def __init__(self, fails=False):
+            self.fails = fails
+
+        async def ensure_router(self, user_id, password, adopt_legacy=False):
+            if self.fails:
+                raise SandboxError('Cannot reach the sandbox service; is the sandboxd container running?')
+            started.append((user_id, password))
+            return 'http://leo-router-a:20128'
+
+    def router(request):  # Refuses connections until sandboxd has started it.
+        if not started:
+            raise httpx.ConnectError('Connection refused', request=request)
+        return httpx.Response(200, headers={'content-type': 'text/event-stream'},
+                              content=b'data: {"choices":[{"delta":{"content":"hi again"}}]}\n\ndata: [DONE]\n\n')
+
+    for fails in (False, True):
+        started.clear()
+        app = create_app(server['store'].config, server['store'], sandbox=Sandboxd(fails), relay_transport=httpx.MockTransport(router))
+        account = Account(tmp_path / f'home-{fails}', transport=httpx.ASGITransport(app=app))
+        with TestClient(app) as browser:
+            browser.cookies.set('leo_session', Auth(server['store'], server['store'].config).create_session(server['user']['id']))
+
+            def allow(code, url):
+                assert browser.post(f'/api/cli/device/{code}', json={'approve': True}).status_code == 200
+            await account.login('http://testserver', show=allow, sleep=no_wait)
+            codex = next(c for c in account.store().list_connections(account.user_id, private=True) if c['model'] == 'cx/gpt')
+            request = providers.stream(codex, account.store().decrypt(codex), [{'role': 'user', 'content': 'hi'}], 100, 30, account.transport)
+            if not fails:
+                assert ''.join([chunk.text async for chunk in request]) == 'hi again'
+                assert started == [(server['user']['id'], 'p' * 24)], 'started once, with the password it was created with'
+            else:
+                with pytest.raises(providers.ProviderError) as found:
+                    [chunk async for chunk in request]
+                assert 'starting it again failed: Cannot reach the sandbox service' in str(found.value) and found.value.unreachable
+
+
 async def test_the_relay_only_reaches_the_users_own_router_and_only_for_model_calls(account, server):
     await account.login('http://testserver', show=approver(server), sleep=no_wait)
     token = account.secrets.get('device-token')

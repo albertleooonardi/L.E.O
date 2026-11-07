@@ -10,15 +10,18 @@ import httpx
 
 # A limit on the whole account, not on the one model that happened to hit it.
 SHARED_LIMIT = re.compile(r"free-models-per-day|usage limit has been reached", re.I)
+# L.E.O.'s relay saying the user's 9Router is down: every model behind it is, not just this one.
+ROUTER_DOWN = re.compile(r"9Router is not reachable", re.I)
 
 
 class ProviderError(Exception):
-    def __init__(self, message, retryable=False, retry_after=0, shared_seconds=None, limit=None):
+    def __init__(self, message, retryable=False, retry_after=0, shared_seconds=None, limit=None, unreachable=False):
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
         self.shared_seconds = shared_seconds  # A SHARED_LIMIT: seconds until it comes back.
         self.limit = limit  # Requests that limit allows, when the provider says.
+        self.unreachable = unreachable  # Nothing answers at this address, so no model behind it can either.
 
 
 def quota_group(provider):
@@ -188,8 +191,11 @@ def provider_detail(response):
     try:
         data = response.json()
         # Gemini's OpenAI-compatible API wraps errors in a one-item list.
-        error = (data[0] if isinstance(data, list) and data else data).get("error")
+        body = data[0] if isinstance(data, list) and data else data
+        error = body.get("error")
         message = error.get("message") if isinstance(error, dict) else error
+        if not message and isinstance(body.get("detail"), str):
+            message = body["detail"]  # FastAPI's shape, which L.E.O.'s own relay answers with.
         if isinstance(error, dict) and isinstance(error.get("metadata"), dict) and isinstance(error["metadata"].get("raw"), str):
             message = f"{message}: {error['metadata']['raw']}"
     except (ValueError, AttributeError):
@@ -222,7 +228,7 @@ def check_status(response):
         hint = "Provider credits or billing are exhausted; add credits in the provider's console"
     shared, limit = (shared_reset(response, detail), response.headers.get("x-ratelimit-limit", "")) if SHARED_LIMIT.search(detail) else (None, "")
     raise ProviderError(f"{hint} (HTTP {code}){': ' + detail if detail else ''}", code in {408, 429} or code >= 500, retry_after, shared,
-                        int(limit) if limit.isdigit() else None)
+                        int(limit) if limit.isdigit() else None, unreachable=code == 502 and bool(ROUTER_DOWN.search(detail)))
 
 
 def usage_chunk(usage):
@@ -316,6 +322,8 @@ async def stream(provider, key, messages, max_tokens, timeout, transport=None, e
                     yield chunk
         if not finished:
             raise ProviderError("Provider stream ended before completion", True)
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        raise ProviderError("Cannot reach the provider; check its URL and that the server is running", True, unreachable=True) from exc
     except httpx.TimeoutException as exc:
         raise ProviderError("Provider timed out", True) from exc
     except httpx.HTTPError as exc:

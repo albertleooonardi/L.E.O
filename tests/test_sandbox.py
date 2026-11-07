@@ -195,7 +195,10 @@ class FakeDocker:
             self.images.add(f"{request.url.params['fromImage']}:{request.url.params['tag']}")
             return httpx.Response(200, content=b'{"status":"Downloaded"}')
         if path.endswith('/start') and path.startswith('/containers/'):
-            self.containers[path.split('/')[2]]['State']['Running'] = True
+            container = self.containers[path.split('/')[2]]
+            if container.get('stale_network'):  # Created before its network was recreated: Docker cannot start it.
+                return httpx.Response(500, json={'message': 'failed to set up container networking: network 72373199ddff not found'})
+            container['State']['Running'] = True
             return httpx.Response(204)
         if path.endswith('/exec'):
             self.exec_spec = json.loads(request.content)
@@ -286,6 +289,20 @@ def test_sandboxd_runs_one_locked_down_router_per_user(sandboxd):
     assert client.delete(f'/routers/{UID}').json() == {'ok': True}
     assert ('DELETE', f'/containers/leo-router-{UID}') in docker.calls
     assert not any(path.startswith('/volumes/') and method == 'DELETE' for method, path in docker.calls), 'accounts stay in the volume'
+
+
+def test_sandboxd_replaces_a_router_whose_network_was_recreated(sandboxd):
+    """After docker compose down and up, a stopped router still names the old network and can never start: it is
+    created again on the current network, keeping its volume (the signed-in accounts)."""
+    client, docker = sandboxd
+    client.put(f'/routers/{UID}', json={'password': 'p' * 24})
+    name = f'leo-router-{UID}'
+    docker.containers[name].update({'State': {'Running': False}, 'stale_network': True})
+    assert client.put(f'/routers/{UID}', json={'password': 'p' * 24}).json()['status'] == 'running'
+    assert docker.containers[name]['State']['Running'] and not docker.containers[name].get('stale_network')
+    assert docker.calls.count(('POST', '/containers/create')) == 2 and ('DELETE', f'/containers/{name}') in docker.calls
+    assert not any(method == 'DELETE' and path.startswith('/volumes/') for method, path in docker.calls), 'the accounts stay'
+    assert docker.specs[name]['HostConfig']['Mounts'][0]['Source'] == name
 
 
 def test_sandboxd_starts_a_new_router_from_a_copy_of_the_old_shared_one(monkeypatch):
