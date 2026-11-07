@@ -3,7 +3,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.png">
-  <img alt="L.E.O. — LLM Efficiency Orchestrator. Free and local models, routed like a pro plan." src="docs/assets/banner-dark.png" width="100%">
+  <img alt="L.E.O — LLM Efficiency Orchestrator. Your free and local models, routed like a pro plan." src="docs/assets/banner-dark.png" width="100%">
 </picture>
 
 <br>
@@ -23,13 +23,6 @@ includes Ollama, LM Studio, vLLM, every free model on OpenRouter, Gemini AI Stud
 paid APIs such as Claude if you allow them. A **routing head (HEAD)** reads each task, decides which skill it needs and
 how hard it is, and sends it to the cheapest model that can do it well, at a matching thinking effort. Where checking
 pays off, it adds a review by a different model.
-
-![L.E.O Chat: a request in Auto mode, and the page it produced in the live preview](docs/screenshots/hero.jpg)
-
-<sub>*"Create me a minimalist, clean dan informatic landing page about coffee"* in Auto mode. HEAD saw one
-self-contained page and chose `Auto → quick · frontend · standard`: one call to a free model (Gemini 2.5 Flash), 9,206
-tokens, 36 s. The page uses real Wikimedia photos with their photographers credited, and runs in the sandboxed preview
-at desktop width. *(Real run)*</sub>
 
 > [!WARNING]
 > **Work in progress.** Everything below runs end to end and is covered by tests, but routing rules, defaults, and the
@@ -401,6 +394,13 @@ are **at least once**: a crash during a request can send it again, so this is no
 All screenshots were taken on 7 November 2026 from the current code. The web screenshots show real data from a QA
 workspace; the terminal screenshots are described one by one.
 
+![L.E.O Chat: a request in Auto mode, and the page it produced in the live preview](docs/screenshots/hero.jpg)
+
+<sub>*"Create me a minimalist, clean dan informatic landing page about coffee"* in Auto mode. HEAD saw one
+self-contained page and chose `Auto → quick · frontend · standard`: one call to a free model (Gemini 2.5 Flash), 9,206
+tokens, 36 s. The page uses real Wikimedia photos with their photographers credited, and runs in the sandboxed preview
+at desktop width. *(Real run)*</sub>
+
 | Reviewed coding answer | Per-chat usage |
 | --- | --- |
 | ![A coding request answered in Reviewed mode](docs/screenshots/chat-reviewed.jpg) | ![The usage panel of one chat](docs/screenshots/chat-usage.jpg) |
@@ -751,5 +751,5 @@ Interactive API docs are at `/api/docs` while the backend runs. Requirements and
 ---
 
 <sub>L.E.O. is a work in progress; issues and suggestions are welcome. No license has been chosen yet, so all rights are
-reserved by the author until one is added. The banner is drawn from L.E.O.'s block-letter logo; the logo alone is in
-[`docs/assets/`](docs/assets) as SVG.</sub>
+reserved by the author until one is added. The banner uses the app's logo, the spark mark from
+[`frontend/public/favicon.svg`](frontend/public/favicon.svg); the mark alone is in [`docs/assets/`](docs/assets) as SVG.</sub>
