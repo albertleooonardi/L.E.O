@@ -9,11 +9,11 @@ STYLES = ("accent", "muted", "ok", "warn", "error", "brand")
 
 THEMES = {
     "dark": {
-        "label": "Dark", "description": "soft blues and violet, for a dark terminal",
+        "label": "Dark", "description": "neutral text and a quiet blue accent",
         "banner": ["#7dd3fc", "#67c6f9", "#5ab8f5", "#60a5fa", "#818cf8", "#a78bfa"],
-        "accent": "#67c6f9", "muted": "grey58", "ok": "#4ade80", "warn": "#facc15", "error": "#f87171", "brand": "#60a5fa",
-        "code": "monokai", "select": "#67c6f9 bold",
-        "pt": {"accent": "#67c6f9", "muted": "#8a8a8a", "ok": "#4ade80", "warn": "#facc15", "error": "#f87171"},
+        "accent": "#b5cce0", "muted": "#a6a6a6", "ok": "#85bea1", "warn": "#d8b47c", "error": "#e19191", "brand": "#e7e7e7",
+        "code": "monokai", "select": "#b5cce0 bold",
+        "pt": {"accent": "#b5cce0", "muted": "#a6a6a6", "ok": "#85bea1", "warn": "#d8b47c", "error": "#e19191"},
     },
     "light": {
         "label": "Light", "description": "deeper blues and violet, for a light terminal",

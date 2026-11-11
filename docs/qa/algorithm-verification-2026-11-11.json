@@ -1,0 +1,486 @@
+{
+  "audit": [
+    {
+      "name": "strongest_fallback_when_no_model_meets_difficulty",
+      "passed": false,
+      "expected": "Standard generalist",
+      "actual": "Light specialist",
+      "reason": "has the coding skill; strongest available (light) for strong work; free"
+    },
+    {
+      "name": "assigned_reviewer_must_not_be_the_writer",
+      "passed": false,
+      "expected": "a different model",
+      "actual": "writer",
+      "reason": "assigned in Settings"
+    },
+    {
+      "name": "ranking_is_independent_of_input_order",
+      "passed": true
+    },
+    {
+      "name": "plan_contains_only_backward_dependencies",
+      "passed": true,
+      "parsed": []
+    },
+    {
+      "name": "valid_dependency_plan_is_preserved",
+      "passed": true
+    }
+  ],
+  "live": {
+    "probes": [
+      {
+        "model": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+        "tier": "strong",
+        "passed": true,
+        "tool_calls": [
+          {
+            "id": "call-1eee2b10-0d2d-4c3f-8d6a-7ffdaf2a2e9a",
+            "name": "report_probe",
+            "arguments": {
+              "answer": "OK"
+            }
+          }
+        ],
+        "text": "",
+        "seconds": 14.28
+      },
+      {
+        "model": "openrouter/google/gemma-4-31b-it:free",
+        "tier": "standard",
+        "passed": false,
+        "error": "Provider request failed (HTTP 503): [openrouter/google/gemma-4-31b-it:free] [429]: {\"error\":{\"message\":\"Provider returned error\",\"code\":429,\"metadata\":{\"raw\":\"google/gemma-4-31b-it:free is temporarily rate-limited upstream. Please retry shortly, or add your own provider key t",
+        "seconds": 0.41
+      },
+      {
+        "model": "openrouter/cohere/north-mini-code:free",
+        "tier": "light",
+        "passed": true,
+        "tool_calls": [
+          {
+            "id": "report_probe_kstnp95dh2cz",
+            "name": "report_probe",
+            "arguments": {
+              "answer": "OK"
+            }
+          }
+        ],
+        "text": "",
+        "seconds": 0.69
+      },
+      {
+        "model": "openrouter/recursive/flint-v1.0:free",
+        "tier": "standard",
+        "passed": true,
+        "tool_calls": [
+          {
+            "id": "call_aa11deca0b9747dea40fda88",
+            "name": "report_probe",
+            "arguments": {
+              "answer": "OK"
+            }
+          }
+        ],
+        "text": "",
+        "seconds": 2.45
+      }
+    ],
+    "tree": {
+      "status": "completed",
+      "output": "Done. The task is complete:\n\n**Structure used:** root (me) \u2192 manager (coding, size=normal) \u2192 one worker (coding, size=normal).\n\n**What was done:**\n- The manager delegated exactly one coding worker to create `clamp.py` and `test_clamp.py` in `/private/tmp/leo-algorithm-qa-2026-11-11/live-kwuyppzi/workspace`.\n- `clamp.py` implements `clamp(value, lower, upper)`: returns `lower` when `value < lower`, `upper` when `value > upper`, otherwise `value`; raises `ValueError` when `lower > upper`.\n- `test_clamp.py` uses unittest with 6 cases covering below/at/above bounds and invalid bounds.\n- Tests were run: **6 passed, OK** (via `python3` since the `python` binary wasn't available on this macOS system \u2014 a justified environment adaptation).\n- The manager inspected the evidence and called `review_work` to accept the worker; I then called `review_work` to accept the manager before this final answer.\n\n**Verification:** All 6 unittest cases passed with exit code 0; no dependencies, no network, no extra files added.",
+      "nodes": [
+        {
+          "id": "main",
+          "parent": null,
+          "kind": "root",
+          "level": 0,
+          "tier": "strong",
+          "model": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+          "status": "done",
+          "attempt": 1,
+          "reviews": [],
+          "files": [],
+          "commands": []
+        },
+        {
+          "id": "sub-530d7184",
+          "parent": "main",
+          "kind": "manager",
+          "level": 1,
+          "tier": "standard",
+          "model": "openrouter/recursive/flint-v1.0:free",
+          "status": "accepted",
+          "attempt": 1,
+          "reviews": [
+            "call-c4394928-57f4-47b5-a4d1-949547464c14"
+          ],
+          "files": [],
+          "commands": []
+        },
+        {
+          "id": "sub-761acd95",
+          "parent": "sub-530d7184",
+          "kind": "worker",
+          "level": 2,
+          "tier": "light",
+          "model": "openrouter/cohere/north-mini-code:free",
+          "status": "accepted",
+          "attempt": 1,
+          "reviews": [
+            "call_6603fac4aef242939338f301"
+          ],
+          "files": [
+            "clamp.py",
+            "test_clamp.py"
+          ],
+          "commands": [
+            {
+              "command": "cd /private/tmp/leo-algorithm-qa-2026-11-11/live-kwuyppzi/workspace && python -m unittest -v",
+              "exit": "exit code 127",
+              "tail": [
+                "/opt/homebrew/bin/bash: line 1: python: command not found"
+              ]
+            },
+            {
+              "command": "which python3",
+              "exit": "exit code 0",
+              "tail": [
+                "/usr/bin/python3"
+              ]
+            },
+            {
+              "command": "cd /private/tmp/leo-algorithm-qa-2026-11-11/live-kwuyppzi/workspace && python3 -m unittest -v",
+              "exit": "exit code 0",
+              "tail": [
+                "----------------------------------------------------------------------",
+                "Ran 6 tests in 0.000s",
+                "OK"
+              ]
+            }
+          ]
+        }
+      ],
+      "calls": [
+        {
+          "model": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+          "stage": "agent:main:1",
+          "status": "completed",
+          "input_tokens": 5650,
+          "output_tokens": 507,
+          "elapsed_ms": 19895
+        },
+        {
+          "model": "openrouter/recursive/flint-v1.0:free",
+          "stage": "agent:sub-530d7184:1",
+          "status": "completed",
+          "input_tokens": 5471,
+          "output_tokens": 286,
+          "elapsed_ms": 3147
+        },
+        {
+          "model": "openrouter/recursive/flint-v1.0:free",
+          "stage": "agent:sub-530d7184:2",
+          "status": "completed",
+          "input_tokens": 5567,
+          "output_tokens": 223,
+          "elapsed_ms": 1922
+        },
+        {
+          "model": "openrouter/cohere/north-mini-code:free",
+          "stage": "agent:sub-761acd95:1",
+          "status": "completed",
+          "input_tokens": 5145,
+          "output_tokens": 183,
+          "elapsed_ms": 1015
+        },
+        {
+          "model": "openrouter/cohere/north-mini-code:free",
+          "stage": "agent:sub-761acd95:2",
+          "status": "completed",
+          "input_tokens": 5238,
+          "output_tokens": 318,
+          "elapsed_ms": 1674
+        },
+        {
+          "model": "openrouter/cohere/north-mini-code:free",
+          "stage": "agent:sub-761acd95:3",
+          "status": "completed",
+          "input_tokens": 5478,
+          "output_tokens": 260,
+          "elapsed_ms": 1337
+        },
+        {
+          "model": "openrouter/cohere/north-mini-code:free",
+          "stage": "agent:sub-761acd95:4",
+          "status": "completed",
+          "input_tokens": 5800,
+          "output_tokens": 275,
+          "elapsed_ms": 1271
+        },
+        {
+          "model": "openrouter/cohere/north-mini-code:free",
+          "stage": "agent:sub-761acd95:5",
+          "status": "completed",
+          "input_tokens": 6104,
+          "output_tokens": 72,
+          "elapsed_ms": 1054
+        },
+        {
+          "model": "openrouter/cohere/north-mini-code:free",
+          "stage": "agent:sub-761acd95:6",
+          "status": "completed",
+          "input_tokens": 6205,
+          "output_tokens": 12,
+          "elapsed_ms": 647
+        },
+        {
+          "model": "openrouter/cohere/north-mini-code:free",
+          "stage": "agent:sub-761acd95:7",
+          "status": "completed",
+          "input_tokens": 6275,
+          "output_tokens": 46,
+          "elapsed_ms": 652
+        },
+        {
+          "model": "openrouter/cohere/north-mini-code:free",
+          "stage": "agent:sub-761acd95:8",
+          "status": "completed",
+          "input_tokens": 6473,
+          "output_tokens": 62,
+          "elapsed_ms": 730
+        },
+        {
+          "model": "openrouter/recursive/flint-v1.0:free",
+          "stage": "agent:sub-530d7184:3",
+          "status": "completed",
+          "input_tokens": 6080,
+          "output_tokens": 535,
+          "elapsed_ms": 7251
+        },
+        {
+          "model": "openrouter/recursive/flint-v1.0:free",
+          "stage": "agent:sub-530d7184:4",
+          "status": "completed",
+          "input_tokens": 6279,
+          "output_tokens": 312,
+          "elapsed_ms": 3242
+        },
+        {
+          "model": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+          "stage": "agent:main:2",
+          "status": "completed",
+          "input_tokens": 6338,
+          "output_tokens": 376,
+          "elapsed_ms": 11925
+        },
+        {
+          "model": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+          "stage": "agent:main:3",
+          "status": "completed",
+          "input_tokens": 6523,
+          "output_tokens": 296,
+          "elapsed_ms": 4296
+        }
+      ],
+      "usage": {
+        "calls": 15,
+        "input_tokens": 88626,
+        "output_tokens": 3763,
+        "reserved_tokens": 0,
+        "estimated_cost": 0.0,
+        "estimated": false,
+        "uncertain_calls": 0,
+        "context_messages_omitted": 0,
+        "review_passed": null,
+        "static_checks": [],
+        "route": null
+      }
+    },
+    "acceptance": {
+      "passed": true,
+      "returncode": 0,
+      "output": "..\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n"
+    },
+    "checks": [
+      {
+        "name": "live_run_completed",
+        "passed": true
+      },
+      {
+        "name": "root_manager_worker_all_exercised",
+        "passed": true
+      },
+      {
+        "name": "all_three_tiers_exercised",
+        "passed": true
+      },
+      {
+        "name": "children_reviewed_and_accepted",
+        "passed": true
+      },
+      {
+        "name": "parent_roles_remained_read_only",
+        "passed": true
+      },
+      {
+        "name": "parent_links_form_a_tree",
+        "passed": true
+      },
+      {
+        "name": "worker_ran_passing_tests",
+        "passed": true
+      },
+      {
+        "name": "independent_acceptance",
+        "passed": true
+      }
+    ],
+    "resume": {
+      "before_status": "waiting",
+      "after_status": "completed",
+      "calls_before": 14,
+      "calls_after": 15,
+      "new_worker_calls": 0
+    },
+    "account_probes": [
+      {
+        "model": "cx/gpt-6-sol",
+        "tier": "standard",
+        "passed": true,
+        "tool_calls": [
+          {
+            "id": "call_995fb73dc24845ddb6607f4c52190d58",
+            "name": "report_probe",
+            "arguments": {
+              "answer": "OK"
+            }
+          }
+        ],
+        "text": "",
+        "seconds": 2.35
+      },
+      {
+        "model": "gcli/grok-4.7",
+        "tier": "standard",
+        "passed": true,
+        "tool_calls": [
+          {
+            "id": "call-a255a5c9-af3e-48af-85b4-6e94ef41a1cf-0",
+            "name": "report_probe",
+            "arguments": {
+              "answer": "OK"
+            }
+          }
+        ],
+        "text": "",
+        "seconds": 1.74
+      }
+    ]
+  },
+  "cascade": {
+    "status": "completed",
+    "output": "QA_OK",
+    "calls": [
+      {
+        "model": "openrouter/google/gemma-4-31b-it:free",
+        "stage": "generating",
+        "status": "failed",
+        "elapsed_ms": 582
+      },
+      {
+        "model": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+        "stage": "generating",
+        "status": "completed",
+        "elapsed_ms": 4972
+      }
+    ],
+    "fallback_observed": true,
+    "warnings": [
+      {
+        "message": "OpenRouter \u00b7 Google: Gemma 4 31B: Provider request failed (HTTP 503): [openrouter/google/gemma-4-31b-it:free] [429]: {\"error\":{\"message\":\"Provider returned error\",\"code\":429,\"metadata\":{\"raw\":\"google/gemma-4-31b-it:free is temporarily rate-limited upstream. Please retry shortly, or add your own provider key t. Trying the next eligible connection."
+      }
+    ]
+  },
+  "configuration": {
+    "enabled_models": 29,
+    "saved_tiers": {
+      "light": 1,
+      "strong": 3,
+      "standard": 25
+    },
+    "codex_tool_support_unverified": 20,
+    "codex_saved_tier_differs_from_current_heuristic": [
+      {
+        "model": "cx/gpt-5.6-luna",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-5.6-luna[1m]",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-5.6-sol",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-5.6-sol[1m]",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-5.6-terra",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-5.6-terra[1m]",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-6-astra",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-6-astra[1m]",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-6-luna",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-6-luna[1m]",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-6-sol",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-6-sol[1m]",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-6.1-sol",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      },
+      {
+        "model": "cx/gpt-6.1-terra",
+        "saved": "standard",
+        "current_heuristic": "strong"
+      }
+    ]
+  }
+}

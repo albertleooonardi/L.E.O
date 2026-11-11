@@ -24,8 +24,8 @@ from rich.table import Table
 from . import NAME, __version__, models, theme
 from .account import Account, AccountError, SignedOut
 from .mentions import attach
-from .ui import (ANSWERS, TERMINAL, App, Renderer, answers, approval_view, banner, choose_theme, clip_left, glyphs, home_path,
-                 key_hint, LOGO_WIDTH, models_table, parse_answer, pick, tree_panel)
+from .ui import (ANSWERS, TERMINAL, App, Renderer, answers, approval_view, choose_theme, clip_left, glyphs, home_path,
+                 key_hint, models_table, parse_answer, pick, tree_panel)
 
 COMMANDS = ("login", "logout", "sync", "models", "resume", "update")
 DEFAULT_SERVER = "http://localhost:8000"
@@ -45,6 +45,7 @@ def parser():
     p.add_argument("--server", help=f"L.E.O. server to sign in to (default {DEFAULT_SERVER})")
     p.add_argument("--name", help="a name for this device on the server (login)")
     p.add_argument("--version", action="version", version=f"leocode {__version__}")
+    p.add_argument('--no-color', action='store_true', help='plain output without colour (also respects NO_COLOR)')
     return p
 
 
@@ -68,7 +69,7 @@ def main(argv=None):
 
 async def dispatch(args, account=None, transport=None):
     account = account or Account()
-    theme.use(account.config().get("theme"))
+    theme.use('mono' if args.no_color or 'NO_COLOR' in os.environ else account.config().get("theme"))
     console = theme.apply(Console())
     command = args.command[0] if args.command else None
     try:
@@ -88,14 +89,19 @@ async def dispatch(args, account=None, transport=None):
         if command == "models" and args.command[1:] == ["add"]:
             return 0 if await models.add_model(account, console, transport) else 1
         if command == "models":
+            if args.command[1:] == ['rerank']:
+                summary = await account.rerank_models()
+                console.print(Text(f"Updated {summary['changed']} model profiles.", style='leo.ok'))
+                return 0
             if not account.store().list_connections(account.user_id):
                 console.print(SIGN_IN_FIRST)
                 return 1
-            console.print(models_table(account.store(), account.user_id, glyphs(console)))
+            console.print(models_table(account.store(), account.user_id, glyphs(console), query=' '.join(args.command[1:])))
             return 0
-        art = False
+        if not args.task and not sys.stdin.isatty():
+            console.print(Text('Interactive mode needs a terminal. Use leocode -p "your task" for scripts or pipes.', style='leo.warn'))
+            return 1
         if not args.task and not signed_in(account) and sys.stdin.isatty():
-            art = True  # The first run: sign in right here, like the other terminal agents, then start working.
             if not await first_sign_in(account, console, args.server, args.name):
                 return 0  # Quit from the welcome screen.
         if not await ready(account, console, interactive=not args.task and sys.stdin.isatty()):
@@ -105,7 +111,7 @@ async def dispatch(args, account=None, transport=None):
         if args.task:
             return await one_shot(sessions, args.task, args.worktree, transport)
         app = App(sessions, account, console)
-        console.print(welcome(account, sessions, art=not art, width=console.width))
+        console.print(welcome(account, sessions, width=console.width))
         if command == "resume":
             history = sessions.history()
             if not history:
@@ -127,27 +133,24 @@ def signed_in(account):
 
 
 async def first_sign_in(account, console, server=None, name=None):
-    """The welcome screen of a device that is not signed in: a theme the first time, then Sign in or Quit.
+    """Sign in, change server, or optionally adjust appearance without a mandatory setup tour.
 
     Signing in opens the L.E.O. website, where the user signs in or creates an account and allows this device.
     True once signed in; False if the user quit."""
-    if console.width >= LOGO_WIDTH:
-        console.print(banner())
-    console.print(Text.assemble("\nWelcome to ", (NAME, "leo.title"), ", the multi-agent LLM Efficiency Orchestrator.\n"))
-    steps = 1 if account.config().get("theme") else 2
-    if steps == 2:
-        console.print(step(1, 2, "Choose a theme"))
-        if await choose_theme(account, console) is None:
-            return False
-    console.print(step(steps, steps, "Sign in"))
+    console.print(Text.assemble('\n', (NAME, 'leo.title'), (f'  v{__version__}\n', 'leo.muted'),
+                                ('Your coding workspace, in the terminal.\n', 'leo.muted')))
     server = server or account.server or os.getenv("LEO_SERVER") or DEFAULT_SERVER
     while True:
-        choice = await pick("Sign in with your L.E.O. account to use your models here:", [
-            ("sign-in", f"Sign in · opens the L.E.O. website ({server}) in your browser"),
+        choice = await pick("Connect your L.E.O. account", [
+            ("sign-in", f"Sign in · {server}"),
             ("server", "Use another L.E.O. server"),
-            ("quit", "Quit")])
+            ("quit", "Quit"),
+            ('theme', 'Appearance · change your terminal theme')])
         if choice in (None, "quit"):
             return False
+        if choice == 'theme':
+            await choose_theme(account, console)
+            continue
         if choice == "server":
             try:
                 server = (await PromptSession().prompt_async("L.E.O. server address: ", default=server)).strip() or server
@@ -223,28 +226,22 @@ async def ready(account, console, interactive=False, transport=None):
     return False
 
 
-def welcome(account, sessions, art=True, width=100):
-    """The session's first screen: who, where, and how it will behave, in a card; the logo above it when it fits."""
+def welcome(account, sessions, art=False, width=100):
+    """A compact starting point: project, account, model readiness, and approvals in a few lines."""
     config, g = account.config(), glyphs()
-    count = sum(1 for c in account.store().list_connections(account.user_id) if c["enabled"])
-    info = Table.grid(padding=(0, 2))
-    info.add_column(style="leo.muted")
-    info.add_column()
-    info.add_row("account", Text(f"{config['username']} · {config['server']}") if config.get("username") else Text("offline", style="leo.warn"))
-    # Room left beside the labels; a long path keeps its end, the folder's own name.
-    info.add_row("project", Text(clip_left(home_path(sessions.project), max(width - 19, 12)), style="leo.accent"))
+    count = len(models.usable(account))
+    parts = [Text(''), Text.assemble((NAME, 'leo.title'), (f'  v{__version__}', 'leo.muted')),
+             Text.assemble(('project  ', 'leo.muted'), (clip_left(home_path(sessions.project), max(width - 10, 4)), 'leo.accent'))]
     if sessions.items and sessions.current and sessions.current.branch:
-        info.add_row("branch", Text(sessions.current.branch))
-    info.add_row("models", Text(f"{count} ready", style="leo.ok" if count else "leo.warn"))
-    info.add_row("mode", Text("autorun: edits and commands run without asking", style="leo.warn") if sessions.policy.autorun
-                 else Text("asks before edits and commands"))
-    head = Text.assemble((NAME, "leo.title"), (f"  v{__version__}", "leo.muted"), "\n",
-                         ("multi-agent LLM Efficiency Orchestrator", "leo.muted"))
-    card = Group(head, Text(""), info)
-    logo = [banner(), Text("")] if art and width >= LOGO_WIDTH else []
-    tips = [("enter", "send a task"), ("/", "commands"), ("esc", "stop"), ("ctrl-c x2", "quit")]
-    tips = key_hint(tips if width >= 72 else tips[:3])  # One line, whatever the width.
-    return Group(Text(""), *logo, Panel(card, box=g.box, border_style="leo.border", padding=(1, 2), expand=False), tips, Text(""))
+        parts.append(Text.assemble(('branch   ', 'leo.muted'), sessions.current.branch))
+    parts.append(Text.assemble(('models   ', 'leo.muted'), (f'{count} agent-ready', 'leo.ok' if count else 'leo.warn')))
+    parts.append(Text.assemble(('mode     ', 'leo.muted'), ('autorun · edits and commands run without asking', 'leo.warn') if sessions.policy.autorun
+                              else ('ask before edits and commands', 'leo.muted')))
+    if config.get('username'):
+        parts.append(Text.assemble(('account  ', 'leo.muted'), config['username']))
+    parts += [Text(''), Text('Describe a task. @path adds context.', style='leo.muted'),
+              Text('/help commands · /models providers' if width >= 36 else '/help · /models', style='leo.muted'), Text('')]
+    return Group(*parts)
 
 
 async def one_shot(sessions, task, worktree=False, transport=None, stdin=None):

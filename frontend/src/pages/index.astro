@@ -193,19 +193,30 @@ import '../styles/global.css';
         </div>
         <div class="settings-panels">
           <section class="settings-panel" role="tabpanel" id="panel-models" aria-labelledby="tab-models">
-            <div class="panel-intro"><div><h3>Models</h3><p>Sign in with an account or add an API key, then choose which models L.E.O. may use.</p></div><button class="primary-button" id="add-connection"><Icon name="plus" size={14} />Add provider</button></div>
+            <div class="panel-intro"><div><h3>Your models</h3><p>Connect a provider. Choose the models you want to use.</p></div><button class="primary-button" id="add-connection"><Icon name="plus" size={14} />Connect provider</button></div>
+            <div class="model-router-bar"><span id="model-router-status" class="router-status" role="status">Checking connection…</span><button type="button" id="refresh-model-router" class="text-button">Refresh</button></div>
+            <div id="model-migration" class="model-migration" hidden><span>Bring your saved providers into one connection.</span><button type="button" id="migrate-models" class="text-button">Move to 9Router <span aria-hidden="true">↗</span></button></div>
             <section id="account-chooser" class="provider-form account-chooser" aria-labelledby="account-heading" hidden>
-              <div class="section-heading"><h3 id="account-heading">Sign in with an account</h3><button type="button" class="text-button" id="account-close">Close</button></div>
-              <p class="field-hint">Sign in once; L.E.O. adds the account's models and keeps the sign-in fresh through 9Router.</p>
+              <div class="section-heading"><div><h3 id="account-heading">Connect a provider</h3><p class="field-hint">Your accounts and keys, connected in one place.</p></div><button type="button" class="text-button" id="account-close" aria-label="Close provider chooser">✕</button></div>
+              <div id="provider-choices">
+                <div class="connect-methods" aria-label="Connection method"><button type="button" id="connect-account-tab" aria-pressed="true">Sign in</button><button type="button" id="connect-key-tab" aria-pressed="false">API key</button></div>
+                <label class="search-field provider-search"><Icon name="search" size={15} /><input id="connect-provider-search" type="search" placeholder="Search providers" aria-label="Search providers" /></label>
               <div id="account-options" class="account-options"></div>
+              </div>
+              <form id="router-key-form" class="router-key-form" hidden>
+                <button type="button" id="router-key-back" class="text-button">‹ All providers</button>
+                <div id="router-key-heading" class="connect-provider-heading"></div>
+                <label>API key<input id="router-provider-key" type="password" autocomplete="new-password" placeholder="Paste your API key" required /></label>
+                <p class="field-hint">Your key is saved securely in your model router.</p>
+                <div class="form-actions"><button type="submit" id="router-key-connect" class="primary-button">Connect and choose models <span aria-hidden="true">→</span></button></div>
+              </form>
               <div id="account-flow" class="account-flow" hidden>
                 <p id="account-flow-text"></p>
                 <code id="account-code" class="account-code" hidden></code>
                 <div class="form-actions start"><a id="account-open" class="primary-button" target="_blank" rel="noopener noreferrer">Open sign-in page</a><button type="button" class="secondary-button" id="account-cancel">Cancel</button></div>
               </div>
               <p class="form-feedback" id="account-feedback" role="status"></p>
-              <div class="account-divider"><span>or</span></div>
-              <button type="button" class="text-button" id="use-api-key">Use an API key instead ›</button>
+              <div class="connect-footer"><span>Connections powered by 9Router</span><button type="button" class="text-button" id="use-api-key">Local or custom server <span aria-hidden="true">↗</span></button></div>
             </section>
             <form id="provider-form" class="provider-form" hidden>
               <input id="provider-id" type="hidden" />
@@ -253,6 +264,13 @@ import '../styles/global.css';
               </div>
             </form>
             <div id="provider-list" class="provider-list"></div>
+            <section id="router-model-picker" class="router-model-picker" aria-labelledby="router-picker-title" hidden>
+              <div class="section-heading"><div><h3 id="router-picker-title">Choose models</h3><p class="field-hint" id="router-picker-hint">Choose which models L.E.O. may use.</p></div><button type="button" class="text-button" id="router-picker-close" aria-label="Close model picker">✕</button></div>
+              <div class="model-picker-tools"><label class="search-field provider-search"><Icon name="search" size={15} /><input id="router-model-search" type="search" placeholder="Search models" aria-label="Search models" /></label><label class="check-label"><input type="checkbox" id="router-model-free" />Free only</label></div>
+              <div id="router-model-list" class="router-model-list"></div>
+              <p id="router-picker-feedback" class="form-feedback" role="status"></p>
+              <div class="model-picker-footer"><button type="button" class="text-button" id="router-model-select">Select visible</button><span id="router-model-count">0 selected</span><button type="button" class="primary-button" id="router-model-save" disabled>Add models</button></div>
+            </section>
             <section id="discover-panel" class="discover-panel" aria-labelledby="discover-title" hidden>
               <div class="section-heading"><h3 id="discover-title">Models this key can use</h3><button type="button" class="text-button" id="discover-close">Close</button></div>
               <p class="field-hint" id="discover-hint"></p>

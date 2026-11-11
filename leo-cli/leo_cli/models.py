@@ -41,6 +41,77 @@ def saved_keys(account):
 
 async def add_model(account, console, transport=None):
     """/models add: the ways in of Settings → Models. True if a model was added."""
+    if account.server and account.secrets.get('device-token'):
+        offered = await account.model_accounts()
+        if offered.get('key_providers'):
+            return await connect_models(account, console, offered, transport)
+    return await legacy_add_model(account, console, transport)
+
+
+async def connect_models(account, console, offered, transport=None):
+    """One connection per provider, shared with L.E.O.'s website. No placeholder models or downloaded provider keys."""
+    options = []
+    names = {}
+    for item in offered.get('accounts', []):
+        if item.get('active', True):
+            names.setdefault(item['provider'], item['name'])
+    options += [(provider, f"{name} · connected, choose models") for provider, name in names.items()]
+    options += [('account', 'Sign in with an account'), ('key', 'Connect with an API key'), ('local', 'Local or custom server')]
+    if not offered.get('available'):
+        console.print(Text(offered.get('error') or 'The model router is unavailable. Local servers are still available.', style='leo.warn'))
+        choice = await pick('Connect models', [('local', 'Local or custom server'), ('back', 'Back')])
+    else:
+        choice = await pick('Connect models', options)
+    if choice in (None, 'back'):
+        return False
+    if choice == 'local':
+        return await add_with_key(account, console, transport, local_only=True)
+    if choice == 'account':
+        return await sign_in_account(account, console)
+    if choice == 'key':
+        provider = await pick('Choose a provider', [(p['id'], p['name']) for p in offered['key_providers']])
+        if provider is None:
+            return False
+        name = next(p['name'] for p in offered['key_providers'] if p['id'] == provider)
+        key = await ask(f'{name} API key: ', secret=True)
+        if not key:
+            return False
+        console.print(Text(f'Verifying {name}…', style='leo.muted'))
+        await account.connect_model_provider(provider, key)
+        console.print(Text(f'{name} connected. Your key stays in 9Router.', style='leo.ok'))
+        choice = provider
+    return await choose_router_models(account, console, choice)
+
+
+async def choose_router_models(account, console, provider):
+    console.print(Text('Loading available models…', style='leo.muted'))
+    catalog = await account.provider_models(provider)
+    fresh = [m for m in catalog['models'] if not m.get('added')]
+    if not fresh:
+        console.print(Text('All available models are already added. Use /sync to refresh this device.', style='leo.muted'))
+        return False
+    if provider == 'openrouter':
+        free = [m for m in fresh if m.get('free')]
+        if free:
+            scope = await pick('OpenRouter models', [('free', f'Free models · {len(free)} available'), ('all', f'All models · {len(fresh)} available')])
+            if scope is None:
+                return False
+            if scope == 'free':
+                fresh = free
+    fresh.sort(key=lambda m: (m.get('tools') is not True, not m.get('free'), m.get('name', m['model']).lower()))
+    options = [(m['model'], f"{m.get('name') or m['model']} · {'tools' if m.get('tools') else 'no tools' if m.get('tools') is False else 'tools untested'} · {'free' if m.get('free') else 'paid'}") for m in fresh]
+    selected = await pick_many(f"{catalog['name']} · choose models", options, limit=60)
+    if not selected:
+        return False
+    console.print(Text('Adding models and syncing this device…', style='leo.muted'))
+    result = await account.select_provider_models(provider, selected)
+    count = len(result['created'])
+    console.print(Text(f"Added {count} model{'s' if count != 1 else ''}. Ready to use here and in L.E.O.", style='leo.ok'))
+    return count > 0
+
+
+async def legacy_add_model(account, console, transport=None):
+    """Compatibility for servers that predate managed API-key connections."""
     sources = saved_keys(account)
     options = [("account", "Sign in with an account · ChatGPT, GitHub Copilot, Kiro, Kimi, …")]
     options += [(index, f"More models from {source['name'].split(' · ')[0]} · uses your saved key") for index, source in enumerate(sources)]
@@ -57,10 +128,10 @@ async def add_model(account, console, transport=None):
     return await add_from(account, console, transport, {**connection, "name": source["name"].split(" · ")[0]}, account.store().decrypt(source))
 
 
-async def add_with_key(account, console, transport=None):
+async def add_with_key(account, console, transport=None, local_only=False):
     """Provider and key, then its models (found through its catalog); saved on the account. True if one was added."""
-    presets = [p for p in PRESETS if p["id"] != "9router"]  # 9Router accounts are signed in with "Sign in with an account".
-    chosen = await pick("Which provider?", [(p["id"], f"{p['name']} · {p['hint']}") for p in presets])
+    presets = [p for p in PRESETS if p["id"] != "9router" and (not local_only or p.get('local') or p['id'] == 'custom')]
+    chosen = await pick("Choose a provider", [(p["id"], p['name']) for p in presets])
     preset = next((p for p in presets if p["id"] == chosen), None)
     if not preset:
         return False
@@ -186,7 +257,7 @@ async def setup(account, console, transport=None, login=None, signed_out=False):
             reason = ("None of your models can call tools, which the agent needs." if account.store().list_connections(account.user_id)
                       else "Your account has no models this computer can use yet.")
             console.print(Text(reason, style="leo.warn"))
-            options = [("add", "Add a model with an API key (OpenRouter, Groq, Gemini, OpenAI, Anthropic, Ollama, …)"),
+            options = [("add", "Connect a provider · account, API key, or local server"),
                        ("account", "Sign in with an account (ChatGPT, GitHub Copilot, Kiro, Kimi, …)"),
                        ("web", "Open L.E.O. Settings → Models in the browser (sign in to ChatGPT, Copilot, …)"),
                        ("sync", "Sync again (after adding models on the website)"),
@@ -199,7 +270,7 @@ async def setup(account, console, transport=None, login=None, signed_out=False):
                 await login(account, console)
                 signed_out = False
             elif choice == "add":
-                await add_with_key(account, console, transport)
+                await add_model(account, console, transport)
             elif choice == "account":
                 await sign_in_account(account, console)
             elif choice == "web":

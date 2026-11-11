@@ -25,7 +25,7 @@ import time
 from types import SimpleNamespace
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.application import Application, get_app
+from prompt_toolkit.application import Application, get_app, get_app_session
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.history import FileHistory
@@ -560,34 +560,53 @@ def choices_text(approval):
 
 
 async def pick(message, options, default=None):
-    """An arrow-key menu (Enter chooses, or type the option's number); None if cancelled with Ctrl-C."""
+    """An arrow-key menu. Enter chooses; Esc, Ctrl-C, and end-of-input go back."""
+    keys = KeyBindings()
+
+    @keys.add('escape', eager=True)
+    def _back(event):
+        event.app.exit(result=None)
+
     try:
-        return await ChoiceInput(message=message, options=options, default=default, style=theme.prompt_style()).prompt_async()
+        return await ChoiceInput(message=[('class:prompt', message), ('class:muted', '\n  ↑↓ move · Enter select · Esc back')],
+                                 options=options, default=default, style=theme.prompt_style(), key_bindings=keys).prompt_async()
     except (EOFError, KeyboardInterrupt):
         return None
 
 
-async def pick_many(message, options, keep=None, height=12):
+async def pick_many(message, options, keep=None, height=10, limit=None):
     """A checklist: type to filter, Up/Down move, Space ticks, Enter takes the ticked rows (or, with none ticked, the
     highlighted one). None if cancelled with Esc or Ctrl-C. The `keep` row stays visible whatever the filter."""
     g, query, index, ticked = glyphs(), "", 0, set()
+
+    def page_height():
+        try:
+            return max(1, min(height, get_app().output.get_size().rows - 7))
+        except Exception:
+            return height
 
     def rows():
         needle = query.lower()
         return [o for o in options if o[0] == keep or needle in f"{o[0]} {o[1]}".lower()]
 
     def text():
-        shown, start = rows(), max(0, index - height + 1)
-        out = [("class:prompt", message), ("class:muted", f"  {len(ticked)} ticked" if ticked else ""), ("", "\n")]
-        out += [("class:muted", "  filter: "), ("", query + "\n")] if query else []
-        for number, (value, label) in enumerate(shown[start:start + height], start):
+        size = page_height()
+        shown, start = rows(), max(0, index - size + 1)
+        count = f"{len(ticked)} selected" + (f" / {limit}" if limit else '')
+        out = [("class:prompt", message), ("class:muted", f"  {count}"), ("", "\n")]
+        out += [("class:muted", "  Search: "), ("", (query or 'type to filter') + "\n\n")]
+        try:
+            width = get_app().output.get_size().columns
+        except Exception:
+            width = 80
+        for number, (value, label) in enumerate(shown[start:start + size], start):
             here = number == index
             mark = f"{g.ok} " if value in ticked else f"{g.idle} "
-            out += [("class:selected-option" if here else "", f"  {g.now if here else ' '} {mark}{label}\n")]
+            out += fit([("class:selected-option" if here else "", f"  {g.now if here else ' '} {mark}{label}")], max(width - 1, 1), style='class:muted') + [("", "\n")]
         if not shown:
             out.append(("class:muted", "    nothing matches\n"))
-        more = len(shown) - start - height
-        out.append(("class:muted", (f"    {g.ellipsis} {more} more\n" if more > 0 else "") + "  type to filter · space ticks · enter adds · esc cancels"))
+        position = f"{index + 1}/{len(shown)}" if shown else '0 results'
+        out.append(("class:muted", f"\n  {position} · Space select · Enter add · Esc back"))
         return out
 
     keys = KeyBindings()
@@ -598,14 +617,33 @@ async def pick_many(message, options, keep=None, height=12):
 
     keys.add("up")(lambda event: move(-1))
     keys.add("down")(lambda event: move(1))
-    keys.add("pageup")(lambda event: move(-height))
-    keys.add("pagedown")(lambda event: move(height))
+    keys.add("pageup")(lambda event: move(-page_height()))
+    keys.add("pagedown")(lambda event: move(page_height()))
+    keys.add("home")(lambda event: move(-len(options)))
+    keys.add("end")(lambda event: move(len(options)))
+
+    @keys.add('c-u')
+    def _clear_filter(event):
+        nonlocal query, index
+        query, index = '', 0
+
+    @keys.add('c-a')
+    def _all_visible(event):
+        visible = [value for value, _ in rows() if value != keep]
+        if visible and all(value in ticked for value in visible):
+            ticked.difference_update(visible)
+        else:
+            for value in visible:
+                if not limit or len(ticked) < limit:
+                    ticked.add(value)
 
     @keys.add(" ")
     def _tick(event):
         shown = rows()
         if shown:
-            ticked.symmetric_difference_update({shown[index][0]})
+            value = shown[index][0]
+            if value in ticked or not limit or len(ticked) < limit:
+                ticked.symmetric_difference_update({value})
 
     @keys.add("enter")
     def _done(event):
@@ -631,7 +669,10 @@ async def pick_many(message, options, keep=None, height=12):
 
     app = Application(layout=Layout(Window(FormattedTextControl(text, focusable=True, show_cursor=False), dont_extend_height=True, wrap_lines=False)),
                       key_bindings=keys, style=theme.prompt_style(), full_screen=False, erase_when_done=True)
-    return await app.run_async()
+    try:
+        return await app.run_async()
+    except (EOFError, KeyboardInterrupt):
+        return None
 
 
 def theme_preview(unicode=True):
@@ -698,6 +739,8 @@ def shimmer(text, frame):
 
 def fit(fragments, width, style="class:tb"):
     """prompt_toolkit fragments cut to `width` cells, ending in … when something was cut."""
+    if width <= 0:
+        return []
     out, used = [], 0
     for fragment_style, text in fragments:
         size = get_cwidth(text)
@@ -815,6 +858,7 @@ class App:
                 events = self.sessions.store.get_events(session.run_id, self.cursors[session.run_id])
 
     async def watch(self):
+        previous = None
         while True:
             try:
                 for session in list(self.sessions.items):
@@ -825,6 +869,10 @@ class App:
                     # Close the prompt (keeping what was typed) so the loop can ask the question.
                     self.saved_text = self.prompt.default_buffer.text
                     self.interrupt(self.prompt.app)
+                state = tuple((s.number, s.status, s.title, bool(s.approval)) for s in self.sessions.items)
+                if self.prompt and self.prompt.app.is_running and (self.busy() or state != previous):
+                    self.prompt.app.invalidate()
+                previous = state
             except Exception as exc:  # Printing must never take the session down.
                 self.say(f"(display error: {exc})", "leo.error")
             await asyncio.sleep(0.15)
@@ -920,14 +968,16 @@ class App:
             width = shutil.get_terminal_size().columns
         keys = ([("class:tb.key", "esc"), ("class:tb", " stop  "), ("class:tb.key", "enter"), ("class:tb", " steer ")] if self.busy() else
                 [("class:tb.key", "/help"), ("class:tb", "  "), ("class:tb.key", "tab"), ("class:tb", " complete ")])
-        mode = [("class:tb.autorun", "autorun on"), ("class:tb", "  ")] if self.sessions.policy.autorun else []
+        if width < 36:
+            keys = [('class:tb.key', 'esc stop' if self.busy() else '/help')]
+        mode = [("class:tb.autorun", "autorun on"), ("class:tb", "  ")] if self.sessions.policy.autorun and width >= 50 else []
         if not mode and width >= 80:
             mode = [("class:tb", "asks before edits"), ("class:tb", "  ")]
         right = mode + keys
         # The sessions give way first on a narrow terminal: the keys that work now must stay visible.
-        left = fit(left, max(width - get_cwidth("".join(t for _, t in right)) - 4, 8))
+        left = fit(left, max(width - get_cwidth("".join(t for _, t in right)) - 2, 0))
         gap = width - sum(get_cwidth(t) for _, t in left + right) - 1
-        bar = left + [("class:tb", " " * max(gap, 1))] + right
+        bar = fit(left + [("class:tb", " " * max(gap, 0))] + right, max(width, 0))
         return self.live(width) + [("", "\n")] + bar if self.busy() else bar
 
     def command_list(self):
@@ -972,9 +1022,9 @@ class App:
             self.renderer = Renderer(self.console, self.sessions.project)
             self.sessions.notify = self.notify
             self.prompt = PromptSession(history=FileHistory(str(self.account.home / "history")), key_bindings=self.keys(),
-                                        bottom_toolbar=self.toolbar, refresh_interval=0.08, style=DynamicStyle(theme.prompt_style),
+                                        bottom_toolbar=self.toolbar, refresh_interval=None, style=DynamicStyle(theme.prompt_style),
                                         completer=SlashCompleter(self), complete_while_typing=Condition(self.completes_while_typing),
-                                        placeholder=self.placeholder)
+                                        placeholder=self.placeholder, input=get_app_session().input, output=get_app_session().output)
             watcher = asyncio.create_task(self.watch())
             try:
                 await self.loop()
@@ -1046,28 +1096,31 @@ class App:
             return await handler(arguments)
         expanded = self.sessions.skills.expand(name, arguments)
         if expanded is None:
-            self.say(f"Unknown command /{name}. /help lists commands; your skills and command files are listed there too.", "leo.error")
+            names = [usage.split()[0].lstrip('/') for usage, _ in self.command_list()]
+            closest = difflib.get_close_matches(name, names, n=1, cutoff=.6)
+            hint = f'Did you mean /{closest[0]}? ' if closest else ''
+            self.say(f"Unknown command /{name}. {hint}/help lists commands.", "leo.error")
             return None
         await self.submit(expanded)
 
     async def cmd_help(self, arguments):
-        def section(title, rows, key_style="leo.accent", chips=False):
-            table = Table.grid(padding=(0, 2))
-            table.add_column(min_width=26)
-            table.add_column(style="leo.muted")
-            for usage, description in rows:
-                table.add_row(Text(f" {usage} ", style="leo.key") if chips else Text(usage, style=key_style), Text(description))
-            return [Text(title, style="leo.title"), Padding(table, (0, 0, 0, 2)), Text("")]
-
-        parts = []
+        from .views import help_section
+        query = arguments.lower().strip()
+        parts = [Text('Commands', style='leo.title'), Text('Type / to browse commands; Tab completes names and @paths.\n', style='leo.muted')]
         for title, rows in HELP:
-            parts += section(title, rows)
+            visible = [(usage, description) for usage, description in rows if not query or query in f'{title} {usage} {description}'.lower()]
+            if visible:
+                parts += [help_section(title, visible, self.console.width), Text('')]
         mine = self.command_list()[sum(len(rows) for _, rows in HELP):]
+        if query:
+            mine = [(usage, description) for usage, description in mine if query in f'{usage} {description}'.lower()]
         if mine:
-            parts += section("Your skills and commands", mine)
-        parts += section("Keys", KEYS, chips=True)
-        self.console.print(Panel(Group(*parts[:-1]), box=self.g.box, border_style="leo.border", title="L.E.O.C.O.D.E · help",
-                                 title_align="left", padding=(1, 2)))
+            parts += [help_section('Your skills and commands', mine, self.console.width), Text('')]
+        if not query:
+            parts += [help_section('Keys', KEYS, self.console.width)]
+        elif len(parts) == 2:
+            parts += [Text(f'No commands match {arguments!r}. Use /help to see all commands.', style='leo.muted')]
+        self.console.print(Group(*parts))
 
     async def cmd_exit(self, arguments):
         return "exit"
@@ -1218,11 +1271,8 @@ class App:
                 return
             self.say(f"Ranked {plural(changed, 'model')} of your signed-in accounts again." if changed else "The ranks of your signed-in accounts are up to date.", "leo.ok")
             return
-        if arguments:
-            self.say("Use /models to list your models, /models add to add some, /models rerank to rank signed-in accounts again, or /sync to fetch changes from the website.", "leo.warn")
-            return
-        self.console.print(models_table(self.sessions.store, self.sessions.uid, self.g))
-        self.say("Add more with /models add: sign in with ChatGPT, Copilot, and others, or use an API key.")
+        self.console.print(models_table(self.sessions.store, self.sessions.uid, self.g, query=arguments))
+        self.say('/models add connects a provider · /models <search> filters · /sync refreshes')
 
     cmd_model = cmd_models
 
@@ -1318,24 +1368,6 @@ def tree_panel(run, store, g, width, always=False):
     return Group(*parts)
 
 
-def models_table(store, uid, g=None):
-    g = g or glyphs()
-    table = Table(title=Text("Models synced from your L.E.O. server", style="leo.title"), title_justify="left", box=g.box,
-                  border_style="leo.border", header_style="leo.muted")
-    for column in ("Model", "Strength", "Skills", "Tool calling", "Cost"):
-        table.add_column(column)
-    for connection in sorted(store.list_connections(uid), key=lambda c: (not c["enabled"], c["name"])):
-        tools = {True: Text(f"{g.ok} yes", style="leo.ok"), False: Text(f"{g.fail} no", style="leo.error"),
-                 None: Text("? untried", style="leo.muted")}[connection.get("tools")]
-        priced = connection.get("input_price") or connection.get("output_price")
-        cost = ("free" if connection["free"] or connection["local"] else
-                f"${connection.get('input_price') or 0}/{connection.get('output_price') or 0} per 1M" if priced else "price not set")
-        name = Text.assemble((f"{g.dot if connection['enabled'] else g.idle} ", "leo.ok" if connection["enabled"] else "leo.muted"),
-                             (connection["name"], "" if connection["enabled"] else "leo.muted"))
-        if "/api/cli/relay/" in connection["base_url"]:
-            name.append(" · via your L.E.O. server", style="leo.muted")
-        if not connection["enabled"]:
-            name.append(" (off)", style="leo.muted")
-        table.add_row(name, Text(connection.get("tier", "")), Text(", ".join(connection.get("skills") or []) or "any", style="leo.muted"),
-                      tools, Text(cost, style="leo.ok" if cost == "free" else ""))
-    return table
+def models_table(store, uid, g=None, query=''):
+    from .views import ModelList
+    return ModelList(store.list_connections(uid), g or glyphs(), query)

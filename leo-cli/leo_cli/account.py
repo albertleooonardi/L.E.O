@@ -10,6 +10,7 @@ import platform
 import socket
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from cryptography.fernet import Fernet
@@ -158,7 +159,15 @@ class Account:
         browser back to a listener on 127.0.0.1 so the terminal carries on at once. The redirect carries no secret: the
         token is fetched with the device code, which never leaves this process, so polling alone also works (SSH, or
         a browser on another computer)."""
-        server = server.rstrip("/")
+        server = server.strip().rstrip("/")
+        try:
+            address = urlsplit(server)
+            valid = address.scheme in ('http', 'https') and bool(address.hostname) and not (address.username or address.password or address.query or address.fragment)
+            address.port  # Validate a typed port before starting a browser or callback listener.
+        except ValueError:
+            valid = False
+        if not valid:
+            raise AccountError('Use a server address such as http://localhost:8000 or https://leo.example.com.')
         name = (device_name or f"{socket.gethostname()} ({platform.system()})")[:80]
         returned = asyncio.Event()
         listener = await self._listen(returned)
@@ -313,6 +322,20 @@ class Account:
     async def model_accounts(self):
         """The subscription sign-ins the server offers: {available, error, providers, accounts}."""
         return await self.device_call("GET", "/api/cli/accounts")
+
+    async def connect_model_provider(self, provider, key):
+        """9Router validates and stores this credential; the CLI only keeps its device token."""
+        return await self.device_call("POST", "/api/cli/model-providers/connect", json={"provider": provider, "api_key": key}, timeout=120)
+
+    async def provider_models(self, provider):
+        from urllib.parse import quote
+        return await self.device_call("GET", f"/api/cli/model-providers/{quote(provider, safe='')}/models", timeout=120)
+
+    async def select_provider_models(self, provider, models):
+        from urllib.parse import quote
+        result = await self.device_call("POST", f"/api/cli/model-providers/{quote(provider, safe='')}/models", json={"models": models}, timeout=120)
+        await self.sync()
+        return result
 
     async def start_sign_in(self, provider, accept_risk=False):
         # The first sign-in starts this user's 9Router on the server, which takes a while.

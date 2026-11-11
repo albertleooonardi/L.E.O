@@ -27,6 +27,19 @@ ACCOUNTS = {
     "grok-cli": {"name": "Grok CLI", "prefix": "gcli", "flow": "device", "risk": False},
     "glm": {"name": "Z.ai GLM Coding", "prefix": "glm", "flow": "device", "risk": False},
 }
+# IDs and routing aliases of the pinned 9Router image. Local/custom servers remain available under advanced setup.
+KEY_PROVIDERS = {
+    "openrouter": {"name": "OpenRouter", "prefix": "openrouter", "host": "openrouter.ai"},
+    "openai": {"name": "OpenAI", "prefix": "openai", "host": "api.openai.com"},
+    "anthropic": {"name": "Anthropic", "prefix": "anthropic", "host": "api.anthropic.com"},
+    "gemini": {"name": "Google Gemini", "prefix": "gemini", "host": "generativelanguage.googleapis.com"},
+    "deepseek": {"name": "DeepSeek", "prefix": "ds", "host": "api.deepseek.com"},
+    "groq": {"name": "Groq", "prefix": "groq", "host": "api.groq.com"},
+    "mistral": {"name": "Mistral", "prefix": "mistral", "host": "api.mistral.ai"},
+    "xai": {"name": "xAI", "prefix": "xai", "host": "api.x.ai"},
+    "cohere": {"name": "Cohere", "prefix": "cohere", "host": "api.cohere.ai"},
+}
+MODEL_PROVIDERS = {**ACCOUNTS, **KEY_PROVIDERS}
 RISK_NOTICE = ("This provider does not license its subscription sign-in for router use, so the account may be restricted "
                "or banned (9Router's own warning). Continue only if you accept that risk.")
 CODEX_REDIRECT = "http://localhost:1455/auth/callback"
@@ -34,6 +47,10 @@ SIGN_IN_SECONDS = 900
 
 
 class RouterError(Exception):
+    pass
+
+
+class RouterUnavailable(RouterError):
     pass
 
 
@@ -57,7 +74,7 @@ class NineRouter:
                         self.cookies = httpx.Cookies(client.cookies)
                     response = await client.request(method, path, **kwargs)
             except httpx.HTTPError as exc:
-                raise RouterError("Your model router is not reachable; check that the sandboxd service is running") from exc
+                raise RouterUnavailable("Your model router is not reachable; check that the sandboxd service is running") from exc
             except ValueError as exc:
                 raise RouterError("9Router returned an unreadable response") from exc
             if response.status_code != 401:
@@ -90,9 +107,25 @@ class NineRouter:
     async def accounts(self):
         """Signed-in accounts of the providers L.E.O. offers."""
         found = (await self.request("GET", "/api/providers")).get("connections") or []
-        return [{"id": a["id"], "provider": a["provider"], "name": ACCOUNTS[a["provider"]]["name"],
-                 "label": a.get("email") or a.get("displayName") or a.get("name") or ""}
-                for a in found if isinstance(a, dict) and a.get("id") and a.get("provider") in ACCOUNTS]
+        return [{"id": a["id"], "provider": a["provider"], "name": MODEL_PROVIDERS[a["provider"]]["name"],
+                 "label": a.get("email") or a.get("displayName") or ("API key" if a.get("authType") == "apikey" else a.get("name")) or "",
+                 "active": a.get("isActive", True), "auth_type": a.get("authType", "oauth")}
+                for a in found if isinstance(a, dict) and a.get("id") and a.get("provider") in MODEL_PROVIDERS]
+
+    async def connect_api_key(self, provider, key, validate=True):
+        """9Router validates and stores the upstream credential; it never becomes a model row in L.E.O."""
+        if validate:
+            result = await self.request("POST", "/api/providers/validate", json={"provider": provider, "apiKey": key})
+            if not result.get("valid"):
+                raise RouterError("The provider could not verify this API key. Check the key and try again.")
+        name = f"L.E.O. · {KEY_PROVIDERS[provider]['name']}"
+        existing = (await self.request("GET", "/api/providers")).get("connections") or []
+        managed = next((a for a in existing if a.get("provider") == provider and a.get("name") == name), None)
+        if managed:
+            return (await self.request("PUT", f"/api/providers/{managed['id']}",
+                                       json={"apiKey": key, "isActive": True, "testStatus": "active"})).get("connection") or managed
+        return (await self.request("POST", "/api/providers", json={"provider": provider, "apiKey": key,
+                                   "name": name, "testStatus": "active"})).get("connection") or {}
 
     async def remove(self, account_id):
         await self.request("DELETE", f"/api/providers/{account_id}")

@@ -4,14 +4,12 @@ The multi-agent LLM Efficiency Orchestrator in your terminal. `leocode` (or just
 in: it plans with a todo list, reads and edits files, runs commands and tests, and splits big tasks down a tree of
 agents, where your strongest model directs and reviews, and your cheaper models do the volume.
 
-It signs in to your L.E.O. server and downloads your models and API keys. After that it runs on your own machine: it
-calls API-key models directly, and your code, prompts, and transcripts stay on your computer. Only usage totals (calls,
-tokens, cost per model) go back to the server, for the Usage page.
-
-**Subscription models** (ChatGPT, Copilot, and others you signed in to on the website) live on your own 9Router, which
-only the L.E.O. server can reach. leocode calls them **through your L.E.O. server**, so prompts for those models pass
-through it on the way (it stores nothing). `/models` marks them "via your L.E.O. server". The router's key never leaves
-the server; leocode signs those calls with its device token.
+It signs in to your L.E.O. server and syncs your models, then runs the agent on your own machine.
+**Providers connected through 9Router**, including API-key providers and subscription accounts, run through your
+L.E.O. server. The upstream credentials and router key stay on the server; the CLI signs requests with its device token.
+Prompts for these models pass through the server, which does not store them. `/models` labels these providers **9Router**.
+Local or custom endpoints and older direct connections call their provider directly; their synced keys are encrypted
+locally with a key in the OS keychain. Transcripts stay on this computer. Usage totals go back to the server's Usage page.
 
 ## Install
 
@@ -33,14 +31,15 @@ however you installed it.
 
 Run `leocode`. The first time, it shows the L.E.O welcome screen:
 
-1. **Choose a theme** with the arrow keys and Enter: Dark, Light, High contrast, Terminal colours (your terminal's own
-   16 colours), or No colour. A preview shows how the agent's output looks. Change it any time with `/theme`.
-2. **Choose Sign in, Use another L.E.O. server, or Quit.** Sign in uses `http://localhost:8000` unless you pick
-   another server (or pass `--server`).
-3. **Sign in on the L.E.O. website**, which opens in your browser. Sign in or create an account (with a password or
+1. **Choose Sign in.** It uses `http://localhost:8000`; choose **Use another L.E.O. server** or pass `--server` to change it.
+   Arrow keys move, Enter selects, and Esc goes back. **Appearance** is optional; `/theme` changes it later.
+2. **Sign in on the L.E.O. website**, which opens in your browser. Sign in or create an account (with a password or
    with Google or GitHub, as on the website), then click **Allow** for this device.
-4. The browser comes back to `leocode` and the session starts. Your models download to this computer, and API keys go in
-   the OS keychain (Windows Credential Manager, macOS Keychain, or Secret Service).
+3. The browser comes back to `leocode`. A compact welcome shows your project, model readiness, and approval mode.
+   Provider keys for 9Router models stay on the server.
+
+Choose Dark, Light, High contrast, Terminal colours, or No colour with `/theme`. `--no-color` and the `NO_COLOR`
+environment variable select monochrome output without changing your saved theme.
 
 If no browser can open (for example over SSH), `leocode` prints the link; open it on any device, and `leocode` carries on once
 you click Allow.
@@ -110,7 +109,7 @@ files, and `@` paths. The status bar at the bottom shows every session, what the
 | `/cd PATH` | Work on another folder in this window (its own rules, skills, and sessions). |
 | `/clear` | Start over in this session. |
 | `/autorun on\|off [--save]` | Turn the approval questions off or on. |
-| `/models [add]` | List your models, or add some (saved on your L.E.O. account). `/model` works too. |
+| `/models [add]` | List models by provider, or connect one. `/model` works too. `/models gemini` filters the list. |
 | `/sync` | Fetch model changes made on the website. |
 | `/cost` | Show tokens and cost for this session. |
 | `/tree` | Draw the agents of the latest task as an ASCII tree. |
@@ -120,7 +119,7 @@ files, and `@` paths. The status bar at the bottom shows every session, what the
 | `/login [server]` | Sign in in the browser, to another account or server. |
 | `/logout` | Sign out and remove the synced models and keys. |
 | `/theme [name]` | Change the colours: `dark`, `light`, `contrast`, `terminal`, or `mono`. |
-| `/help` | List all commands. |
+| `/help [search]` | List commands, or filter them, for example `/help model`. |
 | `/exit` | Quit. |
 
 **Skills and your own commands:**
@@ -130,15 +129,21 @@ files, and `@` paths. The status bar at the bottom shows every session, what the
 - **Command files.** `.leo-cli/commands/<name>.md` holds a prompt template for `/name`. `$ARGUMENTS` is replaced with
   what you type after the command.
 
-**Adding models.** `/models add` (or `leocode models add`) has the ways in of Settings → Models:
+**Adding models.** `/models add` (or `leocode models add`) shares the connections in Settings → Models:
 - **Sign in with an account:** ChatGPT, GitHub Copilot, Kiro, Kimi, Kilo Code, Qoder, Grok CLI, or Z.ai GLM Coding. Your
   browser opens the sign-in page, and leocode shows the code when the page asks for one. The account's models then come down.
   This needs a server started with Docker Compose, which runs the sign-ins; leocode says so otherwise.
-- **More models from a provider you already use:** picks up its saved key, so you type nothing again.
-- **A provider with an API key:** OpenRouter, Gemini, OpenAI, Anthropic, Ollama, and others.
+- **Connected providers:** choose more models without entering a key again.
+- **Connect with an API key:** choose OpenRouter, Gemini, OpenAI, Anthropic, DeepSeek, Groq, Mistral, xAI, or Cohere.
+  9Router validates and stores the key. OpenRouter offers free models first; paid models are available under **All models**.
+- **Local or custom server:** Ollama, vLLM / LM Studio, or a custom endpoint. Servers without 9Router can still use these.
+  Older L.E.O. servers keep the previous direct-provider setup flow.
 
-The model list is a checklist: type to filter, Space ticks, Enter adds the ticked ones (or the highlighted one). Models
-known to call tools come first, because the agent needs them. To remove a model or turn it off, use the website.
+The model list is a checklist: type to filter, Space selects, and Enter adds your selection (or the highlighted model).
+Ctrl-A selects or clears visible models, Ctrl-U clears the search, and Esc goes back. Selections survive filtering;
+add up to 60 models at a time. Models known to call tools come first. `/models` shows tool support as **yes**, **no**,
+or **untested**, and switches to a stacked layout in narrow terminals. Use `/models <search>` or `leocode models <search>`
+to filter by model, provider, or skill. To remove a model or turn it off, use the website.
 
 **MCP servers.** `/mcp` lists two kinds:
 - **From L.E.O Chat:** the connectors under Settings → Connectors on the website. Sync brings their names, state, and

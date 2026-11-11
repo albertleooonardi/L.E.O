@@ -187,6 +187,22 @@ class AccountSignIn(StrictModel):
     accept_risk: bool = False
 
 
+class ModelProviderKey(StrictModel):
+    provider: str = Field(min_length=1, max_length=40)
+    api_key: str = Field(min_length=1, max_length=4096, repr=False)
+
+    @field_validator('api_key')
+    @classmethod
+    def nonempty_key(cls, value):
+        if not value.strip():
+            raise ValueError('Enter an API key')
+        return value.strip()
+
+
+class ModelSelection(StrictModel):
+    models: list[str] = Field(min_length=1, max_length=60)
+
+
 GIT_REF = re.compile(r"[A-Za-z0-9._/-]{1,200}")
 
 

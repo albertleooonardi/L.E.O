@@ -614,7 +614,17 @@ function groupLabel(list: Provider[]) {
 function modelLabel(p: Provider) {
   // Discovered models are named "<provider> · <model>"; the group header already names the provider.
   const parts = p.name.split(' · ');
-  return parts.length > 1 ? parts.slice(1).join(' · ') : p.name;
+  return parts.length > 1 ? parts.slice(1).join(' · ') : p.name.toLowerCase() === groupLabel([p]).toLowerCase() ? p.model : p.name;
+}
+function routerProvider(p: Provider) {
+  try { if (!new URL(p.base_url).hostname.startsWith('leo-router-')) return null; } catch { return null; }
+  const prefix = p.model.split('/')[0];
+  return Object.entries(accountInfo?.provider_prefixes || {}).find(([, value]) => value === prefix)?.[0] || null;
+}
+function providerName(id: string) { return [...(accountInfo?.providers || []), ...(accountInfo?.key_providers || [])].find(p => p.id === id)?.name || id; }
+function providerMark(id: string, name: string) {
+  const marks: Record<string, string> = { codex: '◉', openai: '◉', openrouter: '⇄', anthropic: 'A', github: 'GH', gemini: '✦', deepseek: 'DS', kiro: 'K' };
+  const mark = node('span', marks[id] || name.slice(0, 2).toUpperCase(), 'provider-mark'); mark.dataset.provider = id; mark.setAttribute('aria-hidden', 'true'); return mark;
 }
 async function setEnabled(p: Provider, enabled: boolean) {
   const body = Object.fromEntries(CONNECTION_FIELDS.map(key => [key, p[key]]));
@@ -655,37 +665,59 @@ function renderProviders() {
   // Forms open inside the list, under the row being edited; move them out before the list is rebuilt.
   el('provider-list').before(el('provider-form')); el('provider-list').after(el('discover-panel'));
   el('provider-list').replaceChildren();
-  if (!connections.length) { const p = document.createElement('p'); p.className = 'empty-providers'; p.textContent = 'No models connected. Start with Ollama or your preferred API.'; el('provider-list').append(p); }
-  // One collapsible group per provider endpoint: a key added once shows up as one row, its models inside.
   const groups = new Map<string, Provider[]>();
-  for (const p of connections) groups.set(p.base_url, [...(groups.get(p.base_url) || []), p]);
-  for (const [url, list] of groups) {
+  for (const p of connections) { const key = routerProvider(p) || p.base_url; groups.set(key, [...(groups.get(key) || []), p]); }
+  for (const a of accountInfo?.accounts || []) if (!groups.has(a.provider)) groups.set(a.provider, []);
+  if (!groups.size) {
+    const empty = node('div', '', 'models-empty');
+    empty.append(node('span', '✦', 'models-empty-mark'), node('strong', 'A place for your favorite models'), node('p', 'Connect an account or API key to get started.'));
+    el('provider-list').append(empty);
+  }
+  for (const [groupId, list] of groups) {
     list.sort((a, b) => Number(b.enabled) - Number(a.enabled));
+    const routed = !groupId.includes('://');
+    const label = routed ? providerName(groupId) : groupLabel(list);
+    const account = accountInfo?.accounts.find(a => a.provider === groupId);
     const on = list.filter(p => p.enabled).length;
     const missingKey = list.some(p => !p.has_key && !p.local);
     const group = document.createElement('details'); group.className = 'provider-group';
-    group.open = openGroups.has(url) || missingKey;
-    group.addEventListener('toggle', () => { if (group.open) openGroups.add(url); else openGroups.delete(url); });
+    group.open = openGroups.has(groupId) || missingKey;
+    group.addEventListener('toggle', () => { if (!group.isConnected) return; if (group.open) openGroups.add(groupId); else openGroups.delete(groupId); });
     const summary = document.createElement('summary');
     const chevron = document.createElement('span'); chevron.className = 'chevron'; chevron.setAttribute('aria-hidden', 'true');
     const title = document.createElement('div'); title.className = 'group-title';
-    const name = document.createElement('strong'); name.textContent = groupLabel(list);
+    const name = document.createElement('strong'); name.textContent = label;
     const status = document.createElement('small');
-    status.textContent = `${on} of ${list.length} in use${missingKey ? ', key missing' : ''}${list[0].local ? ', local' : list.every(p => p.free) ? ', free' : list.some(p => p.free) ? '' : ', paid'}`;
+    status.textContent = `${on} model${on === 1 ? '' : 's'} enabled${account?.label ? ` · ${account.label}` : list[0]?.local ? ' · Local' : ''}`;
     if (missingKey) group.classList.add('needs-key');
     title.append(name, status);
-    summary.append(chevron, title);
+    summary.append(providerMark(routed ? groupId : label.toLowerCase(), label), title);
+    if (account) { const badge = node('span', account.active ? 'Connected' : 'Paused', 'provider-connected'); badge.dataset.active = String(account.active); summary.append(badge); }
     const keyed = list.find(p => p.has_key || p.local);
-    if (keyed) {
-      const add = document.createElement('button'); add.type = 'button'; add.className = 'text-button'; add.textContent = 'Add models';
-      add.addEventListener('click', event => { event.preventDefault(); group.after(el('discover-panel')); void discoverModels(keyed); });
+    if (routed || keyed) {
+      const add = document.createElement('button'); add.type = 'button'; add.className = 'text-button choose-models'; add.textContent = 'Choose models';
+      add.addEventListener('click', event => { event.preventDefault(); if (routed) void openRouterModels(groupId); else if (keyed) { group.after(el('discover-panel')); void discoverModels(keyed); } });
       const actions = document.createElement('div'); actions.className = 'provider-actions'; actions.append(add); summary.append(actions);
     }
-    const rows = document.createElement('div'); rows.className = 'model-rows'; rows.append(...list.map(modelRow));
+    summary.append(chevron);
+    const rows = document.createElement('div'); rows.className = 'model-rows';
+    if (account) {
+      const toolbar = node('div', '', 'provider-detail-bar'); toolbar.append(node('small', account.auth_type === 'apikey' ? 'API key connected' : 'Account signed in'));
+      const actions = node('div', '', 'provider-actions');
+      const keyProvider = accountInfo?.key_providers.find(p => p.id === groupId);
+      if (account.auth_type === 'apikey' && keyProvider) {
+        const update = node('button', 'Update key', 'text-button') as HTMLButtonElement; update.type = 'button';
+        update.addEventListener('click', () => { showChooser(); showKeyForm(keyProvider); }); actions.append(update);
+      }
+      const disconnect = node('button', 'Disconnect', 'text-button danger') as HTMLButtonElement; disconnect.type = 'button'; disconnect.addEventListener('click', () => void disconnectAccount(account)); actions.append(disconnect); toolbar.append(actions); rows.append(toolbar);
+    }
+    if (!list.length) rows.append(node('p', 'Connected and ready. Choose models to start using this provider.', 'provider-no-models'));
+    rows.append(...list.map(modelRow));
     group.append(summary, rows); el('provider-list').append(group);
   }
   for (const role of ['generator', 'planner', 'reviewer'] as const) select(`${role}-id`).replaceChildren(...roleOptions(preferences?.[`${role}_id`] || null));
   refreshConnectionStatus();
+  el('model-migration').hidden = !accountInfo?.available || !connections.some(p => !routerProvider(p) && !p.local && presets.some(s => s.id !== 'custom' && s.id !== '9router' && s.base_url === p.base_url));
 }
 function routingInputs() { return [...document.querySelectorAll<HTMLInputElement>('input[name=routing]')]; }
 function setRouting(value: string) { for (const input of routingInputs()) input.checked = input.value === value; if (!routingInputs().some(i => i.checked)) routingInputs()[0].checked = true; }
@@ -1068,6 +1100,13 @@ function editProvider(provider?: Provider, anchor?: Element) {
     select('provider-tools').value = provider.tools == null ? '' : String(provider.tools);
     el('provider-hint').textContent = presets.find(p => p.id === select('provider-preset').value)?.hint || '';
   }
+  const managed = Boolean(provider && routerProvider(provider));
+  select('provider-preset').disabled = managed; field('provider-model').readOnly = managed;
+  for (const id of ['provider-key', 'provider-clear-key', 'provider-url', 'provider-protocol']) el(id).closest('label')!.hidden = managed;
+  if (managed) {
+    el('provider-key-from-row').hidden = true;
+    el('provider-hint').textContent = 'Connected through your provider. Use Update key on the provider to change its credentials.';
+  }
   syncAdvanced();
   el('provider-form').scrollIntoView({ block: 'nearest', behavior: 'smooth' }); field('provider-name').focus({ preventScroll: true });
 }
@@ -1095,16 +1134,24 @@ el('remove-provider').addEventListener('click', async () => {
 select('provider-preset').addEventListener('change', () => { applyPreset(); syncAdvanced(); });
 // Account sign-in through 9Router: one click per provider; the API-key form stays one step away.
 type AccountProvider = { id: string; name: string; flow: 'device' | 'redirect'; risk: string | null };
-type Account = { id: string; provider: string; name: string; label: string };
+type Account = { id: string; provider: string; name: string; label: string; active: boolean; auth_type: string };
+type KeyProvider = { id: string; name: string; prefix: string };
 type SignIn = { id: string; provider: string; status: 'waiting' | 'finishing' | 'done' | 'error'; error: string | null; url: string; user_code: string | null; result: { account: string; added: number } | null };
-let accountInfo: { available: boolean; error: string | null; providers: AccountProvider[]; accounts: Account[] } | null = null;
+let accountInfo: { available: boolean; error: string | null; providers: AccountProvider[]; key_providers: KeyProvider[]; provider_prefixes: Record<string, string>; router_status: string; accounts: Account[] } | null = null;
 let signIn: SignIn | null = null;
 let signInTimer: ReturnType<typeof setTimeout> | undefined;
+let connectMethod: 'account' | 'key' = 'account';
+let connecting = false;
+let selectedKeyProvider: KeyProvider | null = null;
 async function loadAccounts() {
   try { accountInfo = await api('/accounts'); } catch { accountInfo = null; }
-  renderAccounts();
+  renderAccounts(); renderProviders();
 }
 function renderAccounts() {
+  const status = el('model-router-status');
+  status.dataset.state = accountInfo?.available ? 'connected' : 'unavailable';
+  status.textContent = accountInfo?.available ? accountInfo.router_status === 'connected' ? 'Model router connected' : 'Model router ready' : 'Model router unavailable';
+  status.title = accountInfo?.error || 'Provider connections are managed by 9Router';
   const accounts = accountInfo?.accounts || [];
   const empty = Object.assign(document.createElement('p'), { className: 'account-empty',
     textContent: accountInfo && !accountInfo.available ? accountInfo.error || 'Model-account sign-in is unavailable' : 'No model accounts yet.' });
@@ -1116,17 +1163,46 @@ function renderAccounts() {
     remove.addEventListener('click', () => void disconnectAccount(a));
     row.append(text, remove); return row;
   }));
-  el('account-options').replaceChildren(...(accountInfo?.providers || []).map(p => {
-    const button = Object.assign(document.createElement('button'), { type: 'button', className: 'account-option', disabled: !accountInfo?.available || Boolean(signIn) });
-    button.append(Object.assign(document.createElement('strong'), { textContent: p.name }), Object.assign(document.createElement('small'), { textContent: p.flow === 'device' ? 'Sign in with a code' : 'Sign in in the browser' }));
-    button.addEventListener('click', () => void startSignIn(p));
-    return button;
-  }));
+  renderProviderChoices();
   if (accountInfo && !accountInfo.available && !signIn) el('account-feedback').textContent = accountInfo.error || 'Account sign-in is unavailable';
 }
+function renderProviderChoices() {
+  el('connect-account-tab').setAttribute('aria-pressed', String(connectMethod === 'account'));
+  el('connect-key-tab').setAttribute('aria-pressed', String(connectMethod === 'key'));
+  el('connect-account-tab').classList.toggle('selected', connectMethod === 'account');
+  el('connect-key-tab').classList.toggle('selected', connectMethod === 'key');
+  const query = field('connect-provider-search').value.trim().toLowerCase();
+  const choices = connectMethod === 'account' ? accountInfo?.providers || [] : accountInfo?.key_providers || [];
+  const visible = choices.filter(p => p.name.toLowerCase().includes(query));
+  el('account-options').replaceChildren(...visible.map(p => {
+    const connected = accountInfo?.accounts.some(a => a.provider === p.id && a.active);
+    const button = Object.assign(document.createElement('button'), { type: 'button', className: 'account-option', disabled: !accountInfo?.available || Boolean(signIn) || connecting });
+    const text = node('span', '', 'provider-choice-text');
+    text.append(node('strong', p.name), node('small', connected ? 'Connected · choose models' : connectMethod === 'key' ? 'Connect with an API key' : 'flow' in p && p.flow === 'device' ? 'Sign in with a code' : 'Sign in with your account'));
+    button.append(providerMark(p.id, p.name), text, node('span', connected ? '✓' : '→', 'provider-choice-arrow'));
+    button.addEventListener('click', () => {
+      if (connected) { el('account-chooser').hidden = true; void openRouterModels(p.id); }
+      else if ('flow' in p) void startSignIn(p); else showKeyForm(p);
+    });
+    return button;
+  }));
+  if (!visible.length) el('account-options').append(node('p', accountInfo ? 'No providers found.' : 'Loading providers…', 'provider-no-models'));
+}
+function setConnectMethod(method: 'account' | 'key') {
+  connectMethod = method; field('connect-provider-search').value = ''; renderProviderChoices();
+}
+function showKeyForm(provider: KeyProvider) {
+  selectedKeyProvider = provider;
+  el('provider-choices').hidden = true; el('router-key-form').hidden = false; el('account-feedback').textContent = '';
+  const heading = el('router-key-heading'); heading.replaceChildren(providerMark(provider.id, provider.name), node('strong', provider.name));
+  field('router-provider-key').value = ''; field('router-provider-key').focus({ preventScroll: true });
+}
 function showChooser() {
-  el('provider-form').hidden = true; el('account-chooser').hidden = false; el('account-feedback').textContent = '';
-  el('account-chooser').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  el('provider-form').hidden = true; el('router-model-picker').hidden = true; el('discover-panel').hidden = true;
+  el('provider-choices').hidden = false; el('router-key-form').hidden = true;
+  el('account-chooser').hidden = false; el('account-feedback').textContent = ''; field('connect-provider-search').value = '';
+  renderProviderChoices();
+  el('account-chooser').closest('.settings-panels')?.scrollTo({ top: 0, behavior: 'smooth' });
   void loadAccounts();
 }
 function stopSignIn() {
@@ -1135,10 +1211,13 @@ function stopSignIn() {
   signIn = null; el('account-flow').hidden = true; renderAccounts();
 }
 async function startSignIn(p: AccountProvider) {
+  if (connecting || signIn) return;
   if (p.risk && !window.confirm(`${p.name}\n\n${p.risk}`)) return;
+  connecting = true; renderProviderChoices();
   el('account-feedback').textContent = `Starting ${p.name} sign-in…`;
   try { signIn = await send<SignIn>('/accounts/signin', 'POST', { provider: p.id, accept_risk: Boolean(p.risk) }); }
   catch (e) { el('account-feedback').textContent = errorText(e); return; }
+  finally { connecting = false; renderProviderChoices(); }
   el('account-feedback').textContent = '';
   el('account-code').hidden = !signIn.user_code; el('account-code').textContent = signIn.user_code || '';
   el('account-flow-text').textContent = signIn.user_code
@@ -1174,6 +1253,102 @@ el('account-close').addEventListener('click', () => { stopSignIn(); el('account-
 el('account-cancel').addEventListener('click', stopSignIn);
 el('use-api-key').addEventListener('click', () => { stopSignIn(); el('account-chooser').hidden = true; editProvider(); });
 el('add-connection').addEventListener('click', showChooser);
+el('connect-account-tab').addEventListener('click', () => setConnectMethod('account'));
+el('connect-key-tab').addEventListener('click', () => setConnectMethod('key'));
+field('connect-provider-search').addEventListener('input', renderProviderChoices);
+el('router-key-back').addEventListener('click', () => { el('router-key-form').hidden = true; el('provider-choices').hidden = false; field('router-provider-key').value = ''; });
+el('refresh-model-router').addEventListener('click', async () => { const button = el<HTMLButtonElement>('refresh-model-router'); button.disabled = true; button.textContent = 'Checking…'; try { await loadSettings(); await loadAccounts(); } finally { button.disabled = false; button.textContent = 'Refresh'; } });
+el('migrate-models').addEventListener('click', async () => {
+  const button = el<HTMLButtonElement>('migrate-models'); button.disabled = true; button.textContent = 'Moving…';
+  try { const result = await send<{ moved: number }>('/model-providers/migrate', 'POST'); await loadSettings(); await loadAccounts(); toast(`${result.moved} models moved to 9Router`); }
+  catch (e) { toast(errorText(e)); } finally { button.disabled = false; button.textContent = 'Move to 9Router ↗'; }
+});
+el('router-key-form').addEventListener('submit', async event => {
+  event.preventDefault(); if (!selectedKeyProvider || connecting) return;
+  const provider = selectedKeyProvider;
+  connecting = true; const button = el<HTMLButtonElement>('router-key-connect'); button.disabled = true; button.textContent = 'Verifying key…';
+  el('account-feedback').textContent = '';
+  try {
+    await send('/model-providers/connect', 'POST', { provider: provider.id, api_key: field('router-provider-key').value.trim() });
+    field('router-provider-key').value = ''; el('account-chooser').hidden = true;
+    await loadAccounts(); await openRouterModels(provider.id);
+  } catch (e) { el('account-feedback').textContent = errorText(e); }
+  finally { connecting = false; button.disabled = false; button.textContent = 'Connect and choose models →'; }
+});
+let pickerProvider = '';
+let pickerModels: Discovered[] = [];
+const pickerSelected = new Set<string>();
+let pickerRequest = 0;
+let pickerSaving = false;
+async function openRouterModels(provider: string) {
+  const request = ++pickerRequest;
+  pickerProvider = provider; pickerModels = []; pickerSelected.clear();
+  el('account-chooser').hidden = true; el('provider-form').hidden = true; el('discover-panel').hidden = true;
+  el('router-model-picker').hidden = false;
+  el('router-picker-title').textContent = `${providerName(provider)} models`;
+  el('router-picker-hint').textContent = 'Choose which models L.E.O. may use.';
+  el('router-picker-feedback').textContent = '';
+  field('router-model-search').value = ''; field('router-model-free').checked = provider === 'openrouter';
+  el('router-model-list').replaceChildren(node('p', 'Loading available models…', 'provider-no-models'));
+  updatePickerCount(); el('router-model-picker').closest('.settings-panels')?.scrollTo({ top: 0, behavior: 'smooth' });
+  try {
+    const result = await api<{ name: string; models: Discovered[] }>(`/model-providers/${encodeURIComponent(provider)}/models`);
+    if (request !== pickerRequest) return;
+    pickerModels = result.models;
+    el('router-picker-hint').textContent = `${result.models.length} available · Already added models stay connected.`;
+    renderRouterModels(); field('router-model-search').focus({ preventScroll: true });
+  } catch (e) {
+    if (request === pickerRequest) { el('router-model-list').replaceChildren(); el('router-picker-feedback').textContent = errorText(e); }
+  }
+}
+function visiblePickerModels() {
+  const query = field('router-model-search').value.trim().toLowerCase();
+  return pickerModels.filter(m => (!field('router-model-free').checked || m.free) && `${m.name} ${m.model}`.toLowerCase().includes(query));
+}
+function updatePickerCount() {
+  const count = pickerSelected.size;
+  el('router-model-count').textContent = `${count} selected`;
+  const button = el<HTMLButtonElement>('router-model-save');
+  button.disabled = !count || pickerSaving;
+  button.textContent = pickerSaving ? 'Adding…' : count ? `Add ${count} model${count === 1 ? '' : 's'}` : 'Add models';
+  el<HTMLButtonElement>('router-model-select').disabled = pickerSaving;
+}
+function renderRouterModels() {
+  const visible = visiblePickerModels();
+  el('router-model-list').replaceChildren(...visible.map(m => {
+    const row = node('label', '', 'router-model-option');
+    const input = Object.assign(document.createElement('input'), { type: 'checkbox', checked: m.added || pickerSelected.has(m.model), disabled: Boolean(m.added) || pickerSaving });
+    input.setAttribute('aria-label', `Add ${m.name}`);
+    input.addEventListener('change', () => { input.checked ? pickerSelected.add(m.model) : pickerSelected.delete(m.model); updatePickerCount(); });
+    const text = node('span', '', 'router-model-name');
+    text.append(node('strong', m.name.replace(/ \(free\)$/, '')), node('small', `${m.model.split('/').slice(1).join('/')} · ${compactTokens(m.context_window)} context`));
+    row.append(input, text, node('span', m.added ? 'Added ✓' : m.free ? 'Free' : 'Paid', 'model-price-badge'));
+    return row;
+  }));
+  if (!visible.length) el('router-model-list').append(node('p', pickerModels.length ? 'No models match. Try another search or turn off Free only.' : 'No models are available from this provider yet.', 'provider-no-models'));
+  updatePickerCount();
+}
+field('router-model-search').addEventListener('input', renderRouterModels);
+field('router-model-free').addEventListener('change', renderRouterModels);
+el('router-model-select').addEventListener('click', () => {
+  const visible = visiblePickerModels().filter(m => !m.added);
+  const allSelected = visible.length > 0 && visible.every(m => pickerSelected.has(m.model));
+  for (const m of visible) { if (allSelected) pickerSelected.delete(m.model); else if (pickerSelected.size < 60) pickerSelected.add(m.model); }
+  renderRouterModels();
+});
+el('router-picker-close').addEventListener('click', () => { ++pickerRequest; el('router-model-picker').hidden = true; });
+el('router-model-save').addEventListener('click', async () => {
+  if (!pickerSelected.size || pickerSaving) return;
+  if (pickerSelected.size > 60) { el('router-picker-feedback').textContent = 'Choose up to 60 models at a time.'; return; }
+  const provider = pickerProvider;
+  pickerSaving = true; renderRouterModels(); el('router-picker-feedback').textContent = '';
+  try {
+    const result = await send<{ created: Provider[] }>(`/model-providers/${encodeURIComponent(provider)}/models`, 'POST', { models: [...pickerSelected] });
+    ++pickerRequest; el('router-model-picker').hidden = true; openGroups.add(provider);
+    await loadSettings(); await loadAccounts(); toast(`${result.created.length} model${result.created.length === 1 ? '' : 's'} added`);
+  } catch (e) { el('router-picker-feedback').textContent = errorText(e); }
+  finally { pickerSaving = false; if (!el('router-model-picker').hidden) renderRouterModels(); else updatePickerCount(); }
+});
 el('add-model-account').addEventListener('click', () => { showSettingsTab(settingsTabs.find(t => t.id === 'tab-models')!); showChooser(); });
 el('cancel-provider').addEventListener('click', () => { field('provider-key').value = ''; el('provider-form').hidden = true; });
 el('provider-form').addEventListener('submit', async event => {

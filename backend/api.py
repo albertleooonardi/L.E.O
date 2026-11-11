@@ -27,11 +27,12 @@ from . import mcp_auth
 from .connectors import Connectors, public as public_connector
 from .mcp_client import MCPClient, MCPError, NeedsAuth, check_url
 from .oauth import OAuth, OAuthError, email_allowed, pkce_pair
-from .ninerouter import ACCOUNTS, RISK_NOTICE, NineRouter, RouterError, SignIns, serve_callback
+from .ninerouter import ACCOUNTS, KEY_PROVIDERS, MODEL_PROVIDERS, RISK_NOTICE, NineRouter, RouterError, RouterUnavailable, SignIns, serve_callback
+from .model_connections import ModelConnections
 from .providers import ProviderError, list_models
 from .router import choose_mode, classify, rank
 from .sandbox import MAX_IMPORT_BYTES, Sandbox, SandboxError, tar_to_zip, workspace_path, zip_to_tar
-from .schemas import (AccountSignIn, AdoptModels, ApprovalInput, CliAnswer, CliDeviceStart, CliTokenInput, CliUsageInput, Connection, ConnectorInput, ConnectorUpdate, Me, PasswordChange, Preferences, RouteInput, RunInput,
+from .schemas import (AccountSignIn, AdoptModels, ApprovalInput, CliAnswer, CliDeviceStart, CliTokenInput, CliUsageInput, Connection, ConnectorInput, ConnectorUpdate, Me, ModelProviderKey, ModelSelection, PasswordChange, Preferences, RouteInput, RunInput,
                       Skill, SteerInput, UserLogin, UserRegister, User, WorkspaceInput)
 from .store import Conflict, Store, TERMINAL
 from .tools import ToolError, web_search
@@ -62,6 +63,7 @@ CLI_RELAY_PREFIX = "/api/cli/relay/"
 CLI_CONNECTOR_PREFIX = "/api/cli/connectors/"
 # The CLI's /models add signs in to ChatGPT, Copilot, and the others with the same flow as Settings → Models.
 CLI_ACCOUNTS_PREFIX = "/api/cli/accounts"
+CLI_MODEL_PROVIDERS_PREFIX = "/api/cli/model-providers/"
 RELAY_PATHS = {"chat/completions", "responses", "models"}
 MAX_RELAY_BYTES = 32 * 1024 * 1024
 # A stopped 9Router is started again by the relay; this long it may take to answer once started.
@@ -99,6 +101,8 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
         if create:
             await router.wait_ready()
         return router
+
+    model_connections = ModelConnections(store, router_for)
 
     async def add_account_models(provider, user_id, account):
         """After a sign-in: add the account's models, all using one key on the user's router that L.E.O. creates once."""
@@ -173,7 +177,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
 
             # Auth: session cookie or bearer token (LEO_API_TOKEN for admin/MCP). CORS preflights carry no credentials.
             public = request.url.path in PUBLIC_API_PATHS or request.url.path.startswith(PUBLIC_API_PREFIXES)
-            device_path = request.url.path in CLI_DEVICE_PATHS or request.url.path.startswith((CLI_RELAY_PREFIX, CLI_CONNECTOR_PREFIX, CLI_ACCOUNTS_PREFIX))
+            device_path = request.url.path in CLI_DEVICE_PATHS or request.url.path.startswith((CLI_RELAY_PREFIX, CLI_CONNECTOR_PREFIX, CLI_ACCOUNTS_PREFIX, CLI_MODEL_PROVIDERS_PREFIX))
             if device_path and request.method != "OPTIONS":
                 device = await run_in_threadpool(store.cli_device, request.headers.get("authorization", "").removeprefix("Bearer ").strip())
                 owner = device and await run_in_threadpool(store.get_user, device["user_id"])
@@ -484,14 +488,69 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
     async def read_accounts(user: CurrentUser = Depends(current_user)):
         """Providers offered for sign-in and the accounts this user signed in on their own router."""
         offered = [{"id": key, "name": v["name"], "flow": v["flow"], "risk": RISK_NOTICE if v["risk"] else None} for key, v in ACCOUNTS.items()]
+        key_providers = [{"id": key, "name": v["name"], "prefix": v["prefix"]} for key, v in KEY_PROVIDERS.items()]
+        catalog = {"key_providers": key_providers, "provider_prefixes": {key: v["prefix"] for key, v in MODEL_PROVIDERS.items()}}
         if not signins:
             return {"available": False, "error": "Model-account sign-in needs the sandbox service; start L.E.O. with docker compose",
-                    "providers": offered, "accounts": []}
+                    "providers": offered, "accounts": [], "router_status": "unavailable", **catalog}
         try:
-            router = await router_for(account(user)["id"])
-            return {"available": True, "error": None, "providers": offered, "accounts": await router.accounts() if router else []}
-        except RouterError as exc:
-            return {"available": False, "error": str(exc), "providers": offered, "accounts": []}
+            uid = account(user)["id"]
+            router = await router_for(uid)
+            try:
+                accounts = await router.accounts() if router else []
+            except RouterUnavailable:
+                # Compose can remove the container while its saved address and account volume survive.
+                router = await router_for(uid, create=True)
+                accounts = await router.accounts()
+            return {"available": True, "error": None, "providers": offered, "accounts": accounts,
+                    "router_status": "connected" if router else "ready", **catalog}
+        except (RouterError, SandboxError) as exc:
+            return {"available": False, "error": str(exc), "providers": offered, "accounts": [], "router_status": "unavailable", **catalog}
+
+    @app.post("/api/model-providers/connect", status_code=201)
+    @app.post(CLI_MODEL_PROVIDERS_PREFIX + "connect", status_code=201)
+    async def connect_model_provider(body: ModelProviderKey, user: CurrentUser = Depends(current_user)):
+        require_router()
+        uid = account(user)["id"]
+        if body.provider not in KEY_PROVIDERS:
+            raise HTTPException(400, "Choose a supported API-key provider")
+        try:
+            async with model_connections.lock(uid):
+                router = await router_for(uid, create=True)
+                await router.connect_api_key(body.provider, body.api_key)
+            return {"provider": body.provider, "connected": True}
+        except (RouterError, SandboxError) as exc:
+            raise HTTPException(502, str(exc)) from exc
+
+    @app.get("/api/model-providers/{provider}/models")
+    @app.get(CLI_MODEL_PROVIDERS_PREFIX + "{provider}/models")
+    async def provider_models(provider: str, user: CurrentUser = Depends(current_user)):
+        require_router()
+        if provider not in MODEL_PROVIDERS:
+            raise HTTPException(404, "Provider not found")
+        try:
+            return await model_connections.catalog(account(user)["id"], provider)
+        except (RouterError, SandboxError, ProviderError) as exc:
+            raise HTTPException(502, str(exc)) from exc
+
+    @app.post("/api/model-providers/{provider}/models", status_code=201)
+    @app.post(CLI_MODEL_PROVIDERS_PREFIX + "{provider}/models", status_code=201)
+    async def select_provider_models(provider: str, body: ModelSelection, user: CurrentUser = Depends(current_user)):
+        require_router()
+        if provider not in MODEL_PROVIDERS:
+            raise HTTPException(404, "Provider not found")
+        try:
+            return await model_connections.add(account(user)["id"], provider, body.models)
+        except (RouterError, SandboxError, ProviderError) as exc:
+            raise HTTPException(502, str(exc)) from exc
+
+    @app.post("/api/model-providers/migrate")
+    async def migrate_model_providers(user: CurrentUser = Depends(current_user)):
+        require_router()
+        try:
+            return {"moved": await model_connections.migrate(account(user)["id"])}
+        except (RouterError, SandboxError) as exc:
+            raise HTTPException(502, str(exc)) from exc
 
     @app.post("/api/accounts/signin", status_code=201)
     @app.post(CLI_ACCOUNTS_PREFIX + "/signin", status_code=201)
@@ -536,7 +595,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
             raise HTTPException(502, str(exc)) from exc
         removed = 0
         if not any(a["provider"] == found["provider"] and a["id"] != account_id for a in accounts):
-            prefix = ACCOUNTS[found["provider"]]["prefix"] + "/"
+            prefix = MODEL_PROVIDERS[found["provider"]]["prefix"] + "/"
             for c in store.list_connections(user.id):
                 if c["base_url"] == f"{router.url}/v1" and c["model"].startswith(prefix):
                     store.delete_connection(c["id"], user.id)

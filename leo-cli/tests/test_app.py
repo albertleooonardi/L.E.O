@@ -106,17 +106,14 @@ def signing_in(tmp_path, monkeypatch):
     return Account(tmp_path / 'home'), used, Console(record=True, width=120, color_system=None)
 
 
-async def test_the_first_run_picks_a_theme_then_signs_in_on_the_website(signing_in):
+async def test_the_first_run_goes_straight_to_sign_in(signing_in):
     account, used, console = signing_in
     with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
-        typed.send_text(DOWN + ENTER)  # Theme: Light.
-        await asyncio.sleep(0.3)
-        typed.send_text(ENTER)  # Sign in (the first option).
+        typed.send_text(ENTER)  # Sign in, without a mandatory appearance step.
         assert await app.first_sign_in(account, console) is True
     assert used == [(app.DEFAULT_SERVER, True)]
-    assert account.config()['theme'] == 'light'
     shown = text_of(console)
-    assert BANNER[4] in shown and 'Theme: Light' in shown
+    assert 'L.E.O.C.O.D.E' in shown and BANNER[4] not in shown and 'Theme:' not in shown
 
 
 async def test_quit_on_the_welcome_screen_signs_nothing_in(signing_in):
@@ -187,12 +184,16 @@ async def test_without_a_usable_model_leo_sets_one_up_inside(tmp_path, monkeypat
     async def sync():
         return {}
 
+    async def model_accounts():
+        return {'available': True, 'accounts': [], 'providers': [], 'key_providers': [{'id': 'openrouter', 'name': 'OpenRouter'}]}
+
     monkeypatch.setattr(models, 'discover', discover)
     monkeypatch.setattr(account, 'add_connection', add_connection)
     monkeypatch.setattr(account, 'sync', sync)
+    monkeypatch.setattr(account, 'model_accounts', model_accounts)
     console = Console(record=True, width=120, color_system=None)
     with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
-        for keys in (ENTER, ENTER, ENTER, ENTER, ENTER):  # Add a model, Ollama, its URL, no key, qwen3-coder.
+        for keys in (ENTER, DOWN + DOWN + ENTER, ENTER, ENTER, ENTER, ENTER):  # Connect, local server, Ollama, URL, no key, model.
             typed.send_text(keys)
             await asyncio.sleep(0.3)
         assert await asyncio.wait_for(app.ready(account, console, interactive=True), 10) is True
@@ -367,6 +368,8 @@ async def test_a_failing_command_reports_instead_of_closing_the_window(ui, monke
     monkeypatch.setattr(ui, 'say', lambda text, style='leo.muted': said.append(text))
     with create_pipe_input() as typed, create_app_session(input=typed, output=DummyOutput()):
         running = asyncio.create_task(ui.run())
+        await asyncio.sleep(.2)
+        assert not running.done(), repr(running.exception())
         await until(lambda: ui.prompt is not None and ui.prompt.app.is_running)
         typed.send_text('/sync\r')
         await until(lambda: said)
@@ -545,7 +548,8 @@ async def test_help_and_model_names_keep_their_brackets(ui, account):
     for usage in ('/models [add]', '/login [server]', '/new [--worktree]', '/theme [name]', '/autorun on|off [--save]'):
         assert usage in out, usage
     assert 'Sessions' in out and 'Keys' in out, 'grouped'
-    assert 'Ollama · qwen3 [local]' in out
+    # /models groups by provider, so the name after " · " is what must keep its brackets.
+    assert 'Ollama' in out and 'qwen3 [local]' in out, 'brackets in a model name are shown, not read as markup'
 
 
 async def test_one_shot_shows_which_keys_answer_an_approval(account, project, capsys):
@@ -623,7 +627,7 @@ def test_the_welcome_card_fits_the_terminal(account, project):
 
     wide, narrow = shown(120), shown(36)
     logo = BANNER[4]
-    assert logo in wide and 'project' in wide and 'models' in wide and 'mode' in wide
+    assert logo not in wide and 'project' in wide and 'models' in wide and 'mode' in wide
     assert logo not in narrow and 'L.E.O.C.O.D.E' in narrow, 'no logo when it would not fit'
     assert all(len(line) <= 36 for line in narrow.splitlines())
     assert all(len(line) <= 64 for line in shown(64).splitlines()), 'the key tips stay on one line'
@@ -892,7 +896,7 @@ def test_leocode_and_leo_are_both_commands():
     assert app.parser().prog == 'leocode'
 
 
-def test_the_logo_fits_at_eighty_columns(account, project):
+def test_startup_leaves_room_for_work_at_eighty_columns(account, project):
     from leo_cli import theme
     from leo_cli.ui import BANNER
     sessions = Sessions(account, project)
@@ -904,7 +908,8 @@ def test_the_logo_fits_at_eighty_columns(account, project):
 
     assert len(BANNER) == 6 and max(len(line) for line in BANNER) <= 78
     wide, narrow = shown(80), shown(79)
-    assert BANNER[4] in wide and all(len(line) <= 80 for line in wide.splitlines())
+    assert BANNER[4] not in wide and all(len(line) <= 80 for line in wide.splitlines())
+    assert len(wide.splitlines()) <= 12
     assert BANNER[4] not in narrow and 'L.E.O.C.O.D.E' in narrow
 
 

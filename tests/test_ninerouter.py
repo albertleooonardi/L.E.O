@@ -41,13 +41,30 @@ class FakeRouter:
             return httpx.Response(200 if ok else 401, json={'success': ok}, headers={'set-cookie': 'auth_token=t; Path=/'} if ok else {})
         if 'auth_token=t' not in request.headers.get('cookie', '') and not path.startswith('/v1'):
             return httpx.Response(401, json={'error': 'Unauthorized'})
-        if path == '/api/providers':
+        if path == '/api/providers' and request.method == 'GET':
             return httpx.Response(200, json={'connections': accounts})
         if request.method == 'DELETE' and path.startswith('/api/providers/'):
             accounts[:] = [a for a in accounts if a['id'] != path.rsplit('/', 1)[1]]
             return httpx.Response(200, json={'success': True})
         if path == '/api/keys':
             return httpx.Response(201, json={'key': 'sk-9r', 'name': 'L.E.O.', 'id': 'k1'})
+        if path == '/api/providers/validate':
+            return httpx.Response(200, json={'valid': body.get('apiKey') != 'bad'})
+        if path == '/api/providers' and request.method == 'POST':
+            connection = {'id': f'key-{body["provider"]}', 'provider': body['provider'], 'authType': 'apikey',
+                          'name': body['name'], 'isActive': True}
+            accounts.append(connection)
+            return httpx.Response(201, json={'connection': connection})
+        if path.startswith('/api/providers/') and path.endswith('/models'):
+            return httpx.Response(200, json={'models': [
+                {'id': 'cohere/free:free', 'name': 'Free model', 'context_length': 128000, 'pricing': {'prompt': '0', 'completion': '0'}},
+                {'id': 'vendor/paid', 'name': 'Paid model', 'pricing': {'prompt': '0.000002', 'completion': '0.000008'}},
+                {'id': 'embed-small', 'name': 'Embeddings'},
+                {'id': 'art/flux', 'name': 'Flux', 'architecture': {'output_modalities': ['image']}},
+            ]})
+        if path.startswith('/api/providers/') and request.method == 'PUT':
+            connection = next(a for a in accounts if a['id'] == path.rsplit('/', 1)[1])
+            return httpx.Response(200, json={'connection': connection})
         if path == '/api/oauth/codex/authorize':
             assert request.url.params['redirect_uri'] == CODEX_REDIRECT
             return httpx.Response(200, json={'authUrl': 'https://auth.openai.com/oauth/authorize?x=1', 'state': 'st8', 'codeVerifier': 'ver', 'flowType': 'authorization_code_pkce'})
@@ -135,6 +152,153 @@ def test_accounts_off_without_sandbox(client):
     assert client.post('/api/accounts/signin', json={'provider': 'github'}).status_code == 503
 
 
+@pytest.mark.parametrize('path', ['/api/accounts', '/api/cli/accounts'])
+def test_account_list_restores_a_missing_router(router_client, store, fake, sandbox, monkeypatch, path):
+    from backend.ninerouter import RouterUnavailable
+    store.save_router(store.user_id, f'http://leo-router-{store.user_id}:20128', 'secret')
+    original = NineRouter.accounts
+    attempts = []
+
+    async def accounts(router):
+        attempts.append(router.url)
+        if len(attempts) == 1:
+            raise RouterUnavailable('Container is missing')
+        return await original(router)
+
+    monkeypatch.setattr(NineRouter, 'accounts', accounts)
+    headers = {}
+    if path.startswith('/api/cli/'):
+        device = router_client.post('/api/cli/device', json={'device_name': 'laptop'}).json()
+        router_client.post(f"/api/cli/device/{device['user_code']}", json={'approve': True})
+        token = router_client.post('/api/cli/token', json={'device_code': device['device_code']}).json()['token']
+        headers = {'Authorization': f'Bearer {token}'}
+    response = router_client.get(path, headers=headers)
+    assert response.status_code == 200
+    assert response.json()['available'] is True
+    assert sandbox.ensured == [(store.user_id, 'secret')]
+    assert len(attempts) == 2
+
+
+def test_account_list_reports_a_failed_router_recovery(router_client, store, sandbox, monkeypatch):
+    from backend.ninerouter import RouterUnavailable
+    from backend.sandbox import SandboxError
+    store.save_router(store.user_id, f'http://leo-router-{store.user_id}:20128', 'secret')
+
+    async def unavailable(router):
+        raise RouterUnavailable('Container is missing')
+
+    async def cannot_start(*args, **kwargs):
+        raise SandboxError('Cannot reach the sandbox service')
+
+    monkeypatch.setattr(NineRouter, 'accounts', unavailable)
+    monkeypatch.setattr(sandbox, 'ensure_router', cannot_start)
+    response = router_client.get('/api/accounts')
+    assert response.status_code == 200
+    assert response.json()['available'] is False
+    assert response.json()['error'] == 'Cannot reach the sandbox service'
+
+
+def test_api_key_connects_via_router_without_creating_a_placeholder_model(router_client, store, fake):
+    response = router_client.post('/api/model-providers/connect', json={'provider': 'openrouter', 'api_key': 'upstream-secret'})
+    assert response.status_code == 201 and response.json()['connected']
+    assert store.list_connections(store.user_id) == []
+    accounts = router_client.get('/api/accounts').json()
+    assert accounts['accounts'][0]['provider'] == 'openrouter' and 'upstream-secret' not in str(accounts)
+    found = router_client.get('/api/model-providers/openrouter/models').json()
+    assert {m['model'] for m in found['models']} == {'openrouter/cohere/free:free', 'openrouter/vendor/paid'}
+    paid = next(m for m in found['models'] if not m['free'])
+    assert paid['input_price'] == 2 and paid['output_price'] == 8
+    added = router_client.post('/api/model-providers/openrouter/models', json={'models': ['openrouter/cohere/free:free']})
+    assert added.status_code == 201
+    [model] = store.list_connections(store.user_id, True)
+    assert model['base_url'] == f'http://leo-router-{store.user_id}:20128/v1' and model['free']
+    assert store.decrypt(model) == 'sk-9r', 'L.E.O. calls the router with its key, not the upstream credential'
+    again = router_client.post('/api/model-providers/openrouter/models', json={'models': [model['model']]})
+    assert again.json()['created'] == []
+    assert router_client.post('/api/model-providers/openrouter/models', json={'models': ['cx/gpt-5.5']}).status_code == 502
+    assert router_client.delete('/api/accounts/key-openrouter').json()['removed_models'] == 1
+    assert store.list_connections(store.user_id) == []
+
+
+def test_rejected_key_is_not_saved_and_unconnected_catalog_is_blocked(router_client, store, fake):
+    assert router_client.post('/api/model-providers/connect', json={'provider': 'openrouter', 'api_key': 'bad'}).status_code == 502
+    assert not any(method == 'POST' and path == '/api/providers' for method, path, body in fake.calls)
+    assert router_client.get('/api/model-providers/openrouter/models').status_code == 502
+    assert router_client.post('/api/model-providers/connect', json={'provider': 'unknown', 'api_key': 'key'}).status_code == 400
+    assert router_client.post('/api/model-providers/connect', json={'provider': 'openrouter', 'api_key': '   '}).status_code == 422
+
+
+def test_cli_provider_setup_is_scoped_to_its_device_and_keeps_router_keys_on_server(router_client, store, fake, tmp_path, monkeypatch):
+    from leo_cli.account import Account
+    monkeypatch.setenv('LEO_CLI_KEYRING', 'file')
+    device = router_client.post('/api/cli/device', json={'device_name': 'CLI QA'}).json()
+    router_client.post(f"/api/cli/device/{device['user_code']}", json={'approve': True})
+    token = router_client.post('/api/cli/token', json={'device_code': device['device_code']}).json()['token']
+    headers = {'Authorization': f'Bearer {token}'}
+    assert router_client.post('/api/cli/model-providers/connect', json={'provider': 'openrouter', 'api_key': 'secret'}).status_code == 401
+    account = Account(tmp_path / 'cli-managed', transport=httpx.ASGITransport(app=router_client.app))
+    account.save(server='http://testserver')
+    account.secrets.set('device-token', token)
+
+    async def connect_and_sync():
+        await account.connect_model_provider('openrouter', 'upstream-secret')
+        catalog = await account.provider_models('openrouter')
+        assert 'openrouter/cohere/free:free' in {m['model'] for m in catalog['models']}
+        return await account.select_provider_models('openrouter', ['openrouter/cohere/free:free'])
+
+    result = asyncio.run(connect_and_sync())
+    assert len(result['created']) == 1
+    [local] = account.store().list_connections(account.user_id, True)
+    assert '/api/cli/relay/' in local['base_url'] and account.store().decrypt(local) == token
+    assert 'sk-9r' not in (account.home / 'leo.db').read_bytes().decode('latin-1')
+    router_client.cookies.clear()
+    assert router_client.get('/api/model-providers/openrouter/models', headers=headers).status_code == 401
+
+
+def test_key_rotation_keeps_existing_models_and_one_managed_provider(router_client, store, fake):
+    router_client.post('/api/model-providers/connect', json={'provider': 'openrouter', 'api_key': 'original-key'})
+    router_client.post('/api/model-providers/openrouter/models', json={'models': ['openrouter/cohere/free:free']})
+    [before] = store.list_connections(store.user_id)
+    response = router_client.post('/api/model-providers/connect', json={'provider': 'openrouter', 'api_key': 'replacement-key'})
+    assert response.status_code == 201
+    assert len(fake.accounts) == 1
+    assert store.list_connections(store.user_id)[0]['id'] == before['id']
+    assert any(method == 'PUT' and body.get('apiKey') == 'replacement-key' for method, path, body in fake.calls)
+
+
+def test_migration_leaves_distinct_provider_credentials_untouched(router_client, store, fake):
+    from backend.schemas import Connection
+    for name, key in [('Personal', 'key-1'), ('Work', 'key-2')]:
+        store.save_connection(Connection(name=name, model='vendor/model', base_url='https://openrouter.ai/api/v1', api_key=key).model_dump(), user_id=store.user_id)
+    assert router_client.post('/api/model-providers/migrate').json()['moved'] == 0
+    assert all(c['base_url'] == 'https://openrouter.ai/api/v1' for c in store.list_connections(store.user_id))
+    assert fake.accounts == []
+
+
+def test_direct_openrouter_migrates_preserving_models_and_removing_only_the_placeholder(router_client, store, fake):
+    from backend.schemas import Connection
+    placeholder = store.save_connection(Connection(name='OpenRouter', model='Openrouter', base_url='https://openrouter.ai/api/v1', api_key='upstream-secret').model_dump(), user_id=store.user_id)
+    real = store.save_connection(Connection(name='OpenRouter · Free model', model='cohere/free:free', base_url='https://openrouter.ai/api/v1', api_key='upstream-secret', free=True, priority=3).model_dump(), user_id=store.user_id)
+    result = router_client.post('/api/model-providers/migrate')
+    assert result.status_code == 200 and result.json()['moved'] == 1
+    assert store.get_connection(placeholder['id'], store.user_id) is None
+    moved = store.get_connection(real['id'], store.user_id, True)
+    assert moved['model'] == 'openrouter/cohere/free:free' and moved['priority'] == 3 and moved['free']
+    assert store.decrypt(moved) == 'sk-9r'
+    assert moved['base_url'] == f'http://leo-router-{store.user_id}:20128/v1'
+    assert router_client.post('/api/model-providers/migrate').json()['moved'] == 0
+
+
+def test_other_users_cannot_see_or_select_router_models(router_client, store, fake):
+    router_client.post('/api/model-providers/connect', json={'provider': 'openrouter', 'api_key': 'upstream-secret'})
+    user = store.create_user('seconduser', Auth.hash_password('long-enough-password'))
+    with TestClient(router_client.app) as other:
+        other.cookies.set('leo_session', Auth(store, store.config).create_session(user['id']))
+        assert other.get('/api/accounts').json()['accounts'] == []
+        assert other.get('/api/model-providers/openrouter/models').status_code == 502
+        assert other.post('/api/model-providers/openrouter/models', json={'models': ['openrouter/cohere/free:free']}).status_code == 502
+
+
 def test_each_user_signs_in_on_their_own_router(router_client, store, fake, sandbox):
     assert router_client.get('/api/accounts').json()['accounts'] == [] and sandbox.ensured == [], 'no router until a sign-in'
     started = router_client.post('/api/accounts/signin', json={'provider': 'github', 'accept_risk': True}).json()
@@ -183,7 +347,7 @@ def test_device_sign_in_adds_models_with_one_key(router_client, store, fake):
     assert model['model'] == 'gh/gpt-4.1' and model['name'] == 'GitHub Copilot · gpt-4.1' and model['has_key'] and model['free']
     assert model['base_url'] == f'http://leo-router-{store.user_id}:20128/v1'
     accounts = router_client.get('/api/accounts').json()
-    assert accounts['available'] and accounts['accounts'] == [{'id': 'a2', 'provider': 'github', 'name': 'GitHub Copilot', 'label': 'octo'}]
+    assert accounts['available'] and accounts['accounts'] == [{'id': 'a2', 'provider': 'github', 'name': 'GitHub Copilot', 'label': 'octo', 'active': True, 'auth_type': 'oauth'}]
 
 
 def test_the_cli_signs_in_to_an_account_with_its_device_token(router_client, store, fake):
