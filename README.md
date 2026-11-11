@@ -13,6 +13,7 @@ Let L.E.O. route the work, track usage, and coordinate agents.
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![Astro 7](https://img.shields.io/badge/Astro-7-BC52EE)
 ![Local first](https://img.shields.io/badge/local-first-525252)
+[![MIT License](https://img.shields.io/badge/license-MIT-4B8B60)](LICENSE)
 
 [Get started](#get-started) · [Connect models](#connect-models) · [CLI](#leocode) · [How it works](#how-it-works) · [Verification](#verification) · [Docs](#documentation)
 
@@ -37,10 +38,54 @@ use **L.E.O.C.O.D.E** for coding in your terminal. Both share routing, fallback,
 
 ## Get started
 
-### Docker Compose — managed model connections
+### Personal use — clone and run
 
-Use this setup for provider API keys, account sign-ins through 9Router, and optional server sandboxes.
-You need Docker with Compose. Run these commands from a checkout of this repository:
+Install [Node.js 24 LTS](https://nodejs.org/) and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+On Windows, use WSL2 for this setup. On macOS and Linux, use your usual terminal.
+
+```bash
+git clone https://github.com/albertleooonardi/L.E.O.git
+cd L.E.O
+./start.sh
+```
+
+The first launch runs `./setup.sh`: it installs the Python environment, builds the app, installs a pinned local
+9Router runtime, and installs the `leocode` command. No Docker or separate database service is required.
+Open **[127.0.0.1:8000](http://127.0.0.1:8000)**, create your account, and connect a model under **Settings → Models**.
+Your password and login belong to this local installation. Google/GitHub login is optional and needs your own OAuth setup.
+
+Keep the app terminal open. In another terminal:
+
+```bash
+cd /path/to/your-project
+leocode
+```
+
+Approve the CLI device on your local L.E.O. website. If `leocode` is not on PATH, run
+`/path/to/L.E.O/leocode` instead, or use `uv tool update-shell` and reopen your terminal.
+**Ctrl+C** stops the app, worker, and its local model routers; start it again to resume using your saved data.
+
+| Local data | Location |
+| --- | --- |
+| Accounts, password hashes, chats, settings, model connections, and app usage | `.leo/leo.db` (SQLite) |
+| Encryption key for saved L.E.O. credentials | `.leo/secret.key` |
+| Each user's provider accounts, router database, and router logs | `.leo/routers/<user-id>/` |
+| CLI sessions, synced models, and CLI usage | `~/.config/leo-cli/` (`LEO_CLI_HOME` overrides it) |
+| CLI device token and encryption key | OS keychain, with an owner-only local file fallback |
+
+Back up the entire `.leo/` directory with L.E.O. stopped; keep it private. It is excluded from Git.
+Use `./start.sh /path/to/private-data` to choose another app data directory.
+If port 8000 is busy, use `LEO_PORT=8001 ./start.sh` and `leocode --server http://localhost:8001`.
+Data stays on the machine running L.E.O.; prompts still go to the model providers and external tools you choose.
+Use a local model endpoint for local inference. Internet access is needed for initial dependency downloads and hosted providers.
+
+After updating with `git pull`, run `./setup.sh` again, then `./start.sh`.
+Web search is optional; see [SearXNG setup](docs/configuration.md#configuration-reference).
+
+### Docker Compose — host on your server
+
+The Docker version is retained for self-hosting, multiple accounts, and optional server sandboxes.
+You need Docker with Compose. From a checkout:
 
 ```bash
 cp .env.example .env
@@ -48,7 +93,7 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-Open **[localhost:8000](http://localhost:8000)**, create your L.E.O. account, then connect a provider in
+Open **[localhost:8000](http://localhost:8000)** on that machine, create your L.E.O. account, then connect a provider in
 **Settings → Models**. You choose your L.E.O. password during account creation; there is no shared login password.
 The database password in `.env` is separate.
 
@@ -60,27 +105,9 @@ docker compose down                  # stop the stack
 
 Compose provides the API, background worker, PostgreSQL, SearXNG, and sandbox service. Each user's 9Router is
 created on demand. Persistent data uses Docker volumes; see [configuration and backups](docs/configuration.md).
-
-<details>
-<summary><strong>Run from source — local or custom model endpoints</strong></summary>
-
-You need Python 3.11+, [uv](https://docs.astral.sh/uv/), and Node.js 22.23.4+ (Node 24 recommended).
-
-```bash
-./start.sh
-```
-
-The launcher installs dependencies on first use, builds the frontend, starts the API and worker, and opens
-**http://127.0.0.1:8000**. Ctrl+C stops the processes. Accounts, encrypted keys, chats, and settings live in `.leo/`.
-Use `./start.sh .leo-bench` for a separate data directory.
-
-Choose **Settings → Models → Connect provider → Local or custom server** for Ollama, LM Studio, vLLM, or another
-compatible endpoint. Managed provider setup through 9Router requires the Compose sandbox service.
-
-Web search is optional: the launcher uses an existing SearXNG on port 8888, or starts it if installed in the workspace.
-See [web search setup](docs/configuration.md#configuration-reference).
-
-</details>
+The default ports bind to loopback. For a public domain, configure the exact host/origin, `LEO_API_TOKEN`,
+`LEO_PUBLIC_URL`, and an HTTPS reverse proxy using the [server hosting guide](docs/self-hosting.md).
+Accounts and databases stay on your server; the local and Docker setups use separate stores by default.
 
 ## Connect models
 
@@ -102,6 +129,10 @@ Account availability and provider restrictions apply; see the [connection refere
 
 ### Where is 9Router running?
 
+**Personal install:** L.E.O. starts one loopback-only Node process per user on a saved available port. Its database is
+under `.leo/routers/<user-id>/db/`, its address is recorded in `endpoint.json`, and diagnostics go to `router.log`.
+The app restores these processes on restart. There is no separate router password to enter in the normal connection flow.
+
 In the managed Compose setup, **each user has a separate Docker container**, named `leo-router-<user-id>`.
 It listens on port **20128 inside Docker**, on the `leo-routers` network. Its port is not published to your computer,
 so `http://localhost:20128/dashboard` is not the managed router's dashboard URL.
@@ -114,7 +145,7 @@ docker logs --tail=100 leo-router-USER_ID
 
 In Models settings, **Refresh** checks connectivity. Then send a short message and inspect **Usage** to verify that a
 model request completed. A healthy router can still encounter an upstream rate limit or an expired provider sign-in.
-If the router is unavailable, check Docker and `sandboxd` logs before reconnecting an account.
+If the router is unavailable, check the local `router.log`, or Docker and `sandboxd` logs for a hosted install.
 
 Existing direct providers can use **Move to 9Router** while preserving model settings and usage history. Local and
 custom endpoints remain available. See [provider setup and credentials](docs/configuration.md).
@@ -124,7 +155,7 @@ custom endpoints remain available. See [provider setup and credentials](docs/con
 The same engine, working in your project folder. Sign in to your L.E.O. server, sync models, and describe a task.
 
 ```bash
-uv tool install ./leo-cli
+# ./start.sh installs this command on first use; ./setup.sh installs it separately.
 cd my-project
 leocode
 ```
@@ -202,7 +233,7 @@ Latest recorded audit: **11 November 2026**.
 
 | Area | Observed result |
 | --- | --- |
-| Automated suite | **422 passed**, 9 optional Docker sandbox tests skipped. |
+| Automated suite | **426 passed**, 9 optional Docker sandbox tests skipped, after the personal-install changes. |
 | Live 9Router calls | Native tool calls passed for Codex, Grok, and three OpenRouter models. |
 | Live TSATM | Root → manager → worker completed across three tiers; all 8 structural checks passed. |
 | Generated code | 6 worker tests and 2 independent acceptance tests passed. |
@@ -214,6 +245,7 @@ outrank a stronger fallback model. The audit reproduces both. The live tree used
 efficiency against a single strong model remains unproven.
 
 [Full QA report](docs/qa/algorithm-verification-2026-11-11.md) ·
+[Personal-install verification](docs/qa/personal-install-2026-11-11.md) ·
 [Machine-readable evidence](docs/qa/algorithm-verification-2026-11-11.json) ·
 [Historical benchmarks](docs/benchmarks.md)
 
@@ -232,7 +264,7 @@ Current priorities:
 ## Development
 
 ```bash
-make install                         # Python dependencies + frontend build
+make install                         # personal setup: dependencies, router, app build, and CLI
 make check                           # backend/CLI tests + frontend type check
 make build                           # frontend production build
 ```
@@ -253,6 +285,7 @@ API documentation is available at `/api/docs` while the server is running.
 | [CLI handbook](leo-cli/README.md) | Installation, sign-in, commands, approvals, skills, and MCP. |
 | [Architecture and algorithms](docs/architecture.md) | HEAD, ranking, dependency plans, TSATM, durability, stack, and source map. |
 | [Configuration and operations](docs/configuration.md) | Accounts, providers, search, limits, MCP, deployment, security, and backups. |
+| [Server hosting](docs/self-hosting.md) | Docker setup, HTTPS, persistent volumes, backups, and updates. |
 | [Algorithm QA](docs/qa/algorithm-verification-2026-11-11.md) | Live evidence, known defects, scope, and reproduction. |
 | [Historical benchmarks](docs/benchmarks.md) | Previous comparisons, methodology, and benchmark commands. |
 | [Screenshot gallery](docs/gallery.md) | Chat, settings, usage, and terminal examples with context. |
@@ -263,4 +296,5 @@ See [MCP setup](docs/configuration.md#configuration-reference).
 
 ---
 
-<sub>No license has been selected. All rights remain reserved by the author until a license is added.</sub>
+**License:** [MIT](LICENSE). You may use, modify, and redistribute L.E.O., including commercially, under that license.
+Dependencies and connected providers retain their own licenses and terms; see [third-party notices](THIRD_PARTY.md).

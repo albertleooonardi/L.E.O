@@ -34,7 +34,7 @@ flowchart TB
         CON["Connectors<br/>remote MCP servers"]
     end
 
-    subgraph Docker["Docker only"]
+    subgraph Docker["Managed runtime"]
         direction LR
         SBD["sandboxd<br/>the only Docker socket"]
         SBX["Workspace sandboxes<br/>non-root, no capabilities"]
@@ -54,7 +54,8 @@ flowchart TB
     ENG --> SX & WM & CON
     ENG -->|agent mode| SBD
     SBD --> SBX --> EG
-    SBD --> R9
+    SBD -->|Docker| R9
+    LOCAL["Personal launcher<br/>local Node child processes"] -->|without Docker| R9
     CLI -. "same engine in-process, on your folder;<br/>device-authenticated calls through L.E.O. for 9Router models" .-> ENG
 ```
 
@@ -130,6 +131,7 @@ sequenceDiagram
 | [`backend/api.py`](../backend/api.py), [`auth.py`](../backend/auth.py), [`oauth.py`](../backend/oauth.py) | HTTP API, sessions, password and Google/GitHub/OIDC sign-in, CLI device sign-in |
 | [`backend/worker.py`](../backend/worker.py), [`dev.py`](../backend/dev.py) | Durable worker; local launcher for API + worker |
 | [`backend/sandbox.py`](../backend/sandbox.py), [`sandboxd.py`](../backend/sandboxd.py), [`egress.py`](../backend/egress.py) | Agent sandboxes: client, container daemon, egress allowlist proxy |
+| [`backend/local_router.py`](../backend/local_router.py) | Personal runtime: loopback-only 9Router child processes, saved ports, lifecycle, and local data |
 | [`backend/ninerouter.py`](../backend/ninerouter.py) | Per-user 9Router for API-key providers and subscription sign-ins (ChatGPT/Codex, Copilot, Kiro, …) |
 | [`backend/mcp_server.py`](../backend/mcp_server.py) | L.E.O. as an MCP server |
 | [`leo-cli/leo_cli/`](../leo-cli/leo_cli) | L.E.O.C.O.D.E: `app.py` (entry), `ui.py` (prompt and rendering), `sessions.py`, `workspace.py` (your folder), `policy.py` (approvals), `treeview.py`, `account.py` (sign-in and sync), `mcp.py`, `skills.py`, `mentions.py` |
@@ -322,5 +324,5 @@ are **at least once**: a crash during a request can send it again, so this is no
 | Distribution | **uv** (workspace), **hatchling**, an **npm** launcher | `uv tool install`, `npm i -g leo-orchestrator` |
 | Tools | **SearXNG**, Wikimedia Commons API, **MCP** (Streamable HTTP client, stdio server) | Search, photos, connectors, integration with other agents |
 | Containers | **Docker Compose**: API, worker, PostgreSQL, SearXNG, `sandboxd`, egress proxy, sandbox image; optional **gVisor** | Deployment and agent sandboxes |
-| Managed model connections | **[9Router](https://github.com/decolua/9router)**, one container per user | API-key providers and supported account sign-ins |
+| Managed model connections | **[9Router](https://github.com/decolua/9router)**, one local process or Docker container per user | API-key providers and supported account sign-ins |
 | Tests | **pytest**, **pytest-asyncio**, `httpx.MockTransport`, a mock provider and a mock MCP server | Deterministic unit/integration tests; optional live Docker sandbox tests |

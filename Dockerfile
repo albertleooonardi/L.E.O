@@ -8,8 +8,8 @@ RUN npm run build
 FROM python:3.12-slim AS python
 COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/uv
 WORKDIR /app
-COPY pyproject.toml uv.lock ./
-COPY leo-cli/pyproject.toml ./leo-cli/pyproject.toml
+COPY pyproject.toml uv.lock LICENSE THIRD_PARTY.md ./
+COPY leo-cli/pyproject.toml leo-cli/LICENSE ./leo-cli/
 # Dependencies only (the server extra, no CLI); the code is copied in later and run from /app.
 RUN UV_HTTP_TIMEOUT=300 uv sync --frozen --no-dev --extra server --no-install-project --no-install-workspace
 ENV PATH="/app/.venv/bin:$PATH"

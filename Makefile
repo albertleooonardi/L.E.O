@@ -1,8 +1,6 @@
 .PHONY: install start dev frontend check test build
 install:
-	uv sync --frozen
-	npm ci --prefix frontend
-	npm run build --prefix frontend
+	./setup.sh
 start:
 	./start.sh
 dev:

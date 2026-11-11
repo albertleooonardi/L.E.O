@@ -11,6 +11,18 @@ Prompts for these models pass through the server, which does not store them. `/m
 Local or custom endpoints and older direct connections call their provider directly; their synced keys are encrypted
 locally with a key in the OS keychain. Transcripts stay on this computer. Usage totals go back to the server's Usage page.
 
+## Use with a personal L.E.O. install
+
+Clone the repository, then run `./start.sh` (Node.js 24 LTS and uv required). First launch installs the app, a local
+9Router runtime, and the CLI. Create your account at `http://localhost:8000`, connect your models, and leave the app
+running. In another terminal, enter your project and run `leocode`. If it is not on PATH, use the checkout's
+`/path/to/L.E.O/leocode` launcher. Approve device login on your own local website. No Docker, hosted L.E.O. account,
+or external database is needed. App accounts and data are saved in the checkout's `.leo/` directory; CLI sessions
+remain in the CLI's own local data directory. Hosted model requests still go to their providers.
+
+For a shared server, [Docker hosting](../docs/self-hosting.md) remains available; use `leocode login --server URL`
+to choose it. Full setup: [README](../README.md#get-started).
+
 ## Install
 
 You need Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). On Windows you also need
@@ -132,7 +144,7 @@ files, and `@` paths. The status bar at the bottom shows every session, what the
 **Adding models.** `/models add` (or `leocode models add`) shares the connections in Settings → Models:
 - **Sign in with an account:** ChatGPT, GitHub Copilot, Kiro, Kimi, Kilo Code, Qoder, Grok CLI, or Z.ai GLM Coding. Your
   browser opens the sign-in page, and leocode shows the code when the page asks for one. The account's models then come down.
-  This needs a server started with Docker Compose, which runs the sign-ins; leocode says so otherwise.
+  This uses the local router started by `./start.sh`, or the router service of a Docker-hosted server.
 - **Connected providers:** choose more models without entering a key again.
 - **Connect with an API key:** choose OpenRouter, Gemini, OpenAI, Anthropic, DeepSeek, Groq, Mistral, xAI, or Cohere.
   9Router validates and stores the key. OpenRouter offers free models first; paid models are available under **All models**.

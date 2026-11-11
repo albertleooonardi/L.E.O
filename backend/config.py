@@ -43,6 +43,8 @@ class Config:
     # sandboxd, which runs each user's model router and (with server_agent) agent workspaces; docker compose sets both.
     sandbox_url: str = field(default_factory=lambda: os.getenv("LEO_SANDBOX_URL", "").rstrip("/"))
     sandbox_token: str = field(default_factory=lambda: os.getenv("LEO_SANDBOX_TOKEN", ""), repr=False)
+    # Local launcher: a pinned npm 9Router server, managed as loopback-only child processes instead of Docker.
+    local_router_entry: str = field(default_factory=lambda: os.getenv("LEO_LOCAL_ROUTER_ENTRY", ""))
     frontend_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[1] / "frontend/dist")
 
     def __post_init__(self):

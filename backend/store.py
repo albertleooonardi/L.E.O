@@ -373,6 +373,10 @@ class Store:
 
     # -- per-user 9Router -------------------------------------------------
 
+    def router_users(self):
+        with self.engine.connect() as db:
+            return list(db.execute(select(routers.c.user_id)).scalars())
+
     def get_router(self, user_id: str) -> dict | None:
         """{url, password} of the user's own 9Router, or None before their first model-account sign-in."""
         with self.engine.connect() as db:

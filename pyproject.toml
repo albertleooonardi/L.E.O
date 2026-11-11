@@ -3,6 +3,8 @@ name = "leo-orchestrator"
 version = "0.1.0"
 description = "A local-first, configurable multi-model orchestrator"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 # The engine (routing, orchestration, agents, store) that the server and L.E.O CLI share.
 dependencies = [
   "httpx>=0.28,<1",

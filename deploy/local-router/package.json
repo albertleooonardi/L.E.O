@@ -1,0 +1,9 @@
+{
+  "name": "leo-local-router",
+  "private": true,
+  "version": "1.0.0",
+  "license": "MIT",
+  "description": "Pinned 9Router runtime for L.E.O. personal installs",
+  "engines": { "node": ">=22.23.4" },
+  "dependencies": { "9router": "0.5.112" }
+}

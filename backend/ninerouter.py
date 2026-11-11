@@ -74,7 +74,7 @@ class NineRouter:
                         self.cookies = httpx.Cookies(client.cookies)
                     response = await client.request(method, path, **kwargs)
             except httpx.HTTPError as exc:
-                raise RouterUnavailable("Your model router is not reachable; check that the sandboxd service is running") from exc
+                raise RouterUnavailable("Your model router is not reachable; check the L.E.O. launcher or Docker sandboxd service") from exc
             except ValueError as exc:
                 raise RouterError("9Router returned an unreadable response") from exc
             if response.status_code != 401:

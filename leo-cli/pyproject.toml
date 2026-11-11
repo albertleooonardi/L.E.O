@@ -3,6 +3,8 @@ name = "leo-cli"
 version = "0.1.0"
 description = "L.E.O.C.O.D.E: the multi-agent LLM Efficiency Orchestrator in your terminal"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
   "leo-orchestrator",
   "rich>=13.7,<15",

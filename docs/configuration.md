@@ -48,15 +48,15 @@ in `.env` (see `.env.example`). Register this callback URL with each provider:
 <details>
 <summary><b>Connect models</b></summary>
 
-**Sign in with an account (Docker Compose).** **Settings → Models → Connect provider → Sign in** offers account sign-in: ChatGPT (Codex),
+**Sign in with an account (personal or Docker install).** **Settings → Models → Connect provider → Sign in** offers account sign-in: ChatGPT (Codex),
 GitHub Copilot, Kiro, Kimi, Kilo Code, Qoder, Grok CLI, and Z.ai GLM Coding. Behind it, each user gets their own
-[9Router](https://github.com/decolua/9router) container (pinned, no host port), which keeps and refreshes the tokens
-and serves the models. Routers are per user because a 9Router key reaches every account signed in on that router.
+[9Router](https://github.com/decolua/9router): a loopback-only Node process in personal installs, or a private container
+in Docker. It keeps and refreshes tokens and serves the models. Routers are per user because a 9Router key reaches every account signed in on that router.
 9Router warns that ChatGPT (Codex), GitHub Copilot, and Kiro do not license subscription sign-in for router use and may
 restrict such accounts; L.E.O. asks you to accept that first. Claude subscription sign-in is not offered (Anthropic
 only allows those tokens in its own apps), so use a Claude API key.
 
-**Or use an API key (Docker Compose):** **Connect provider → API key**, choose your provider, and paste the key.
+**Or use an API key:** **Connect provider → API key**, choose your provider, and paste the key.
 9Router validates and stores the upstream credential; L.E.O. uses a separate router key for model calls. Choose models
 from the searchable catalog; OpenRouter starts with **Free only** selected. Providers appear once, with their enabled
 models inside. **Refresh** checks router connectivity; it does not make a generation request. Existing direct providers
@@ -68,7 +68,7 @@ Use a model's **Edit** action to adjust its routing profile or prices. Paid mode
 | --- | --- | --- |
 | Ollama | `http://localhost:11434/v1`, Chat Completions | General · light |
 | vLLM / LM Studio | Your server URL (LM Studio is usually port 1234) | General · standard |
-| 9Router | Managed per user by Compose; outside Docker `http://localhost:20128/v1` | Set per model |
+| 9Router | Managed per user: a saved loopback port locally, or private port 20128 in Docker | Set per model |
 | OpenRouter | `https://openrouter.ai/api/v1` | Set per model |
 | OpenAI / GPT | `https://api.openai.com/v1`; Responses | Coding, Backend, Reasoning · strong |
 | Anthropic / Claude | `https://api.anthropic.com/v1`; Anthropic Messages | Coding, Backend, Frontend, Reasoning · strong |
@@ -207,3 +207,31 @@ redirect). In **Settings → Web search** use `http://searxng:8080`, and reach h
 `http://host.docker.internal:11434/v1`. Every setting is documented in [`.env.example`](../.env.example).
 
 </details>
+
+## Personal installation
+
+`./start.sh` runs `./setup.sh` on a fresh checkout. Setup uses the lockfiles to install Python and frontend
+dependencies, downloads the pinned local 9Router package, builds the app, and installs the CLI from this checkout.
+Node.js 22.23.4+ and uv must be on PATH (Node 24 LTS recommended). Use WSL2 for the launcher on Windows.
+
+The app listens only on `127.0.0.1:8000`. Accounts, hashed passwords, chats, settings, model connection keys, and
+usage live in `.leo/leo.db`. Each user's router uses `.leo/routers/<user-id>/db/data.sqlite`; its saved port is in
+`endpoint.json` and its diagnostics are in `router.log`. App shutdown stops these child processes while preserving
+their data. They are restored before queued work starts on the next launch. Provider OAuth sessions are saved by
+9Router; a sign-in interrupted before completion may need to be started again.
+
+The CLI's local state defaults to `~/.config/leo-cli/` on Unix-like systems and `%APPDATA%\leo-cli\` on Windows.
+`LEO_CLI_HOME` selects another directory. A secret key and device token go to the OS keychain, or a private local
+file when no keychain is available. No L.E.O. cloud service is involved; hosted model calls still reach your providers.
+
+Run `./start.sh /path/to/private-data` for another app store. Stop L.E.O. and back up that entire directory, including
+its encryption key and per-user routers. The PostgreSQL Docker deployment uses separate volumes; see
+[server hosting](self-hosting.md) for backups and public access.
+
+To skip the managed router runtime and use only local/custom endpoints, run `LEO_LOCAL_ROUTER=0 ./setup.sh` and
+`LEO_LOCAL_ROUTER=0 ./start.sh`. To run the processes separately with local routers, set `LEO_LOCAL_ROUTER_ENTRY` to
+the absolute path of `deploy/local-router/node_modules/9router/app/server.js` for the API process. Use only one API
+process for this personal runtime. Docker deployments keep using sandboxd and do not set this variable.
+
+`./setup.sh` can be rerun after `git pull`; it updates dependencies and the frontend. `./leocode` runs the checkout's
+CLI when the installed command is not on PATH, preserving the project directory from which it is invoked.

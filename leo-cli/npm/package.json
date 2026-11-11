@@ -1,6 +1,7 @@
 {
   "name": "leo-orchestrator",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "L.E.O CLI: the multi-agent LLM Efficiency Orchestrator in your terminal (installs and runs the Python CLI with uv)",
   "bin": {
     "leocode": "bin/leo.js",
@@ -8,7 +9,8 @@
   },
   "files": [
     "bin/leo.js",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"

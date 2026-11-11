@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Run this checkout's CLI from any project, even when uv's tool bin directory is not on PATH.
+set -euo pipefail
+LEO_CHECKOUT="$(cd "$(dirname "$0")" && pwd)"
+# Preserve the caller's working directory; --project locates the Python environment only.
+exec uv run --frozen --project "$LEO_CHECKOUT" leocode "$@"

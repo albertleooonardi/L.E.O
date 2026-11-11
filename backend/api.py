@@ -29,6 +29,7 @@ from .mcp_client import MCPClient, MCPError, NeedsAuth, check_url
 from .oauth import OAuth, OAuthError, email_allowed, pkce_pair
 from .ninerouter import ACCOUNTS, KEY_PROVIDERS, MODEL_PROVIDERS, RISK_NOTICE, NineRouter, RouterError, RouterUnavailable, SignIns, serve_callback
 from .model_connections import ModelConnections
+from .local_router import LocalRouters
 from .providers import ProviderError, list_models
 from .router import choose_mode, classify, rank
 from .sandbox import MAX_IMPORT_BYTES, Sandbox, SandboxError, tar_to_zip, workspace_path, zip_to_tar
@@ -85,22 +86,26 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
     oauth = oauth or OAuth(config)
     connectors = Connectors(store, mcp_transport)
     sandbox = sandbox or (Sandbox(config.sandbox_url, config.sandbox_token) if config.sandbox_url else None)
+    local_routers = LocalRouters(config.data_dir, config.local_router_entry) if config.local_router_entry and not sandbox else None
+    router_manager = sandbox or local_routers
+    router_locks = {}
     auth = Auth(store, config)
     async def router_for(user_id, create=False):
         """The user's own 9Router. `create` starts it (creating it on first use); otherwise None if they have none."""
-        saved = store.get_router(user_id)
-        if not saved and not create:
-            return None
-        if not saved:
-            saved = {"password": secrets.token_urlsafe(24)}
-            saved["url"] = await sandbox.ensure_router(user_id, saved["password"])
-            store.save_router(user_id, saved["url"], saved["password"])
-        elif create:  # Removed after its last account was disconnected; the volume kept everything else.
-            await sandbox.ensure_router(user_id, saved["password"])
-        router = NineRouter(saved["url"], saved["password"])
-        if create:
-            await router.wait_ready()
-        return router
+        async with router_locks.setdefault(user_id, asyncio.Lock()):
+            saved = store.get_router(user_id)
+            if not saved and not create:
+                return None
+            if not saved:
+                saved = {"password": secrets.token_urlsafe(24)}
+                saved["url"] = await router_manager.ensure_router(user_id, saved["password"])
+                store.save_router(user_id, saved["url"], saved["password"])
+            elif create:  # Removed after its last account was disconnected; persisted data remains.
+                await router_manager.ensure_router(user_id, saved["password"])
+            router = NineRouter(saved["url"], saved["password"])
+            if create:
+                await router.wait_ready()
+            return router
 
     model_connections = ModelConnections(store, router_for)
 
@@ -126,8 +131,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
                 reasoning=m["reasoning"]).model_dump(), user_id=user_id))
         return {"account": account.get("email") or account.get("displayName") or "", "added": len(created)}
 
-    # Model-account sign-in needs sandboxd, which runs each user's router.
-    signins = SignIns(router_for, add_account_models) if sandbox else None
+    signins = SignIns(router_for, add_account_models) if router_manager else None
 
     async def adopt_legacy_routers():
         """Models signed in through the shared 9router of earlier versions move to the user's own router, which
@@ -146,20 +150,29 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
 
     @asynccontextmanager
     async def lifespan(app):
-        if sandbox:
-            app.state.adopting = asyncio.create_task(adopt_legacy_routers())
         callback = None
-        if signins and config.router9_callback_port:
-            try:
-                callback = await serve_callback(signins, config.router9_callback_port)
-            except OSError as exc:  # Sign-in still works for device-code providers.
-                print(f"L.E.O.: ChatGPT (Codex) sign-in is off; port {config.router9_callback_port} is unavailable ({exc})")
-        yield
-        if sandbox and not app.state.adopting.done():
-            app.state.adopting.cancel()
-        if callback:
-            callback.close()
-        store.engine.dispose()
+        try:
+            if local_routers:
+                # Restore before accepting requests, including models called directly by the worker.
+                for uid in store.router_users():
+                    await router_for(uid, create=True)
+            if sandbox:
+                app.state.adopting = asyncio.create_task(adopt_legacy_routers())
+            if signins and config.router9_callback_port:
+                try:
+                    callback = await serve_callback(signins, config.router9_callback_port, host="127.0.0.1" if local_routers else "0.0.0.0")
+                except OSError as exc:  # Sign-in still works for device-code providers.
+                    print(f"L.E.O.: ChatGPT (Codex) sign-in is off; port {config.router9_callback_port} is unavailable ({exc})")
+            yield
+        finally:
+            if sandbox and not app.state.adopting.done():
+                app.state.adopting.cancel()
+            if callback:
+                callback.close()
+                await callback.wait_closed()
+            if local_routers:
+                await local_routers.close()
+            store.engine.dispose()
 
     app = FastAPI(title="L.E.O.", version="0.1.0", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json")
     app.state.store = store
@@ -480,7 +493,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
 
     def require_router():
         if not signins:
-            raise HTTPException(503, "Model-account sign-in needs the sandbox service; start L.E.O. with docker compose")
+            raise HTTPException(503, "Model connections need the local router (./setup.sh then ./start.sh) or the Docker sandbox service")
         return signins
 
     @app.get("/api/accounts")
@@ -491,7 +504,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
         key_providers = [{"id": key, "name": v["name"], "prefix": v["prefix"]} for key, v in KEY_PROVIDERS.items()]
         catalog = {"key_providers": key_providers, "provider_prefixes": {key: v["prefix"] for key, v in MODEL_PROVIDERS.items()}}
         if not signins:
-            return {"available": False, "error": "Model-account sign-in needs the sandbox service; start L.E.O. with docker compose",
+            return {"available": False, "error": "Model connections need the local router (./setup.sh then ./start.sh) or the Docker sandbox service",
                     "providers": offered, "accounts": [], "router_status": "unavailable", **catalog}
         try:
             uid = account(user)["id"]
@@ -601,7 +614,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
                     store.delete_connection(c["id"], user.id)
                     removed += 1
         if len(accounts) == 1:
-            await sandbox.delete_router(user.id)
+            await router_manager.delete_router(user.id)
         return {"ok": True, "removed_models": removed}
 
     @app.get("/api/settings")
@@ -948,9 +961,9 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
                 upstream = await send()
             except httpx.ConnectError:
                 # Nothing listens: the router container stopped (Docker restarted, or it crashed). Start it, then retry while it boots.
-                if not sandbox:
+                if not router_manager:
                     raise
-                await sandbox.ensure_router(uid, router["password"])
+                await router_manager.ensure_router(uid, router["password"])
                 deadline = time.monotonic() + ROUTER_BOOT_SECONDS
                 while True:
                     try:
@@ -960,7 +973,7 @@ def create_app(config=None, store=None, sandbox=None, oauth=None, mcp_transport=
                         if time.monotonic() > deadline:
                             raise
                         await asyncio.sleep(1)
-        except SandboxError as exc:
+        except (SandboxError, RouterError) as exc:
             await client.aclose()
             raise HTTPException(502, f"{ROUTER_UNREACHABLE}, and starting it again failed: {exc}") from exc
         except httpx.HTTPError as exc:

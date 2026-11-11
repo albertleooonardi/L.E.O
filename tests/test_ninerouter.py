@@ -152,6 +152,32 @@ def test_accounts_off_without_sandbox(client):
     assert client.post('/api/accounts/signin', json={'provider': 'github'}).status_code == 503
 
 
+def test_personal_install_connects_without_docker_and_restores_routers(store, fake, monkeypatch):
+    """Same UI/API setup works with a local runtime, including persistence and CLI sync after a restart."""
+    from unittest.mock import AsyncMock
+    manager = FakeSandbox(fake)
+    manager.close = AsyncMock()
+    monkeypatch.setattr(api_module, 'LocalRouters', lambda *args: manager)
+    store.config.local_router_entry = 'local-runtime/server.js'
+    store.config.router9_callback_port = 0
+    with TestClient(create_app(store.config, store)) as client:
+        client.cookies.set('leo_session', store.user_session_token)
+        assert client.get('/api/accounts').json()['available']
+        assert client.post('/api/model-providers/connect', json={'provider': 'openrouter', 'api_key': 'fake-upstream'}).status_code == 201
+        assert client.post('/api/model-providers/openrouter/models', json={'models': ['openrouter/cohere/free:free']}).status_code == 201
+        device = client.post('/api/cli/device', json={'device_name': 'local CLI'}).json()
+        client.post(f"/api/cli/device/{device['user_code']}", json={'approve': True})
+        token = client.post('/api/cli/token', json={'device_code': device['device_code']}).json()['token']
+        headers = {'Authorization': 'Bearer ' + token}
+        assert client.get('/api/cli/sync', headers=headers).json()['relayed'][0]['model'] == 'openrouter/cohere/free:free'
+    first_starts = len(manager.ensured)
+    with TestClient(create_app(store.config, store)) as client:
+        client.cookies.set('leo_session', store.user_session_token)
+        assert len(manager.ensured) > first_starts, 'saved routers start before the API serves calls'
+        assert client.get('/api/cli/sync', headers=headers).json()['relayed'][0]['model'] == 'openrouter/cohere/free:free'
+    assert manager.close.await_count == 2
+
+
 @pytest.mark.parametrize('path', ['/api/accounts', '/api/cli/accounts'])
 def test_account_list_restores_a_missing_router(router_client, store, fake, sandbox, monkeypatch, path):
     from backend.ninerouter import RouterUnavailable
